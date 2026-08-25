@@ -1,0 +1,2058 @@
+import React, { useState, useEffect, useRef } from "react";
+import { supabase } from "./supabaseClient";
+import {
+  LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
+  BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
+  Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw
+} from "lucide-react";
+
+/* ---------------------------------- helpers ---------------------------------- */
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+const daysUntil = (iso) => {
+  const d = new Date(iso + "T00:00:00");
+  const t = new Date(todayISO() + "T00:00:00");
+  return Math.round((d - t) / 86400000);
+};
+const addDays = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+const STATUS = [
+  { id: "todo", label: "To Do", color: "var(--muted)" },
+  { id: "progress", label: "In Progress", color: "var(--gold)" },
+  { id: "review", label: "In Review", color: "var(--teal)" },
+  { id: "done", label: "Done", color: "var(--good)" },
+];
+const PRIORITY = [
+  { id: "low", label: "Low", color: "var(--teal)" },
+  { id: "medium", label: "Medium", color: "var(--gold)" },
+  { id: "high", label: "High", color: "var(--alert)" },
+];
+const CONTENT_STATUS = [
+  { id: "draft", label: "Draft", color: "var(--muted)" },
+  { id: "review", label: "Needs Review", color: "var(--gold)" },
+  { id: "approved", label: "Approved", color: "var(--teal)" },
+  { id: "published", label: "Published", color: "var(--good)" },
+];
+const CAL_STATUS = [
+  { id: "planned", label: "Planned", color: "var(--muted)" },
+  { id: "ready", label: "Ready to post", color: "var(--gold)" },
+  { id: "posted", label: "Posted", color: "var(--good)" },
+  { id: "skipped", label: "Skipped", color: "var(--alert)" },
+];
+
+function buildExamples() {
+  return {
+    tasks: [
+      { id: uid(), title: "Example: Cut Reels for this week's post", description: "This is what a duty looks like — reassign it to a teammate and drag it through the board.", assignee: "Example", dueDate: todayISO(), status: "progress", priority: "high" },
+      { id: uid(), title: "Example: Write caption copy", description: "Duties move through columns: To Do → In Progress → In Review → Done.", assignee: "Example", dueDate: addDays(1), status: "todo", priority: "medium" },
+      { id: uid(), title: "Example: Approve final thumbnail", description: "", assignee: "Example", dueDate: addDays(2), status: "review", priority: "low" },
+      { id: uid(), title: "Example: Publish launch post", description: "Overdue duties show up in red, like this one.", assignee: "Example", dueDate: addDays(-1), status: "todo", priority: "high" },
+    ],
+    calendarEvents: [
+      { id: uid(), title: "Example: Publish product post", date: todayISO(), time: "09:00", type: "post", status: "ready", notes: "Caption is drafted, waiting on final approval." },
+      { id: uid(), title: "Example: Content sync", date: todayISO(), time: "14:00", type: "meeting", status: "planned", notes: "Weekly check-in on what's shipping." },
+      { id: uid(), title: "Example: Script due", date: addDays(1), time: "18:00", type: "deadline", status: "planned", notes: "" },
+      { id: uid(), title: "Example: Behind-the-scenes story", date: addDays(2), time: "11:00", type: "post", status: "posted", notes: "Posted — this dot turns green once it's live." },
+      { id: uid(), title: "Example: Shoot day", date: addDays(3), time: "16:00", type: "other", status: "planned", notes: "Bring the extra battery packs." },
+    ],
+    notes: [
+      { id: uid(), text: "This is a pinned note — use these for reminders the whole team should see the moment they open the app.", author: "Example", date: todayISO(), color: "gold", pinned: true },
+      { id: uid(), text: "Notes are quick and shared — good for context, not full documents. Longer references belong in Guidelines.", author: "Example", date: todayISO(), color: "teal", pinned: false },
+    ],
+    content: [
+      {
+        id: uid(), title: "Example: Launch teaser", platform: "TikTok", link: "", assignee: "Example", status: "review",
+        comments: [{ id: uid(), author: "Example", text: "This is what feedback looks like — click into a content card to leave notes like this one.", date: todayISO() }],
+      },
+    ],
+    ideas: [
+      { id: uid(), title: "Example idea: Behind-the-scenes series", description: "Anyone can pitch an idea here — the team upvotes what to make next.", tags: ["Example"], votes: 3, author: "Example" },
+    ],
+    resources: [
+      { id: uid(), title: "Brand Voice Guide", description: "Tone, vocabulary, and phrases to avoid across every channel.", link: "", category: "Guidelines" },
+      { id: uid(), title: "Posting Checklist", description: "Alt text, captions, hashtags, link-in-bio — the pre-publish pass.", link: "", category: "Guidelines" },
+      { id: uid(), title: "Hashtag Bank", description: "Approved tag sets by content pillar, updated monthly.", link: "", category: "Assets" },
+      { id: uid(), title: "Brand Asset Library", description: "Logos, fonts, colour codes, lower-third templates.", link: "", category: "Assets" },
+    ],
+  };
+}
+
+const seedData = () => ({
+  adminCode: "",
+  profiles: [],
+  tasks: [
+    { id: uid(), title: "Cut Reels for product launch", description: "3 vertical cuts from the studio B-roll, captions burned in.", assignee: "Jordan", dueDate: todayISO(), status: "progress", priority: "high" },
+    { id: uid(), title: "Write carousel copy — Q3 recap", description: "10-slide carousel, tone: confident, data-forward.", assignee: "Sam", dueDate: todayISO(), status: "review", priority: "medium" },
+    { id: uid(), title: "Community reply sweep", description: "Clear comment queue across IG + TikTok.", assignee: "Priya", dueDate: todayISO(), status: "todo", priority: "low" },
+    { id: uid(), title: "Thumbnail set — creator interview", description: "3 thumbnail options, A/B test on YouTube.", assignee: "Alex", dueDate: todayISO(), status: "done", priority: "medium" },
+    { id: uid(), title: "Draft posting calendar — next sprint", description: "Two-week grid across all channels.", assignee: "Jordan", dueDate: todayISO(), status: "todo", priority: "high" },
+  ],
+  calendarEvents: [
+    { id: uid(), title: "Product launch post — all channels", date: todayISO(), time: "09:00", type: "post" },
+    { id: uid(), title: "Content review sync", date: todayISO(), time: "18:00", type: "meeting" },
+  ],
+  notes: [
+    { id: uid(), text: "Reminder: new hook format is testing well on Reels — keep the first 1.5s a question or a bold claim.", author: "Team Lead", date: todayISO(), color: "gold", pinned: true },
+    { id: uid(), text: "Client wants fewer stock transitions, more handheld feel for BTS content.", author: "Sam", date: todayISO(), color: "teal", pinned: false },
+  ],
+  content: [
+    {
+      id: uid(), title: "Launch teaser — 15s cut", platform: "TikTok",
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", assignee: "Jordan", status: "review",
+      comments: [
+        { id: uid(), author: "Team Lead", text: "Great pacing. Trim the last 2 seconds and boost the audio on the hook line.", date: todayISO() },
+      ],
+    },
+    {
+      id: uid(), title: "Founder story — carousel", platform: "Instagram",
+      link: "", assignee: "Sam", status: "draft", comments: [],
+    },
+  ],
+  ideas: [
+    { id: uid(), title: "Day-in-the-life of the editing team", description: "Behind the scenes of how a post goes from brief to published.", tags: ["BTS", "Reels"], votes: 4, author: "Priya" },
+    { id: uid(), title: "Myth-busting series for our category", description: "Short-form series knocking down 5 common misconceptions.", tags: ["Series", "Educational"], votes: 6, author: "Alex" },
+    { id: uid(), title: "Duet reaction to top comment each week", description: "Turns community feedback into content, builds loyalty.", tags: ["Community"], votes: 2, author: "Jordan" },
+  ],
+  resources: [
+    { id: uid(), title: "Brand Voice Guide", description: "Tone, vocabulary, and phrases to avoid across every channel.", link: "", category: "Guidelines" },
+    { id: uid(), title: "Posting Checklist", description: "Alt text, captions, hashtags, link-in-bio — the pre-publish pass.", link: "", category: "Guidelines" },
+    { id: uid(), title: "Hashtag Bank", description: "Approved tag sets by content pillar, updated monthly.", link: "", category: "Assets" },
+    { id: uid(), title: "Brand Asset Library", description: "Logos, fonts, colour codes, lower-third templates.", link: "", category: "Assets" },
+  ],
+});
+
+/* ---------------------------------- CSS ---------------------------------- */
+
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --ink:#12141B; --panel:#191C25; --panel-raised:#20232D; --hair: rgba(237,235,227,0.09);
+  --text:#EDEBE3; --muted:#8B8E9C; --gold:#C9A24B; --gold-soft:rgba(201,162,75,0.16);
+  --teal:#4FB8A6; --teal-soft:rgba(79,184,166,0.14); --alert:#D9564B; --alert-soft:rgba(217,86,75,0.15);
+  --good:#6FBE7A; --good-soft:rgba(111,190,122,0.14);
+}
+body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); margin:0; }
+.hub{
+  font-family:'Inter',sans-serif; color:var(--text); background:var(--ink);
+  min-height:100vh; display:flex; position:relative; isolation:isolate;
+}
+.hub *{ box-sizing:border-box; }
+.hub .display{ font-family:'Fraunces',serif; }
+.hub .mono{ font-family:'IBM Plex Mono',monospace; }
+.hub::before{
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:0; opacity:0.5;
+  background-image: radial-gradient(rgba(237,235,227,0.045) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+.hub button{ font-family:inherit; cursor:pointer; }
+.hub input, .hub textarea, .hub select{ font-family:inherit; }
+.hub ::selection{ background:var(--gold-soft); color:var(--text); }
+
+/* ---- sidebar ---- */
+.sidebar{
+  width:230px; flex-shrink:0; background:var(--panel); border-right:1px solid var(--hair);
+  display:flex; flex-direction:column; padding:22px 14px; position:sticky; top:0; height:100vh; z-index:5;
+}
+.brand{ display:flex; align-items:center; gap:9px; padding:4px 8px 22px; border-bottom:1px solid var(--hair); margin-bottom:14px; }
+.brand-dot{ width:9px; height:9px; border-radius:50%; background:var(--alert); box-shadow:0 0 8px var(--alert); flex-shrink:0; }
+.brand-text{ font-size:14.5px; letter-spacing:0.02em; font-weight:600; }
+.brand-sub{ font-size:10px; color:var(--muted); letter-spacing:0.14em; text-transform:uppercase; margin-top:1px; }
+.nav-item{
+  display:flex; align-items:center; gap:11px; padding:9px 10px; border-radius:7px; border:none;
+  background:transparent; color:var(--muted); font-size:13.5px; font-weight:500; text-align:left; width:100%;
+  transition:background .15s, color .15s; margin-bottom:2px;
+}
+.nav-item:hover{ background:var(--panel-raised); color:var(--text); }
+.nav-item.active{ background:var(--gold-soft); color:var(--gold); }
+.nav-item svg{ flex-shrink:0; }
+.sidebar-foot{ margin-top:auto; padding:12px 8px 2px; border-top:1px solid var(--hair); font-size:10.5px; color:var(--muted); }
+.live-tag{ display:inline-flex; align-items:center; gap:5px; color:var(--alert); font-weight:600; letter-spacing:0.08em; }
+.live-tag .dot{ width:6px; height:6px; border-radius:50%; background:var(--alert); animation:pulse 1.8s infinite; }
+@keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
+
+/* ---- main ---- */
+.main{ flex:1; min-width:0; padding:30px 38px 60px; position:relative; z-index:1; }
+.topbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:26px; gap:16px; flex-wrap:wrap; }
+.page-title{ font-size:26px; font-weight:600; }
+.page-sub{ color:var(--muted); font-size:13px; margin-top:3px; }
+.btn{
+  display:inline-flex; align-items:center; gap:7px; padding:9px 15px; border-radius:7px; border:1px solid var(--hair);
+  background:var(--panel-raised); color:var(--text); font-size:13px; font-weight:600; transition:border-color .15s, transform .1s;
+}
+.btn:hover{ border-color:var(--gold); }
+.btn:active{ transform:scale(0.97); }
+.btn-gold{ background:var(--gold); color:#171812; border-color:var(--gold); }
+.btn-gold:hover{ opacity:0.92; border-color:var(--gold); }
+.btn-ghost{ background:transparent; border-color:transparent; color:var(--muted); padding:7px 9px; }
+.btn-ghost:hover{ color:var(--text); background:var(--panel-raised); }
+
+.card{ background:var(--panel); border:1px solid var(--hair); border-radius:12px; padding:20px; }
+.grid{ display:grid; gap:16px; }
+
+/* ---- dashboard ---- */
+.hero{ background:linear-gradient(135deg, var(--panel) 0%, var(--panel-raised) 100%); border:1px solid var(--hair); border-radius:14px; padding:28px 30px; display:flex; align-items:center; gap:34px; flex-wrap:wrap; margin-bottom:22px; position:relative; overflow:hidden; }
+.ring-wrap{ position:relative; width:118px; height:118px; flex-shrink:0; }
+.ring-num{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.ring-num .n{ font-size:26px; font-weight:700; font-family:'Fraunces',serif; }
+.ring-num .l{ font-size:9.5px; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; margin-top:2px; }
+.hero-stats{ display:flex; gap:30px; flex-wrap:wrap; }
+.hstat .n{ font-size:24px; font-weight:700; font-family:'Fraunces',serif; line-height:1; }
+.hstat .l{ font-size:11px; color:var(--muted); margin-top:5px; letter-spacing:0.03em; }
+
+.stat-grid{ grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); margin-bottom:22px; }
+.stat-card{ display:flex; flex-direction:column; gap:8px; }
+.stat-card .top{ display:flex; align-items:center; justify-content:space-between; }
+.stat-card .label{ font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:0.07em; font-weight:600; }
+.progress-track{ height:7px; border-radius:4px; background:var(--panel-raised); overflow:hidden; }
+.progress-fill{ height:100%; border-radius:4px; transition:width .4s ease; }
+
+.two-col{ grid-template-columns:1.3fr 1fr; align-items:start; }
+@media (max-width: 900px){ .two-col{ grid-template-columns:1fr; } }
+.section-title{ font-size:15px; font-weight:600; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
+.deadline-row{ display:flex; align-items:center; gap:11px; padding:10px 0; border-bottom:1px solid var(--hair); }
+.deadline-row:last-child{ border-bottom:none; }
+.deadline-badge{ font-size:10.5px; font-weight:600; padding:3px 8px; border-radius:5px; white-space:nowrap; }
+.member-row{ margin-bottom:14px; }
+.member-row:last-child{ margin-bottom:0; }
+.member-row .mtop{ display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:6px; }
+.member-row .mtop .name{ font-weight:600; }
+.member-row .mtop .frac{ color:var(--muted); }
+
+/* ---- board ---- */
+.filter-row{ display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+.chip{ padding:6px 13px; border-radius:20px; border:1px solid var(--hair); background:var(--panel); color:var(--muted); font-size:12px; font-weight:600; }
+.chip.active{ border-color:var(--gold); color:var(--gold); background:var(--gold-soft); }
+.board{ display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; align-items:start; }
+@media (max-width: 1050px){ .board{ grid-template-columns:1fr 1fr; } }
+@media (max-width: 620px){ .board{ grid-template-columns:1fr; } }
+.col{ background:var(--panel); border:1px solid var(--hair); border-radius:12px; padding:14px; min-height:80px; }
+.col-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+.col-head .t{ font-size:12.5px; font-weight:700; letter-spacing:0.03em; }
+.col-head .c{ font-size:11px; color:var(--muted); background:var(--panel-raised); padding:2px 7px; border-radius:10px; }
+.task-card{ background:var(--panel-raised); border:1px solid var(--hair); border-radius:9px; padding:12px; margin-bottom:10px; position:relative; border-left-width:3px; }
+.task-card:last-child{ margin-bottom:0; }
+.task-card .tt{ font-size:13px; font-weight:600; margin-bottom:5px; line-height:1.35; }
+.task-card .td{ font-size:11.5px; color:var(--muted); line-height:1.4; margin-bottom:10px; }
+.task-meta{ display:flex; align-items:center; justify-content:space-between; gap:6px; }
+.avatar{ width:22px; height:22px; border-radius:50%; background:var(--gold-soft); color:var(--gold); font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.due-tag{ font-size:10.5px; font-weight:600; }
+.status-select{ margin-top:9px; width:100%; background:var(--panel); border:1px solid var(--hair); color:var(--text); font-size:11px; padding:6px 8px; border-radius:6px; }
+
+/* ---- calendar ---- */
+.cal-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+.cal-nav{ display:flex; align-items:center; gap:10px; }
+.cal-month{ font-size:16px; font-weight:600; min-width:150px; text-align:center; font-family:'Fraunces',serif; }
+.cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:6px; }
+.cal-dow{ font-size:10.5px; color:var(--muted); text-transform:uppercase; text-align:center; padding-bottom:4px; letter-spacing:0.06em; }
+.cal-cell{ min-height:82px; border:1px solid var(--hair); border-radius:8px; padding:6px; background:var(--panel); font-size:11.5px; cursor:pointer; transition:border-color .15s; }
+.cal-cell:hover{ border-color:var(--gold); }
+.cal-cell.out{ opacity:0.32; }
+.cal-cell.today{ border-color:var(--gold); background:var(--gold-soft); }
+.cal-cell .dnum{ font-weight:700; margin-bottom:4px; }
+.cal-evt{ font-size:9.5px; background:var(--panel-raised); border-radius:4px; padding:2px 5px; margin-bottom:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; border-left:2px solid var(--gold); cursor:pointer; display:flex; align-items:center; gap:4px; }
+.evt-dot{ width:6px; height:6px; border-radius:50%; flex-shrink:0; display:inline-block; }
+.evt-dot.light{ box-shadow:0 0 0 1px rgba(0,0,0,0.25); }
+
+/* ---- notes ---- */
+.notes-grid{ grid-template-columns:repeat(auto-fill, minmax(240px,1fr)); }
+.note-card{ border-radius:10px; padding:16px; position:relative; min-height:130px; display:flex; flex-direction:column; border:1px solid var(--hair); }
+.note-card.gold{ background:linear-gradient(160deg, var(--gold-soft), var(--panel)); }
+.note-card.teal{ background:linear-gradient(160deg, var(--teal-soft), var(--panel)); }
+.note-card.alert{ background:linear-gradient(160deg, var(--alert-soft), var(--panel)); }
+.note-card.plain{ background:var(--panel); }
+.note-text{ font-size:13px; line-height:1.5; flex:1; white-space:pre-wrap; }
+.note-foot{ display:flex; align-items:center; justify-content:space-between; margin-top:12px; font-size:10.5px; color:var(--muted); }
+
+/* ---- content review ---- */
+.content-list{ display:flex; flex-direction:column; gap:12px; }
+.content-item{ background:var(--panel); border:1px solid var(--hair); border-radius:12px; overflow:hidden; }
+.content-head{ padding:16px 18px; display:flex; align-items:center; gap:14px; cursor:pointer; flex-wrap:wrap; }
+.content-thumb{ width:44px; height:44px; border-radius:8px; background:var(--panel-raised); display:flex; align-items:center; justify-content:center; color:var(--gold); flex-shrink:0; }
+.content-title{ font-size:14px; font-weight:600; }
+.content-tags{ display:flex; gap:7px; margin-top:5px; flex-wrap:wrap; }
+.pill{ font-size:10px; font-weight:700; padding:3px 9px; border-radius:20px; letter-spacing:0.03em; }
+.content-body{ border-top:1px solid var(--hair); padding:16px 18px; }
+.comment{ display:flex; gap:10px; margin-bottom:14px; }
+.comment .avatar{ margin-top:1px; }
+.comment-text{ font-size:12.5px; line-height:1.5; background:var(--panel-raised); padding:9px 12px; border-radius:9px; border-top-left-radius:3px; }
+.comment-meta{ font-size:10.5px; color:var(--muted); margin-top:5px; }
+.comment-form{ display:flex; gap:8px; margin-top:8px; }
+.comment-form textarea{ flex:1; resize:none; background:var(--panel-raised); border:1px solid var(--hair); border-radius:8px; padding:9px 11px; color:var(--text); font-size:12.5px; min-height:38px; }
+
+/* ---- idea bank ---- */
+.idea-grid{ grid-template-columns:repeat(auto-fill, minmax(250px,1fr)); }
+.idea-card{ display:flex; flex-direction:column; gap:10px; }
+.idea-title{ font-size:14px; font-weight:600; }
+.idea-desc{ font-size:12px; color:var(--muted); line-height:1.5; }
+.idea-foot{ display:flex; align-items:center; justify-content:space-between; margin-top:auto; }
+.vote-btn{ display:flex; align-items:center; gap:6px; padding:6px 11px; border-radius:20px; background:var(--panel-raised); border:1px solid var(--hair); font-size:12px; font-weight:700; color:var(--gold); }
+.vote-btn:hover{ border-color:var(--gold); }
+
+/* ---- guidelines ---- */
+.res-grid{ grid-template-columns:repeat(auto-fill, minmax(250px,1fr)); }
+.res-card{ display:flex; flex-direction:column; gap:8px; }
+.cat-tag{ font-size:10px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em; }
+
+/* ---- shared bits ---- */
+.empty{ text-align:center; padding:40px 20px; color:var(--muted); font-size:13px; }
+.modal-overlay{ position:fixed; inset:0; background:rgba(10,11,14,0.7); backdrop-filter:blur(3px); display:flex; align-items:center; justify-content:center; z-index:50; padding:20px; }
+.modal{ background:var(--panel); border:1px solid var(--hair); border-radius:14px; padding:26px; width:100%; max-width:440px; max-height:88vh; overflow-y:auto; }
+.modal-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+.modal-head h3{ font-size:17px; font-weight:600; font-family:'Fraunces',serif; }
+.field{ margin-bottom:14px; }
+.field label{ display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; font-weight:600; margin-bottom:6px; }
+.field input, .field textarea, .field select{
+  width:100%; background:var(--panel-raised); border:1px solid var(--hair); color:var(--text); font-size:13px; padding:9px 11px; border-radius:8px; outline:none;
+}
+.field input:focus, .field textarea:focus, .field select:focus{ border-color:var(--gold); }
+.field textarea{ resize:vertical; min-height:70px; }
+.field-row{ display:flex; gap:10px; }
+.field-row .field{ flex:1; }
+.modal-actions{ display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+.icon-btn{ background:transparent; border:none; color:var(--muted); padding:4px; border-radius:6px; }
+.icon-btn:hover{ color:var(--alert); background:var(--panel-raised); }
+.loading-screen{ min-height:100vh; width:100%; display:flex; align-items:center; justify-content:center; background:var(--ink); color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:12px; letter-spacing:0.08em; }
+/* ---- profile bar ---- */
+.profile-box{ padding:10px 8px; border-bottom:1px solid var(--hair); margin-bottom:10px; }
+.profile-label{ font-size:9.5px; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px; }
+.profile-input{ width:100%; background:var(--panel-raised); border:1px solid var(--hair); color:var(--text); font-size:12.5px; padding:7px 9px; border-radius:7px; outline:none; }
+.profile-input:focus{ border-color:var(--gold); }
+.profile-chip{ display:flex; align-items:center; gap:8px; padding:8px 9px; background:var(--gold-soft); border-radius:8px; }
+.profile-chip .av{ width:26px; height:26px; border-radius:50%; background:var(--gold); color:#171812; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.profile-chip .info{ flex:1; min-width:0; }
+.profile-chip .name{ font-size:12.5px; font-weight:700; color:var(--text); }
+.profile-chip .change{ font-size:10px; color:var(--muted); background:none; border:none; text-decoration:underline; padding:0; }
+
+/* ---- calendar view toggle + week grid ---- */
+.view-toggle{ display:flex; background:var(--panel-raised); border:1px solid var(--hair); border-radius:8px; padding:3px; gap:2px; }
+.view-toggle button{ background:transparent; border:none; color:var(--muted); font-size:12px; font-weight:600; padding:6px 12px; border-radius:6px; }
+.view-toggle button.active{ background:var(--gold); color:#171812; }
+.week-grid{ display:grid; grid-template-columns:52px repeat(7,1fr); border:1px solid var(--hair); border-radius:10px; overflow:hidden; }
+.week-head-cell{ background:var(--panel-raised); padding:8px 4px; text-align:center; border-left:1px solid var(--hair); border-bottom:1px solid var(--hair); }
+.week-head-cell .dow{ font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }
+.week-head-cell .dnum{ font-size:15px; font-weight:700; font-family:'Fraunces',serif; margin-top:2px; }
+.week-head-cell.today{ background:var(--gold-soft); }
+.week-head-cell.today .dnum{ color:var(--gold); }
+.week-corner{ background:var(--panel-raised); border-bottom:1px solid var(--hair); }
+.week-time-label{ font-size:9.5px; color:var(--muted); padding:4px 6px 0 0; text-align:right; border-top:1px solid var(--hair); }
+.week-slot{ border-left:1px solid var(--hair); border-top:1px solid var(--hair); min-height:44px; padding:2px; position:relative; cursor:pointer; transition:background .12s; }
+.week-slot:hover{ background:var(--panel-raised); }
+.week-evt{ background:var(--gold); color:#171812; font-size:10px; font-weight:700; border-radius:5px; padding:3px 6px; margin-bottom:2px; line-height:1.3; overflow:hidden; cursor:pointer; display:flex; align-items:center; gap:4px; }
+.week-evt.type-meeting{ background:var(--teal); }
+.week-evt.type-deadline{ background:var(--alert); color:#fff; }
+
+/* ---- editable workload ---- */
+.member-add{ display:flex; gap:6px; margin-top:8px; }
+.member-add input{ flex:1; background:var(--panel-raised); border:1px solid var(--hair); color:var(--text); font-size:11.5px; padding:6px 9px; border-radius:6px; outline:none; }
+.member-add input:focus{ border-color:var(--gold); }
+.member-add button{ background:var(--gold); color:#171812; border:none; border-radius:6px; padding:0 10px; font-weight:700; }
+.mini-task{ font-size:11px; color:var(--muted); padding:4px 0 4px 2px; border-left:2px solid var(--hair); padding-left:8px; margin-top:4px; }
+.mini-task.done{ text-decoration:line-through; opacity:0.55; }
+
+/* ---- personal tracker ---- */
+.streak-row{ display:flex; gap:6px; margin-top:10px; }
+.streak-dot{ width:22px; height:22px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; color:var(--muted); background:var(--panel-raised); border:1px solid var(--hair); }
+.streak-dot.hit{ background:var(--good-soft); color:var(--good); border-color:var(--good); }
+.personal-task-row{ display:flex; align-items:center; gap:11px; padding:11px 0; border-bottom:1px solid var(--hair); }
+.personal-task-row:last-child{ border-bottom:none; }
+.check-btn{ width:20px; height:20px; border-radius:6px; border:1.5px solid var(--hair); background:transparent; flex-shrink:0; display:flex; align-items:center; justify-content:center; color:transparent; }
+.check-btn.done{ background:var(--good); border-color:var(--good); color:#0e1410; }
+
+/* ---- login screen ---- */
+.login-wrap{ min-height:100vh; width:100%; display:flex; align-items:center; justify-content:center; background:var(--ink); position:relative; padding:24px; }
+.login-wrap::before{
+  content:''; position:fixed; inset:0; pointer-events:none; opacity:0.5;
+  background-image: radial-gradient(rgba(237,235,227,0.045) 1px, transparent 1px); background-size: 3px 3px;
+}
+.login-card{
+  position:relative; z-index:1; width:100%; max-width:460px;
+  background:linear-gradient(160deg, var(--panel) 0%, var(--panel-raised) 100%);
+  border:1px solid var(--hair); border-radius:18px; padding:38px 36px;
+  box-shadow:0 24px 60px -20px rgba(0,0,0,0.55);
+}
+.login-brand-row{ display:flex; align-items:center; justify-content:center; gap:9px; margin-bottom:18px; }
+.login-brand-row .brand-dot{ width:9px; height:9px; }
+.login-brand-row .b-name{ font-size:13px; font-weight:600; letter-spacing:0.02em; }
+.login-brand-row .b-sub{ font-size:9.5px; color:var(--muted); letter-spacing:0.14em; text-transform:uppercase; }
+.login-title{ font-family:'Fraunces',serif; font-size:30px; font-weight:600; text-align:center; line-height:1.15; }
+.login-sub{ font-size:13.5px; color:var(--muted); text-align:center; margin-top:8px; margin-bottom:28px; display:flex; align-items:center; justify-content:center; gap:6px; }
+
+.profile-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(118px, 1fr)); gap:12px; margin-bottom:6px; }
+.profile-card{
+  display:flex; flex-direction:column; align-items:center; gap:10px; padding:18px 8px;
+  border-radius:12px; border:1px solid var(--hair); background:var(--panel);
+  transition:border-color .15s, transform .12s, background .15s;
+}
+.profile-card:hover{ border-color:var(--gold); transform:translateY(-2px); background:var(--panel-raised); }
+.profile-avatar-lg{ width:52px; height:52px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:700; font-family:'Fraunces',serif; }
+.profile-card .pname{ font-size:12.5px; font-weight:600; }
+
+.pin-dots{ display:flex; gap:12px; justify-content:center; margin:20px 0 22px; }
+.pin-dot{ width:15px; height:15px; border-radius:50%; border:1.5px solid var(--hair); background:transparent; transition:background .12s, border-color .12s; }
+.pin-dot.filled{ background:var(--gold); border-color:var(--gold); }
+.pin-error{ text-align:center; color:var(--alert); font-size:12.5px; margin-top:-12px; margin-bottom:16px; font-weight:500; }
+.pinpad{ display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; max-width:260px; margin:0 auto; }
+.pinpad button{
+  width:100%; aspect-ratio:1; border-radius:50%; border:1px solid var(--hair); background:var(--panel);
+  font-family:'Fraunces',serif; font-size:18px; font-weight:600; color:var(--text);
+  display:flex; align-items:center; justify-content:center; transition:border-color .12s, background .12s;
+}
+.pinpad button:hover{ border-color:var(--gold); background:var(--panel-raised); }
+.pinpad button.ghost{ border-color:transparent; background:transparent; }
+
+.color-pick{ display:flex; gap:9px; justify-content:center; margin-bottom:6px; }
+.color-swatch{ width:26px; height:26px; border-radius:50%; border:2px solid transparent; }
+.color-swatch.selected{ border-color:var(--text); }
+
+.login-eyebrow{ text-align:center; font-family:'IBM Plex Mono',monospace; font-size:10px; letter-spacing:0.18em; color:var(--gold); text-transform:uppercase; margin-bottom:16px; }
+.manage-link{
+  display:flex; align-items:center; justify-content:center; gap:8px; margin-top:26px; width:100%;
+  background:transparent; border:1px dashed var(--hair); color:var(--muted); font-size:12.5px; font-weight:600;
+  padding:12px; border-radius:10px; transition:border-color .15s, color .15s;
+}
+.manage-link:hover{ color:var(--gold); border-color:var(--gold); }
+.manage-caption{ text-align:center; font-size:10.5px; color:var(--muted); margin-top:8px; }
+
+.admin-list{ display:flex; flex-direction:column; gap:8px; margin-bottom:20px; max-height:280px; overflow-y:auto; }
+.admin-row{ display:flex; align-items:center; gap:12px; padding:10px 12px; border:1px solid var(--hair); border-radius:10px; background:var(--panel); }
+.admin-row .code{ font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--gold); letter-spacing:0.1em; margin-left:auto; }
+.code-btn{ background:var(--gold-soft); border:1px solid transparent; border-radius:7px; padding:4px 10px; cursor:pointer; }
+.code-btn:hover{ border-color:var(--gold); }
+.mono-input{ font-family:'IBM Plex Mono',monospace; letter-spacing:0.1em; text-align:center; }
+.code-input{
+  width:180px; margin:16px auto 0; display:block; text-align:center;
+  font-family:'IBM Plex Mono',monospace; font-size:30px; font-weight:600; letter-spacing:0.2em;
+  color:var(--gold); background:var(--panel); border:1px solid var(--gold-soft); border-radius:12px; padding:14px; outline:none;
+}
+.code-input:focus{ border-color:var(--gold); }
+.code-reveal{ text-align:center; padding:10px 6px 6px; }
+.code-big{
+  font-family:'IBM Plex Mono',monospace; font-size:38px; font-weight:600; letter-spacing:0.18em; color:var(--gold);
+  margin:16px 0; background:var(--panel); border:1px solid var(--gold-soft); border-radius:12px; padding:16px;
+}
+.copy-row{ display:flex; align-items:center; justify-content:center; gap:8px; margin-top:4px; flex-wrap:wrap; }
+
+.menu-toggle{ display:none; }
+@media (max-width: 820px){
+  .sidebar{ position:fixed; left:0; top:0; height:100vh; transform:translateX(-100%); transition:transform .2s; }
+  .sidebar.open{ transform:translateX(0); }
+  .menu-toggle{ display:flex; }
+  .main{ padding:22px 18px 50px; }
+}
+`;
+
+/* ---------------------------------- small UI pieces ---------------------------------- */
+
+function ProgressBar({ pct, color = "var(--gold)" }) {
+  return (
+    <div className="progress-track">
+      <div className="progress-fill" style={{ width: `${Math.max(0, Math.min(100, pct))}%`, background: color }} />
+    </div>
+  );
+}
+
+function Avatar({ name }) {
+  const initials = (name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+  return <div className="avatar">{initials || "?"}</div>;
+}
+
+function Modal({ title, onClose, children }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{title}</h3>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- Dashboard ---------------------------------- */
+
+function Dashboard({ data, saveData, profile }) {
+  const { tasks, calendarEvents, notes, content } = data;
+  const [quickAdd, setQuickAdd] = useState({});
+
+  const addQuickTask = (member) => {
+    const title = (quickAdd[member] || "").trim();
+    if (!title) return;
+    const task = { id: uid(), title, description: "", assignee: member, dueDate: todayISO(), status: "todo", priority: "medium" };
+    saveData({ ...data, tasks: [task, ...data.tasks] });
+    setQuickAdd({ ...quickAdd, [member]: "" });
+  };
+  const done = tasks.filter((t) => t.status === "done").length;
+  const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
+  const overdue = tasks.filter((t) => t.status !== "done" && daysUntil(t.dueDate) < 0).length;
+  const inProgress = tasks.filter((t) => t.status === "progress").length;
+  const pendingReview = tasks.filter((t) => t.status === "review").length + content.filter(c=>c.status==="review").length;
+
+  const upcoming = [...calendarEvents]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .filter((e) => daysUntil(e.date) >= -1)
+    .slice(0, 5);
+
+  const members = [...new Set(tasks.map((t) => t.assignee).filter(Boolean))];
+  const memberStats = members.map((m) => {
+    const mine = tasks.filter((t) => t.assignee === m);
+    const mdone = mine.filter((t) => t.status === "done").length;
+    return { name: m, done: mdone, total: mine.length, pct: mine.length ? Math.round((mdone / mine.length) * 100) : 0 };
+  });
+
+  const recentNotes = [...notes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)).slice(0, 3);
+  const circumference = 2 * Math.PI * 50;
+
+  return (
+    <div>
+      <div className="hero">
+        <div className="ring-wrap">
+          <svg width="118" height="118" viewBox="0 0 118 118">
+            <circle cx="59" cy="59" r="50" fill="none" stroke="var(--panel-raised)" strokeWidth="10" />
+            <circle
+              cx="59" cy="59" r="50" fill="none" stroke="var(--gold)" strokeWidth="10" strokeLinecap="round"
+              strokeDasharray={circumference} strokeDashoffset={circumference - (pct / 100) * circumference}
+              transform="rotate(-90 59 59)" style={{ transition: "stroke-dashoffset .5s ease" }}
+            />
+          </svg>
+          <div className="ring-num"><div className="n">{pct}%</div><div className="l">On Track</div></div>
+        </div>
+        <div className="hero-stats">
+          <div className="hstat"><div className="n">{tasks.length}</div><div className="l">Active duties</div></div>
+          <div className="hstat"><div className="n" style={{ color: inProgress ? "var(--gold)" : "var(--text)" }}>{inProgress}</div><div className="l">In progress</div></div>
+          <div className="hstat"><div className="n" style={{ color: pendingReview ? "var(--teal)" : "var(--text)" }}>{pendingReview}</div><div className="l">Awaiting review</div></div>
+          <div className="hstat"><div className="n" style={{ color: overdue ? "var(--alert)" : "var(--text)" }}>{overdue}</div><div className="l">Overdue</div></div>
+        </div>
+      </div>
+
+      <div className="grid two-col">
+        <div className="card">
+          <div className="section-title"><CalendarDays size={16} color="var(--gold)" /> Upcoming on the calendar</div>
+          {upcoming.length === 0 && <div className="empty">Nothing scheduled yet — add something on the Calendar page.</div>}
+          {upcoming.map((e) => {
+            const d = daysUntil(e.date);
+            const label = d < 0 ? "Past" : d === 0 ? "Today" : d === 1 ? "Tomorrow" : `In ${d}d`;
+            const badgeColor = d <= 0 ? "var(--alert)" : d <= 2 ? "var(--gold)" : "var(--teal)";
+            return (
+              <div className="deadline-row" key={e.id}>
+                <span className="deadline-badge" style={{ background: badgeColor + "22", color: badgeColor }}>{label}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{e.title}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>{fmtDate(e.date)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="card">
+          <div className="section-title"><Users size={16} color="var(--gold)" /> Team workload</div>
+          {memberStats.length === 0 && <div className="empty">Assign a duty to see workload here.</div>}
+          {memberStats.map((m) => {
+            const openTasks = tasks.filter((t) => t.assignee === m.name && t.status !== "done");
+            return (
+              <div className="member-row" key={m.name}>
+                <div className="mtop"><span className="name">{m.name}</span><span className="frac">{m.done}/{m.total}</span></div>
+                <ProgressBar pct={m.pct} color={m.pct === 100 ? "var(--good)" : "var(--gold)"} />
+                {openTasks.slice(0, 3).map((t) => (
+                  <div className="mini-task" key={t.id}>{t.title}</div>
+                ))}
+                <div className="member-add">
+                  <input
+                    placeholder={`Add a task for ${m.name}…`}
+                    value={quickAdd[m.name] || ""}
+                    onChange={(e) => setQuickAdd({ ...quickAdd, [m.name]: e.target.value })}
+                    onKeyDown={(e) => { if (e.key === "Enter") addQuickTask(m.name); }}
+                  />
+                  <button onClick={() => addQuickTask(m.name)}><Plus size={13} /></button>
+                </div>
+              </div>
+            );
+          })}
+          <div className="member-row" style={{ marginTop: memberStats.length ? 16 : 0, paddingTop: memberStats.length ? 14 : 0, borderTop: memberStats.length ? "1px solid var(--hair)" : "none" }}>
+            <div className="mtop"><span className="name" style={{ color: "var(--muted)" }}>Add someone new</span></div>
+            <div className="member-add">
+              <input
+                placeholder="Name — task title"
+                value={quickAdd.__new || ""}
+                onChange={(e) => setQuickAdd({ ...quickAdd, __new: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const [name, ...rest] = (quickAdd.__new || "").split("-");
+                    const title = rest.join("-").trim();
+                    if (name && title) {
+                      saveData({ ...data, tasks: [{ id: uid(), title, description: "", assignee: name.trim(), dueDate: todayISO(), status: "todo", priority: "medium" }, ...data.tasks] });
+                      setQuickAdd({ ...quickAdd, __new: "" });
+                    }
+                  }
+                }}
+              />
+              <button onClick={() => {
+                const [name, ...rest] = (quickAdd.__new || "").split("-");
+                const title = rest.join("-").trim();
+                if (name && title) {
+                  saveData({ ...data, tasks: [{ id: uid(), title, description: "", assignee: name.trim(), dueDate: todayISO(), status: "todo", priority: "medium" }, ...data.tasks] });
+                  setQuickAdd({ ...quickAdd, __new: "" });
+                }
+              }}><Plus size={13} /></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="section-title"><Pin size={16} color="var(--gold)" /> Pinned & recent notes</div>
+        <div className="grid notes-grid">
+          {recentNotes.map((n) => (
+            <div key={n.id} className={`note-card ${n.color || "plain"}`}>
+              <div className="note-text">{n.text}</div>
+              <div className="note-foot"><span>{n.author}</span><span>{fmtDate(n.date)}</span></div>
+            </div>
+          ))}
+          {recentNotes.length === 0 && <div className="empty">No notes yet.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- Duties board ---------------------------------- */
+
+function Duties({ data, saveData }) {
+  const [filter, setFilter] = useState("all");
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium" });
+
+  const members = [...new Set(data.tasks.map((t) => t.assignee).filter(Boolean))];
+  const filtered = filter === "all" ? data.tasks : data.tasks.filter((t) => t.assignee === filter);
+
+  const addTask = () => {
+    if (!form.title.trim()) return;
+    const task = { id: uid(), status: "todo", ...form };
+    saveData({ ...data, tasks: [task, ...data.tasks] });
+    setForm({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium" });
+    setShowForm(false);
+  };
+  const updateStatus = (id, status) => {
+    saveData({
+      ...data,
+      tasks: data.tasks.map((t) => (t.id === id ? { ...t, status, completedAt: status === "done" ? todayISO() : null } : t)),
+    });
+  };
+  const removeTask = (id) => saveData({ ...data, tasks: data.tasks.filter((t) => t.id !== id) });
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Duties</div><div className="page-sub">Assign work and track it through to done.</div></div>
+        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Assign a duty</button>
+      </div>
+
+      <div className="filter-row">
+        <button className={`chip ${filter === "all" ? "active" : ""}`} onClick={() => setFilter("all")}>Everyone</button>
+        {members.map((m) => (
+          <button key={m} className={`chip ${filter === m ? "active" : ""}`} onClick={() => setFilter(m)}>{m}</button>
+        ))}
+      </div>
+
+      <div className="board">
+        {STATUS.map((col) => {
+          const items = filtered.filter((t) => t.status === col.id);
+          return (
+            <div className="col" key={col.id}>
+              <div className="col-head">
+                <span className="t" style={{ color: col.color }}>{col.label}</span>
+                <span className="c">{items.length}</span>
+              </div>
+              {items.map((t) => {
+                const p = PRIORITY.find((x) => x.id === t.priority) || PRIORITY[1];
+                const d = daysUntil(t.dueDate);
+                const overdue = d < 0 && t.status !== "done";
+                return (
+                  <div className="task-card" style={{ borderLeftColor: p.color }} key={t.id}>
+                    <button className="icon-btn" style={{ position: "absolute", top: 8, right: 8 }} onClick={() => removeTask(t.id)}>
+                      <Trash2 size={13} />
+                    </button>
+                    <div className="tt" style={{ paddingRight: 18 }}>{t.title}</div>
+                    {t.description && <div className="td">{t.description}</div>}
+                    <div className="task-meta">
+                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                        <Avatar name={t.assignee} />
+                        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{t.assignee || "Unassigned"}</span>
+                      </div>
+                      <span className="due-tag" style={{ color: overdue ? "var(--alert)" : "var(--muted)" }}>
+                        {overdue ? "Overdue" : fmtDate(t.dueDate)}
+                      </span>
+                    </div>
+                    <select className="status-select" value={t.status} onChange={(e) => updateStatus(t.id, e.target.value)}>
+                      {STATUS.map((s) => <option value={s.id} key={s.id}>{s.label}</option>)}
+                    </select>
+                  </div>
+                );
+              })}
+              {items.length === 0 && <div className="empty" style={{ padding: "18px 4px" }}>Nothing here</div>}
+            </div>
+          );
+        })}
+      </div>
+
+      {showForm && (
+        <Modal title="Assign a duty" onClose={() => setShowForm(false)}>
+          <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Cut Reels for launch" autoFocus /></div>
+          <div className="field"><label>Details</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Any brief, links, or notes" /></div>
+          <div className="field-row">
+            <div className="field"><label>Assignee</label><input list="member-list" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Name" />
+              <datalist id="member-list">{members.map((m) => <option value={m} key={m} />)}</datalist>
+            </div>
+            <div className="field"><label>Due date</label><input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} /></div>
+          </div>
+          <div className="field"><label>Priority</label>
+            <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
+              {PRIORITY.map((p) => <option value={p.id} key={p.id}>{p.label}</option>)}
+            </select>
+          </div>
+          <div className="modal-actions">
+            <button className="btn" onClick={() => setShowForm(false)}>Cancel</button>
+            <button className="btn btn-gold" onClick={addTask}>Assign duty</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Calendar ---------------------------------- */
+
+const WEEK_HOURS = Array.from({ length: 15 }, (_, i) => i + 7); // 07:00 - 21:00
+
+function startOfWeek(d) {
+  const dt = new Date(d);
+  const day = dt.getDay();
+  dt.setDate(dt.getDate() - day);
+  dt.setHours(0, 0, 0, 0);
+  return dt;
+}
+function isoOf(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function Calendar({ data, saveData }) {
+  const [mode, setMode] = useState("week"); // "week" | "month"
+  const [cursor, setCursor] = useState(new Date());
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ title: "", date: todayISO(), time: "09:00", type: "post", status: "planned", notes: "" });
+  const [editId, setEditId] = useState(null);
+
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const first = new Date(year, month, 1);
+  const startOffset = first.getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const daysInPrev = new Date(year, month, 0).getDate();
+
+  const cells = [];
+  for (let i = startOffset - 1; i >= 0; i--) cells.push({ day: daysInPrev - i, out: true, iso: null });
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    cells.push({ day: d, out: false, iso });
+  }
+  while (cells.length % 7 !== 0) cells.push({ day: cells.length, out: true, iso: null });
+
+  const eventsByDate = {};
+  data.calendarEvents.forEach((e) => { (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e); });
+
+  const saveEvent = () => {
+    if (!form.title.trim()) return;
+    if (editId) {
+      saveData({ ...data, calendarEvents: data.calendarEvents.map((e) => (e.id === editId ? { ...e, ...form } : e)) });
+    } else {
+      saveData({ ...data, calendarEvents: [...data.calendarEvents, { id: uid(), ...form }] });
+    }
+    setForm({ title: "", date: form.date, time: form.time, type: "post", status: "planned", notes: "" });
+    setEditId(null);
+    setShowForm(false);
+  };
+  const removeEvent = (id) => {
+    saveData({ ...data, calendarEvents: data.calendarEvents.filter((e) => e.id !== id) });
+    if (editId === id) { setEditId(null); setForm({ ...form, title: "" }); }
+  };
+
+  const openAdd = (iso, time) => {
+    setForm({ title: "", date: iso, time: time || "09:00", type: "post", status: "planned", notes: "" });
+    setEditId(null);
+    setShowForm(true);
+  };
+  const openEdit = (e) => {
+    setForm({ title: e.title, date: e.date, time: e.time || "09:00", type: e.type || "post", status: e.status || "planned", notes: e.notes || "" });
+    setEditId(e.id);
+    setShowForm(true);
+  };
+
+  const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  const weekStart = startOfWeek(cursor);
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(weekStart);
+    d.setDate(d.getDate() + i);
+    return d;
+  });
+  const weekLabel = `${weekDays[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${weekDays[6].toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+
+  const stepWeek = (dir) => { const d = new Date(cursor); d.setDate(d.getDate() + dir * 7); setCursor(d); };
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Calendar</div><div className="page-sub">Posting dates, deadlines, and meetings — by day and time.</div></div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <div className="view-toggle">
+            <button className={mode === "week" ? "active" : ""} onClick={() => setMode("week")}>Week</button>
+            <button className={mode === "month" ? "active" : ""} onClick={() => setMode("month")}>Month</button>
+          </div>
+          <button className="btn" onClick={() => saveData({ ...data, calendarEvents: [...data.calendarEvents, ...buildExamples().calendarEvents] })}>See example events</button>
+          <button className="btn btn-gold" onClick={() => openAdd(todayISO())}><Plus size={15} /> Add event</button>
+        </div>
+      </div>
+
+      {mode === "month" ? (
+        <div className="card">
+          <div className="cal-head">
+            <div className="cal-month display">{monthLabel}</div>
+            <div className="cal-nav">
+              <button className="btn-ghost btn" onClick={() => setCursor(new Date(year, month - 1, 1))}><ChevronLeft size={16} /></button>
+              <button className="btn-ghost btn" onClick={() => setCursor(new Date())}>Today</button>
+              <button className="btn-ghost btn" onClick={() => setCursor(new Date(year, month + 1, 1))}><ChevronRight size={16} /></button>
+            </div>
+          </div>
+          <div className="cal-grid">
+            {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => <div className="cal-dow" key={d}>{d}</div>)}
+            {cells.map((c, i) => (
+              <div
+                key={i}
+                className={`cal-cell ${c.out ? "out" : ""} ${c.iso === todayISO() ? "today" : ""}`}
+                onClick={() => { if (c.iso) openAdd(c.iso); }}
+              >
+                <div className="dnum">{c.day}</div>
+                {c.iso && (eventsByDate[c.iso] || []).sort((a, b) => (a.time || "").localeCompare(b.time || "")).slice(0, 3).map((e) => {
+                  const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                  return (
+                    <div className="cal-evt" key={e.id} title={e.title} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                      <span className="evt-dot" style={{ background: st.color }} />
+                      {e.time ? `${e.time} · ` : ""}{e.title}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="card" style={{ overflowX: "auto" }}>
+          <div className="cal-head">
+            <div className="cal-month display">{weekLabel}</div>
+            <div className="cal-nav">
+              <button className="btn-ghost btn" onClick={() => stepWeek(-1)}><ChevronLeft size={16} /></button>
+              <button className="btn-ghost btn" onClick={() => setCursor(new Date())}>Today</button>
+              <button className="btn-ghost btn" onClick={() => stepWeek(1)}><ChevronRight size={16} /></button>
+            </div>
+          </div>
+          <div className="week-grid" style={{ minWidth: 640 }}>
+            <div className="week-corner" />
+            {weekDays.map((d) => {
+              const iso = isoOf(d);
+              return (
+                <div key={iso} className={`week-head-cell ${iso === todayISO() ? "today" : ""}`}>
+                  <div className="dow">{d.toLocaleDateString(undefined, { weekday: "short" })}</div>
+                  <div className="dnum">{d.getDate()}</div>
+                </div>
+              );
+            })}
+            {WEEK_HOURS.map((h) => (
+              <React.Fragment key={h}>
+                <div className="week-time-label">{String(h).padStart(2, "0")}:00</div>
+                {weekDays.map((d) => {
+                  const iso = isoOf(d);
+                  const slotEvents = (eventsByDate[iso] || []).filter((e) => parseInt((e.time || "0").split(":")[0], 10) === h);
+                  return (
+                    <div key={iso + h} className="week-slot" onClick={() => openAdd(iso, `${String(h).padStart(2, "0")}:00`)}>
+                      {slotEvents.map((e) => {
+                        const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                        return (
+                          <div key={e.id} className={`week-evt type-${e.type}`} title={`${e.time} · ${e.title}`} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                            <span className="evt-dot light" style={{ background: st.color }} />
+                            {e.time} {e.title}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showForm && (
+        <Modal title={editId ? "Edit calendar event" : "Add calendar event"} onClose={() => setShowForm(false)}>
+          <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Product launch post" autoFocus /></div>
+          <div className="field-row">
+            <div className="field"><label>Date</label><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
+            <div className="field"><label>Time</label><input type="time" value={form.time || "09:00"} onChange={(e) => setForm({ ...form, time: e.target.value })} /></div>
+          </div>
+          <div className="field-row">
+            <div className="field"><label>Type</label>
+              <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+                <option value="post">Post</option><option value="deadline">Deadline</option><option value="meeting">Meeting</option><option value="other">Other</option>
+              </select>
+            </div>
+            <div className="field"><label>Status</label>
+              <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+                {CAL_STATUS.map((s) => <option value={s.id} key={s.id}>{s.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field"><label>Note (optional)</label><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Raw info, link, or anything quick to jot down" /></div>
+          {editId && (
+            <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)", marginBottom: 14 }} onClick={() => removeEvent(editId)}><Trash2 size={13} /> Delete this event</button>
+          )}
+          {(eventsByDate[form.date] || []).filter((e) => e.id !== editId).length > 0 && (
+            <div className="field">
+              <label>Already on this day</label>
+              {eventsByDate[form.date].filter((e) => e.id !== editId).sort((a, b) => (a.time || "").localeCompare(b.time || "")).map((e) => {
+                const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                return (
+                  <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, padding: "6px 0", borderBottom: "1px solid var(--hair)", cursor: "pointer" }} onClick={() => openEdit(e)}>
+                    <span>{e.time ? `${e.time} · ` : ""}{e.title}</span>
+                    <span className="pill" style={{ background: st.color + "22", color: st.color }}>{st.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="modal-actions">
+            <button className="btn" onClick={() => setShowForm(false)}>Close</button>
+            <button className="btn btn-gold" onClick={saveEvent}>{editId ? "Save changes" : "Add event"}</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Notes ---------------------------------- */
+
+function Notes({ data, saveData }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ text: "", author: "", color: "gold" });
+
+  const addNote = () => {
+    if (!form.text.trim()) return;
+    saveData({ ...data, notes: [{ id: uid(), date: todayISO(), pinned: false, ...form }, ...data.notes] });
+    setForm({ text: "", author: form.author, color: "gold" });
+    setShowForm(false);
+  };
+  const removeNote = (id) => saveData({ ...data, notes: data.notes.filter((n) => n.id !== id) });
+  const togglePin = (id) => saveData({ ...data, notes: data.notes.map((n) => (n.id === id ? { ...n, pinned: !n.pinned } : n)) });
+
+  const sorted = [...data.notes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Notes</div><div className="page-sub">Quick context, reminders, and things worth flagging to the team.</div></div>
+        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add note</button>
+      </div>
+      <div className="grid notes-grid">
+        {sorted.map((n) => (
+          <div key={n.id} className={`note-card ${n.color || "plain"}`}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              {n.pinned && <span style={{ fontSize: 10, color: "var(--gold)", fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><Pin size={11} /> PINNED</span>}
+              <div style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
+                <button className="icon-btn" onClick={() => togglePin(n.id)}><Pin size={13} /></button>
+                <button className="icon-btn" onClick={() => removeNote(n.id)}><Trash2 size={13} /></button>
+              </div>
+            </div>
+            <div className="note-text">{n.text}</div>
+            <div className="note-foot"><span>{n.author || "Team"}</span><span>{fmtDate(n.date)}</span></div>
+          </div>
+        ))}
+        {sorted.length === 0 && <div className="empty">No notes yet — add the first one.</div>}
+      </div>
+
+      {showForm && (
+        <Modal title="Add a note" onClose={() => setShowForm(false)}>
+          <div className="field"><label>Note</label><textarea value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} placeholder="Write something the team should know" autoFocus /></div>
+          <div className="field-row">
+            <div className="field"><label>Your name</label><input value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} placeholder="e.g. Priya" /></div>
+            <div className="field"><label>Colour</label>
+              <select value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })}>
+                <option value="gold">Gold</option><option value="teal">Teal</option><option value="alert">Red</option><option value="plain">Plain</option>
+              </select>
+            </div>
+          </div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addNote}>Add note</button></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Content review ---------------------------------- */
+
+function youtubeId(url) {
+  const m = (url || "").match(/(?:youtu\.be\/|v=|embed\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+function driveEmbedUrl(url) {
+  const m = (url || "").match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/) || (url || "").match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  return m ? `https://drive.google.com/file/d/${m[1]}/preview` : null;
+}
+
+function ContentReview({ data, saveData }) {
+  const [showForm, setShowForm] = useState(false);
+  const [open, setOpen] = useState(null);
+  const [commentText, setCommentText] = useState("");
+  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "" });
+
+  const addItem = () => {
+    if (!form.title.trim()) return;
+    saveData({ ...data, content: [{ id: uid(), status: "draft", comments: [], ...form }, ...data.content] });
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "" });
+    setShowForm(false);
+  };
+  const updateStatus = (id, status) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)) });
+  const removeItem = (id) => saveData({ ...data, content: data.content.filter((c) => c.id !== id) });
+  const addComment = (id) => {
+    if (!commentText.trim()) return;
+    saveData({
+      ...data,
+      content: data.content.map((c) => c.id === id
+        ? { ...c, comments: [...c.comments, { id: uid(), author: "Team Lead", text: commentText, date: todayISO() }] }
+        : c),
+    });
+    setCommentText("");
+  };
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Content Review</div><div className="page-sub">Drop in a link, leave feedback, mark it ready to publish.</div></div>
+        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add content</button>
+      </div>
+
+      <div className="content-list">
+        {data.content.map((c) => {
+          const st = CONTENT_STATUS.find((s) => s.id === c.status) || CONTENT_STATUS[0];
+          const yt = youtubeId(c.link);
+          const drive = !yt ? driveEmbedUrl(c.link) : null;
+          const isOpen = open === c.id;
+          return (
+            <div className="content-item" key={c.id}>
+              <div className="content-head" onClick={() => setOpen(isOpen ? null : c.id)}>
+                <div className="content-thumb"><Video size={19} /></div>
+                <div style={{ flex: 1, minWidth: 180 }}>
+                  <div className="content-title">{c.title}</div>
+                  <div className="content-tags">
+                    <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.platform}</span>
+                    <span className="pill" style={{ background: st.color + "22", color: st.color }}>{st.label}</span>
+                    {c.assignee && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.assignee}</span>}
+                    {c.comments.length > 0 && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}><MessageSquare size={10} style={{ verticalAlign: "-1px", marginRight: 3 }} />{c.comments.length}</span>}
+                  </div>
+                </div>
+                <button className="icon-btn" onClick={(e) => { e.stopPropagation(); removeItem(c.id); }}><Trash2 size={14} /></button>
+              </div>
+
+              {isOpen && (
+                <div className="content-body">
+                  <div className="field-row" style={{ marginBottom: 14 }}>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label>Status</label>
+                      <select value={c.status} onChange={(e) => updateStatus(c.id, e.target.value)}>
+                        {CONTENT_STATUS.map((s) => <option value={s.id} key={s.id}>{s.label}</option>)}
+                      </select>
+                    </div>
+                    {c.link && (
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label>Link</label>
+                        <a href={c.link} target="_blank" rel="noopener noreferrer" className="btn" style={{ justifyContent: "center", textDecoration: "none" }}>
+                          <ExternalLink size={13} /> Open
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                  {yt && (
+                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden" }}>
+                      <iframe
+                        src={`https://www.youtube.com/embed/${yt}`}
+                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+                        allowFullScreen title={c.title}
+                      />
+                    </div>
+                  )}
+                  {drive && (
+                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden" }}>
+                      <iframe
+                        src={drive}
+                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+                        allowFullScreen title={c.title}
+                      />
+                    </div>
+                  )}
+
+                  <div className="section-title" style={{ fontSize: 13 }}><MessageSquare size={14} color="var(--gold)" /> Feedback</div>
+                  {c.comments.map((cm) => (
+                    <div className="comment" key={cm.id}>
+                      <Avatar name={cm.author} />
+                      <div style={{ flex: 1 }}>
+                        <div className="comment-text">{cm.text}</div>
+                        <div className="comment-meta">{cm.author} · {fmtDate(cm.date)}</div>
+                      </div>
+                    </div>
+                  ))}
+                  {c.comments.length === 0 && <div className="empty" style={{ padding: "10px 0" }}>No feedback yet.</div>}
+                  <div className="comment-form">
+                    <textarea placeholder="Leave feedback on what to improve…" value={isOpen ? commentText : ""} onChange={(e) => setCommentText(e.target.value)} />
+                    <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={() => addComment(c.id)}><Send size={14} /></button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {data.content.length === 0 && <div className="empty">Nothing submitted yet.</div>}
+      </div>
+
+      {showForm && (
+        <Modal title="Add content for review" onClose={() => setShowForm(false)}>
+          <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Launch teaser — 15s cut" autoFocus /></div>
+          <div className="field"><label>Video or post link</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="Paste a YouTube, Drive, or post link" /></div>
+          <div className="field-row">
+            <div className="field"><label>Platform</label>
+              <select value={form.platform} onChange={(e) => setForm({ ...form, platform: e.target.value })}>
+                <option>Instagram</option><option>TikTok</option><option>YouTube</option><option>X</option><option>LinkedIn</option><option>Other</option>
+              </select>
+            </div>
+            <div className="field"><label>Assignee</label><input value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Who made this" /></div>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Uploading video files directly isn't supported here — paste a link instead. YouTube links and Google Drive "share" links (drive.google.com/file/d/…) preview inline; anything else opens in a new tab.
+          </div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addItem}>Add</button></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Idea bank ---------------------------------- */
+
+function IdeaBank({ data, saveData }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ title: "", description: "", tags: "", author: "" });
+
+  const addIdea = () => {
+    if (!form.title.trim()) return;
+    const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    saveData({ ...data, ideas: [{ id: uid(), votes: 0, ...form, tags }, ...data.ideas] });
+    setForm({ title: "", description: "", tags: "", author: form.author });
+    setShowForm(false);
+  };
+  const vote = (id) => saveData({ ...data, ideas: data.ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
+  const removeIdea = (id) => saveData({ ...data, ideas: data.ideas.filter((i) => i.id !== id) });
+
+  const sorted = [...data.ideas].sort((a, b) => b.votes - a.votes);
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Idea Bank</div><div className="page-sub">Drop content ideas here — the team votes on what's next.</div></div>
+        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add idea</button>
+      </div>
+      <div className="grid idea-grid">
+        {sorted.map((i) => (
+          <div className="card idea-card" key={i.id}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <div className="idea-title">{i.title}</div>
+              <button className="icon-btn" onClick={() => removeIdea(i.id)}><Trash2 size={13} /></button>
+            </div>
+            {i.description && <div className="idea-desc">{i.description}</div>}
+            {i.tags && i.tags.length > 0 && (
+              <div className="content-tags">
+                {i.tags.map((t) => <span className="pill" key={t} style={{ background: "var(--teal-soft)", color: "var(--teal)" }}>{t}</span>)}
+              </div>
+            )}
+            <div className="idea-foot">
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>{i.author || "Anonymous"}</span>
+              <button className="vote-btn" onClick={() => vote(i.id)}><ThumbsUp size={13} /> {i.votes}</button>
+            </div>
+          </div>
+        ))}
+        {sorted.length === 0 && <div className="empty">No ideas yet — be the first to add one.</div>}
+      </div>
+
+      {showForm && (
+        <Modal title="Add an idea" onClose={() => setShowForm(false)}>
+          <div className="field"><label>Idea</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Myth-busting series" autoFocus /></div>
+          <div className="field"><label>Description</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What's the concept?" /></div>
+          <div className="field-row">
+            <div className="field"><label>Tags (comma separated)</label><input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="Reels, Series" /></div>
+            <div className="field"><label>Your name</label><input value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} placeholder="e.g. Alex" /></div>
+          </div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addIdea}>Add idea</button></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Guidelines / resources ---------------------------------- */
+
+function Guidelines({ data, saveData }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ title: "", description: "", link: "", category: "Guidelines" });
+
+  const addResource = () => {
+    if (!form.title.trim()) return;
+    saveData({ ...data, resources: [{ id: uid(), ...form }, ...data.resources] });
+    setForm({ title: "", description: "", link: "", category: "Guidelines" });
+    setShowForm(false);
+  };
+  const removeResource = (id) => saveData({ ...data, resources: data.resources.filter((r) => r.id !== id) });
+
+  const categories = [...new Set(data.resources.map((r) => r.category || "Other"))];
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Guidelines & Resources</div><div className="page-sub">Everything the team needs to stay on-brand and unblocked.</div></div>
+        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add resource</button>
+      </div>
+
+      {categories.map((cat) => (
+        <div key={cat} style={{ marginBottom: 26 }}>
+          <div className="section-title"><BookOpen size={16} color="var(--gold)" /> {cat}</div>
+          <div className="grid res-grid">
+            {data.resources.filter((r) => (r.category || "Other") === cat).map((r) => (
+              <div className="card res-card" key={r.id}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.title}</div>
+                  <button className="icon-btn" onClick={() => removeResource(r.id)}><Trash2 size={13} /></button>
+                </div>
+                {r.description && <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>{r.description}</div>}
+                {r.link && <a href={r.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Link2 size={12} /> Open resource</a>}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {data.resources.length === 0 && <div className="empty">No resources yet — add the first guideline or asset.</div>}
+
+      {showForm && (
+        <Modal title="Add a resource" onClose={() => setShowForm(false)}>
+          <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Caption Style Guide" autoFocus /></div>
+          <div className="field"><label>Description</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What is this and when should the team use it?" /></div>
+          <div className="field-row">
+            <div className="field"><label>Link (optional)</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="https://…" /></div>
+            <div className="field"><label>Category</label><input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Guidelines, Assets…" /></div>
+          </div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addResource}>Add resource</button></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- My Duties (personal tracker) ---------------------------------- */
+
+function MyDuties({ data, saveData, profile }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ title: "", description: "", dueDate: todayISO(), priority: "medium" });
+
+  const mine = data.tasks.filter((t) => t.assignee === profile);
+  const done = mine.filter((t) => t.status === "done").length;
+  const pct = mine.length ? Math.round((done / mine.length) * 100) : 0;
+  const circumference = 2 * Math.PI * 46;
+
+  const last7 = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    return isoOf(d);
+  });
+  const hitDates = new Set(mine.filter((t) => t.completedAt).map((t) => t.completedAt));
+
+  const addTask = () => {
+    if (!form.title.trim() || !profile) return;
+    const task = { id: uid(), status: "todo", assignee: profile, ...form };
+    saveData({ ...data, tasks: [task, ...data.tasks] });
+    setForm({ title: "", description: "", dueDate: todayISO(), priority: "medium" });
+    setShowForm(false);
+  };
+  const toggleDone = (t) => {
+    const nextStatus = t.status === "done" ? "todo" : "done";
+    saveData({
+      ...data,
+      tasks: data.tasks.map((x) => (x.id === t.id ? { ...x, status: nextStatus, completedAt: nextStatus === "done" ? todayISO() : null } : x)),
+    });
+  };
+  const removeTask = (id) => saveData({ ...data, tasks: data.tasks.filter((t) => t.id !== id) });
+
+  const sorted = [...mine].sort((a, b) => (a.status === "done") - (b.status === "done") || a.dueDate.localeCompare(b.dueDate));
+
+  if (!profile) {
+    return (
+      <div>
+        <div className="topbar"><div><div className="page-title">My Duties</div><div className="page-sub">Your personal task tracker.</div></div></div>
+        <div className="card empty">Set your name in the sidebar first, so this page can find your tasks.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">My Duties</div><div className="page-sub">Just your tasks, your pace, your progress.</div></div>
+        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add my task</button>
+      </div>
+
+      <div className="hero" style={{ marginBottom: 22 }}>
+        <div className="ring-wrap" style={{ width: 100, height: 100 }}>
+          <svg width="100" height="100" viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="46" fill="none" stroke="var(--panel-raised)" strokeWidth="9" />
+            <circle
+              cx="50" cy="50" r="46" fill="none" stroke="var(--good)" strokeWidth="9" strokeLinecap="round"
+              strokeDasharray={circumference} strokeDashoffset={circumference - (pct / 100) * circumference}
+              transform="rotate(-90 50 50)" style={{ transition: "stroke-dashoffset .5s ease" }}
+            />
+          </svg>
+          <div className="ring-num"><div className="n" style={{ fontSize: 21 }}>{pct}%</div><div className="l">Done</div></div>
+        </div>
+        <div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 8 }}>Last 7 days</div>
+          <div className="streak-row">
+            {last7.map((iso) => {
+              const d = new Date(iso + "T00:00:00");
+              return (
+                <div key={iso} className={`streak-dot ${hitDates.has(iso) ? "hit" : ""}`} title={iso}>
+                  {d.toLocaleDateString(undefined, { weekday: "narrow" })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="section-title"><ListChecks size={16} color="var(--gold)" /> {profile}'s tasks</div>
+        {sorted.map((t) => {
+          const p = PRIORITY.find((x) => x.id === t.priority) || PRIORITY[1];
+          const overdue = t.status !== "done" && daysUntil(t.dueDate) < 0;
+          return (
+            <div className="personal-task-row" key={t.id}>
+              <button className={`check-btn ${t.status === "done" ? "done" : ""}`} onClick={() => toggleDone(t)}>
+                <CheckCircle2 size={13} />
+              </button>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, textDecoration: t.status === "done" ? "line-through" : "none", opacity: t.status === "done" ? 0.6 : 1 }}>{t.title}</div>
+                {t.description && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{t.description}</div>}
+              </div>
+              <span className="pill" style={{ background: p.color + "22", color: p.color }}>{p.label}</span>
+              <span className="due-tag" style={{ color: overdue ? "var(--alert)" : "var(--muted)" }}>{overdue ? "Overdue" : fmtDate(t.dueDate)}</span>
+              <button className="icon-btn" onClick={() => removeTask(t.id)}><Trash2 size={13} /></button>
+            </div>
+          );
+        })}
+        {sorted.length === 0 && <div className="empty">Nothing assigned to you yet — add your own task above.</div>}
+      </div>
+
+      {showForm && (
+        <Modal title="Add my task" onClose={() => setShowForm(false)}>
+          <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Prep tomorrow's caption drafts" autoFocus /></div>
+          <div className="field"><label>Details</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Optional notes" /></div>
+          <div className="field-row">
+            <div className="field"><label>Due date</label><input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} /></div>
+            <div className="field"><label>Priority</label>
+              <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
+                {PRIORITY.map((p) => <option value={p.id} key={p.id}>{p.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addTask}>Add task</button></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Login ---------------------------------- */
+
+const PROFILE_COLORS = ["gold", "teal", "good", "alert"];
+const genCode = () => String(Math.floor(1000 + Math.random() * 9000));
+
+function PinPad({ onDigit, onBack }) {
+  return (
+    <div className="pinpad">
+      {["1","2","3","4","5","6","7","8","9","","0","⌫"].map((d, i) => (
+        d === "" ? <div key={i} /> : (
+          <button key={i} className={d === "⌫" ? "ghost" : ""} onClick={() => d === "⌫" ? onBack() : onDigit(d)}>
+            {d === "⌫" ? <X size={16} /> : d}
+          </button>
+        )
+      ))}
+    </div>
+  );
+}
+
+function LoginScreen({ data, saveData, onLogin }) {
+  const profiles = data.profiles || [];
+  const adminCode = data.adminCode || "";
+
+  const [pinTarget, setPinTarget] = useState(null); // profile being pin-checked
+  const [pin, setPin] = useState("");
+  const [pinError, setPinError] = useState(false);
+
+  const [mode, setMode] = useState("picker"); // picker | admin-setup | admin-unlock | admin-panel
+  const [adminPin, setAdminPin] = useState("");
+  const [adminPinError, setAdminPinError] = useState(false);
+  const [setupPin, setSetupPin] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newCode, setNewCode] = useState(genCode());
+  const [newCodeError, setNewCodeError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(null);
+  const [editCode, setEditCode] = useState("");
+  const [editCodeError, setEditCodeError] = useState("");
+
+  const initials = (name) => (name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  const tryLogin = (p) => {
+    if (p.pin) { setPinTarget(p); setPin(""); setPinError(false); }
+    else onLogin(p);
+  };
+  const pressDigit = (d) => {
+    const next = (pin + d).slice(0, 4);
+    setPin(next);
+    setPinError(false);
+    if (next.length >= pinTarget.pin.length) {
+      if (next === pinTarget.pin) onLogin(pinTarget);
+      else { setPinError(true); setPin(""); }
+    }
+  };
+
+  const pressSetupDigit = (d) => {
+    const next = (setupPin + d).slice(0, 4);
+    setSetupPin(next);
+    if (next.length >= 4) {
+      saveData({ ...data, adminCode: next });
+      setMode("admin-panel");
+      setSetupPin("");
+    }
+  };
+
+  const pressAdminDigit = (d) => {
+    const next = (adminPin + d).slice(0, 4);
+    setAdminPin(next);
+    setAdminPinError(false);
+    if (next.length >= 4) {
+      if (next === adminCode) { setMode("admin-panel"); setAdminPin(""); }
+      else { setAdminPinError(true); setAdminPin(""); }
+    }
+  };
+
+  const openManage = () => {
+    setEditingProfile(null);
+    setMode(adminCode ? "admin-unlock" : "admin-setup");
+    setAdminPin("");
+    setAdminPinError(false);
+    setSetupPin("");
+    setNewName("");
+    setNewCode(genCode());
+    setNewCodeError("");
+  };
+
+  const codeTaken = (code, excludeId) => profiles.some((p) => p.pin === code && p.id !== excludeId);
+
+  const createProfile = () => {
+    if (!newName.trim()) return;
+    if (!/^\d{4}$/.test(newCode)) { setNewCodeError("Code must be exactly 4 digits."); return; }
+    if (codeTaken(newCode)) { setNewCodeError("That code is already assigned to someone else."); return; }
+    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length] };
+    saveData({ ...data, profiles: [...profiles, np] });
+    setNewName("");
+    setNewCode(genCode());
+    setNewCodeError("");
+  };
+  const removeProfile = (id) => {
+    saveData({ ...data, profiles: profiles.filter((p) => p.id !== id) });
+    if (editingProfile && editingProfile.id === id) setEditingProfile(null);
+  };
+  const openEditCode = (p) => {
+    setEditingProfile(p);
+    setEditCode(p.pin);
+    setEditCodeError("");
+  };
+  const saveEditCode = () => {
+    if (!/^\d{4}$/.test(editCode)) { setEditCodeError("Code must be exactly 4 digits."); return; }
+    if (codeTaken(editCode, editingProfile.id)) { setEditCodeError("That code is already assigned to someone else."); return; }
+    saveData({ ...data, profiles: profiles.map((x) => (x.id === editingProfile.id ? { ...x, pin: editCode } : x)) });
+    setEditingProfile(null);
+  };
+  const copyCode = async (code) => {
+    try { await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable — code is still on screen */ }
+  };
+
+  return (
+    <div className="login-wrap">
+      <div className="login-card">
+        <div className="login-eyebrow">Social Ops</div>
+        <div className="login-brand-row">
+          <span className="brand-dot" />
+          <span className="b-name">Broadcast Desk</span>
+        </div>
+        <div className="login-title">Sign in</div>
+
+        {pinTarget ? (
+          <>
+            <div className="login-sub">Enter {pinTarget.name}'s code</div>
+            <div className="pin-dots">
+              {Array.from({ length: pinTarget.pin.length }).map((_, i) => (
+                <div key={i} className={`pin-dot ${i < pin.length ? "filled" : ""}`} />
+              ))}
+            </div>
+            {pinError && <div className="pin-error">That code didn't match — try again.</div>}
+            <PinPad value={pin} onDigit={pressDigit} onBack={() => setPin(pin.slice(0, -1))} />
+            <div style={{ textAlign: "center", marginTop: 12 }}>
+              <button className="btn" onClick={() => setPinTarget(null)}>Back</button>
+            </div>
+          </>
+        ) : mode === "admin-setup" ? (
+          <>
+            <div className="login-sub"><Shield size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />Set your lead passcode</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginBottom: 14, lineHeight: 1.5 }}>
+              This is the only door into profile management. Pick 4 digits only you know.
+            </div>
+            <div className="pin-dots">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className={`pin-dot ${i < setupPin.length ? "filled" : ""}`} />
+              ))}
+            </div>
+            <PinPad value={setupPin} onDigit={pressSetupDigit} onBack={() => setSetupPin(setupPin.slice(0, -1))} />
+            <div style={{ textAlign: "center", marginTop: 12 }}>
+              <button className="btn" onClick={() => setMode("picker")}>Back</button>
+            </div>
+          </>
+        ) : mode === "admin-unlock" ? (
+          <>
+            <div className="login-sub"><Lock size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />Lead passcode</div>
+            <div className="pin-dots">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className={`pin-dot ${i < adminPin.length ? "filled" : ""}`} />
+              ))}
+            </div>
+            {adminPinError && <div className="pin-error">Wrong passcode.</div>}
+            <PinPad value={adminPin} onDigit={pressAdminDigit} onBack={() => setAdminPin(adminPin.slice(0, -1))} />
+            <div style={{ textAlign: "center", marginTop: 12 }}>
+              <button className="btn" onClick={() => setMode("picker")}>Back</button>
+            </div>
+          </>
+        ) : mode === "admin-panel" ? (
+          <>
+            <div className="login-sub"><Shield size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />Manage profiles</div>
+
+            {editingProfile ? (
+              <div className="code-reveal">
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{editingProfile.name}'s login code</div>
+                <input
+                  className="code-input"
+                  value={editCode}
+                  autoFocus
+                  onChange={(e) => { setEditCode(e.target.value.replace(/\D/g, "").slice(0, 4)); setEditCodeError(""); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveEditCode(); }}
+                  placeholder="0000"
+                />
+                {editCodeError && <div className="pin-error" style={{ marginTop: 8 }}>{editCodeError}</div>}
+                <div className="copy-row">
+                  <button className="btn" onClick={() => setEditCode(genCode())}><RotateCw size={13} /> Random</button>
+                  <button className="btn" onClick={() => copyCode(editCode)}>{copied ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}</button>
+                  <button className="btn btn-gold" onClick={saveEditCode}>Save code</button>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 12 }}>Pick any 4 digits — send them to {editingProfile.name} so they can sign in.</div>
+                <button className="btn" style={{ marginTop: 14 }} onClick={() => setEditingProfile(null)}>Cancel</button>
+              </div>
+            ) : (
+              <>
+                <div className="admin-list">
+                  {profiles.length === 0 && <div className="empty" style={{ padding: "14px 0" }}>No profiles yet — add the first one below.</div>}
+                  {profiles.map((p) => (
+                    <div className="admin-row" key={p.id}>
+                      <div className="profile-avatar-lg" style={{ width: 32, height: 32, fontSize: 11, background: `var(--${p.color}-soft)`, color: `var(--${p.color})` }}>{initials(p.name)}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                      <button className="code code-btn" onClick={() => openEditCode(p)}>{p.pin}</button>
+                      <button className="icon-btn" title="Change this person's code" onClick={() => openEditCode(p)}><Pencil size={13} /></button>
+                      <button className="icon-btn" onClick={() => removeProfile(p.id)}><Trash2 size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+                <div className="field"><label>Add a profile</label></div>
+                <div className="field-row" style={{ alignItems: "flex-start" }}>
+                  <div className="field" style={{ marginBottom: 0, flex: 2 }}>
+                    <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Their name" onKeyDown={(e) => { if (e.key === "Enter") createProfile(); }} />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0, flex: 1 }}>
+                    <input
+                      className="mono-input"
+                      value={newCode}
+                      onChange={(e) => { setNewCode(e.target.value.replace(/\D/g, "").slice(0, 4)); setNewCodeError(""); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") createProfile(); }}
+                      placeholder="Code"
+                    />
+                  </div>
+                </div>
+                {newCodeError && <div className="pin-error" style={{ marginTop: -8, marginBottom: 12, textAlign: "left" }}>{newCodeError}</div>}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <button className="manage-link" style={{ width: "auto", margin: 0, border: "none", padding: "6px 4px" }} onClick={() => setNewCode(genCode())}><RotateCw size={12} /> Random code</button>
+                  <button className="btn btn-gold" onClick={createProfile}><Plus size={14} /> Add profile</button>
+                </div>
+              </>
+            )}
+            <div style={{ textAlign: "center", marginTop: 18 }}>
+              <button className="btn" onClick={() => setMode("picker")}>Back to sign in</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="login-sub">Who's checking in?</div>
+            <div className="profile-grid">
+              {profiles.map((p) => (
+                <button key={p.id} className="profile-card" onClick={() => tryLogin(p)}>
+                  <div className="profile-avatar-lg" style={{ background: `var(--${p.color}-soft)`, color: `var(--${p.color})` }}>{initials(p.name)}</div>
+                  <div className="pname">{p.name}</div>
+                </button>
+              ))}
+            </div>
+            {profiles.length === 0 && <div className="empty">No profiles yet. As the team lead, tap below to add the first one.</div>}
+            <button className="manage-link" onClick={openManage}><Settings size={13} /> Team lead? Manage profiles</button>
+            <div className="manage-caption">Adds people and hands out their sign-in codes</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- Team (in-app profile management) ---------------------------------- */
+
+function TeamManage({ data, saveData }) {
+  const profiles = data.profiles || [];
+  const adminCode = data.adminCode || "";
+
+  const [unlocked, setUnlocked] = useState(false);
+  const [mode, setMode] = useState(adminCode ? "unlock" : "setup"); // unlock | setup
+  const [enteredPin, setEnteredPin] = useState("");
+  const [pinError, setPinError] = useState(false);
+
+  const [newName, setNewName] = useState("");
+  const [newCode, setNewCode] = useState(genCode());
+  const [newCodeError, setNewCodeError] = useState("");
+  const [editingProfile, setEditingProfile] = useState(null);
+  const [editCode, setEditCode] = useState("");
+  const [editCodeError, setEditCodeError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [clearConfirm, setClearConfirm] = useState(false);
+  const [clearPin, setClearPin] = useState("");
+  const [clearPinError, setClearPinError] = useState(false);
+
+  const initials = (name) => (name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+  const codeTaken = (code, excludeId) => profiles.some((p) => p.pin === code && p.id !== excludeId);
+
+  const pressUnlockDigit = (d) => {
+    const next = (enteredPin + d).slice(0, 4);
+    setEnteredPin(next);
+    setPinError(false);
+    if (next.length >= 4) {
+      if (next === adminCode) { setUnlocked(true); setEnteredPin(""); }
+      else { setPinError(true); setEnteredPin(""); }
+    }
+  };
+  const pressSetupDigit = (d) => {
+    const next = (enteredPin + d).slice(0, 4);
+    setEnteredPin(next);
+    if (next.length >= 4) {
+      saveData({ ...data, adminCode: next });
+      setUnlocked(true);
+      setEnteredPin("");
+    }
+  };
+
+  const createProfile = () => {
+    if (!newName.trim()) return;
+    if (!/^\d{4}$/.test(newCode)) { setNewCodeError("Code must be exactly 4 digits."); return; }
+    if (codeTaken(newCode)) { setNewCodeError("That code is already assigned to someone else."); return; }
+    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length] };
+    saveData({ ...data, profiles: [...profiles, np] });
+    setNewName("");
+    setNewCode(genCode());
+    setNewCodeError("");
+  };
+  const removeProfile = (id) => {
+    saveData({ ...data, profiles: profiles.filter((p) => p.id !== id) });
+    if (editingProfile && editingProfile.id === id) setEditingProfile(null);
+  };
+  const openEditCode = (p) => { setEditingProfile(p); setEditCode(p.pin); setEditCodeError(""); };
+  const saveEditCode = () => {
+    if (!/^\d{4}$/.test(editCode)) { setEditCodeError("Code must be exactly 4 digits."); return; }
+    if (codeTaken(editCode, editingProfile.id)) { setEditCodeError("That code is already assigned to someone else."); return; }
+    saveData({ ...data, profiles: profiles.map((x) => (x.id === editingProfile.id ? { ...x, pin: editCode } : x)) });
+    setEditingProfile(null);
+  };
+  const copyCode = async (code) => {
+    try { await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
+  };
+  const clearDemoContent = () => {
+    saveData({
+      ...data,
+      tasks: [],
+      calendarEvents: [],
+      notes: [],
+      content: [],
+      ideas: [],
+      resources: [],
+    });
+    setClearConfirm(false);
+    setClearPin("");
+    setClearPinError(false);
+  };
+  const pressClearDigit = (d) => {
+    const next = (clearPin + d).slice(0, 4);
+    setClearPin(next);
+    setClearPinError(false);
+    if (next.length >= 4) {
+      if (next === adminCode) clearDemoContent();
+      else { setClearPinError(true); setClearPin(""); }
+    }
+  };
+
+  if (!unlocked) {
+    return (
+      <div>
+        <div className="topbar">
+          <div><div className="page-title">Team</div><div className="page-sub">Who's on the roster, and their sign-in codes.</div></div>
+        </div>
+        <div className="card" style={{ maxWidth: 380, margin: "0 auto", textAlign: "center", padding: "32px 28px" }}>
+          {mode === "setup" && !adminCode ? (
+            <>
+              <div className="login-sub" style={{ marginBottom: 8 }}><Shield size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />Set your lead passcode</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.5 }}>Pick 4 digits only you know — this unlocks profile management everywhere in the app.</div>
+            </>
+          ) : (
+            <div className="login-sub" style={{ marginBottom: 8 }}><Lock size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />Enter lead passcode</div>
+          )}
+          <div className="pin-dots">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className={`pin-dot ${i < enteredPin.length ? "filled" : ""}`} />
+            ))}
+          </div>
+          {pinError && <div className="pin-error">Wrong passcode.</div>}
+          <PinPad onDigit={adminCode ? pressUnlockDigit : pressSetupDigit} onBack={() => setEnteredPin(enteredPin.slice(0, -1))} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Team</div><div className="page-sub">Add or remove people — changes show up on the sign-in screen instantly.</div></div>
+      </div>
+
+      <div className="card" style={{ maxWidth: 480 }}>
+        {editingProfile ? (
+          <div className="code-reveal">
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{editingProfile.name}'s login code</div>
+            <input
+              className="code-input"
+              value={editCode}
+              autoFocus
+              onChange={(e) => { setEditCode(e.target.value.replace(/\D/g, "").slice(0, 4)); setEditCodeError(""); }}
+              onKeyDown={(e) => { if (e.key === "Enter") saveEditCode(); }}
+              placeholder="0000"
+            />
+            {editCodeError && <div className="pin-error" style={{ marginTop: 8 }}>{editCodeError}</div>}
+            <div className="copy-row">
+              <button className="btn" onClick={() => setEditCode(genCode())}><RotateCw size={13} /> Random</button>
+              <button className="btn" onClick={() => copyCode(editCode)}>{copied ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}</button>
+              <button className="btn btn-gold" onClick={saveEditCode}>Save code</button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 12 }}>Send this to {editingProfile.name} so they can sign in.</div>
+            <button className="btn" style={{ marginTop: 14 }} onClick={() => setEditingProfile(null)}>Cancel</button>
+          </div>
+        ) : (
+          <>
+            <div className="admin-list">
+              {profiles.length === 0 && <div className="empty" style={{ padding: "14px 0" }}>No profiles yet — add the first one below.</div>}
+              {profiles.map((p) => (
+                <div className="admin-row" key={p.id}>
+                  <div className="profile-avatar-lg" style={{ width: 32, height: 32, fontSize: 11, background: `var(--${p.color}-soft)`, color: `var(--${p.color})` }}>{initials(p.name)}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                  <button className="code code-btn" onClick={() => openEditCode(p)}>{p.pin}</button>
+                  <button className="icon-btn" title="Change this person's code" onClick={() => openEditCode(p)}><Pencil size={13} /></button>
+                  <button className="icon-btn" onClick={() => removeProfile(p.id)}><Trash2 size={13} /></button>
+                </div>
+              ))}
+            </div>
+            <div className="field"><label>Add a profile</label></div>
+            <div className="field-row" style={{ alignItems: "flex-start" }}>
+              <div className="field" style={{ marginBottom: 0, flex: 2 }}>
+                <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Their name" onKeyDown={(e) => { if (e.key === "Enter") createProfile(); }} />
+              </div>
+              <div className="field" style={{ marginBottom: 0, flex: 1 }}>
+                <input
+                  className="mono-input"
+                  value={newCode}
+                  onChange={(e) => { setNewCode(e.target.value.replace(/\D/g, "").slice(0, 4)); setNewCodeError(""); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") createProfile(); }}
+                  placeholder="Code"
+                />
+              </div>
+            </div>
+            {newCodeError && <div className="pin-error" style={{ marginTop: -8, marginBottom: 12, textAlign: "left" }}>{newCodeError}</div>}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <button className="manage-link" style={{ width: "auto", margin: 0, border: "none", padding: "6px 4px" }} onClick={() => setNewCode(genCode())}><RotateCw size={12} /> Random code</button>
+              <button className="btn btn-gold" onClick={createProfile}><Plus size={14} /> Add profile</button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {!editingProfile && (
+        <div className="card" style={{ maxWidth: 480, marginTop: 16 }}>
+          <div className="section-title"><Lightbulb size={16} color="var(--gold)" /> Load starter content</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Adds a handful of example duties, calendar posts, notes, and an idea — each clearly labelled "Example" — so the team can see how everything works. Safe to run even with real content already in place; it only adds, never overwrites.
+          </div>
+          <button className="btn" onClick={() => {
+            const ex = buildExamples();
+            saveData({
+              ...data,
+              tasks: [...data.tasks, ...ex.tasks],
+              calendarEvents: [...data.calendarEvents, ...ex.calendarEvents],
+              notes: [...data.notes, ...ex.notes],
+              content: [...data.content, ...ex.content],
+              ideas: [...data.ideas, ...ex.ideas],
+              resources: [...data.resources, ...ex.resources],
+            });
+          }}><Plus size={14} /> Load starter content</button>
+        </div>
+      )}
+
+      {!editingProfile && (
+        <div className="card danger-zone" style={{ maxWidth: 480, marginTop: 16 }}>
+          <div className="section-title" style={{ color: "var(--alert)" }}><AlertTriangle size={16} color="var(--alert)" /> Clear sample content</div>
+          {!clearConfirm ? (
+            <>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+                Wipes every task, calendar event, note, content item, idea, and resource — the placeholder content this app started with, or anything added since. Profiles and codes are kept.
+              </div>
+              <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)" }} onClick={() => { setClearConfirm(true); setClearPin(""); setClearPinError(false); }}>Clear all content</button>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 12.5, color: "var(--alert)", marginBottom: 6, fontWeight: 600, textAlign: "center" }}>This can't be undone.</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4, textAlign: "center" }}>Re-enter the lead passcode to confirm.</div>
+              <div className="pin-dots">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className={`pin-dot ${i < clearPin.length ? "filled" : ""}`} />
+                ))}
+              </div>
+              {clearPinError && <div className="pin-error">Wrong passcode.</div>}
+              <PinPad onDigit={pressClearDigit} onBack={() => setClearPin(clearPin.slice(0, -1))} />
+              <div style={{ textAlign: "center", marginTop: 12 }}>
+                <button className="btn" onClick={() => { setClearConfirm(false); setClearPin(""); setClearPinError(false); }}>Cancel</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- App shell ---------------------------------- */
+
+const NAV = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "myduties", label: "My Duties", icon: User },
+  { id: "duties", label: "Team Duties", icon: ListChecks },
+  { id: "calendar", label: "Calendar", icon: CalendarDays },
+  { id: "notes", label: "Notes", icon: StickyNote },
+  { id: "content", label: "Content Review", icon: Video },
+  { id: "ideas", label: "Idea Bank", icon: Lightbulb },
+  { id: "guidelines", label: "Guidelines", icon: BookOpen },
+  { id: "team", label: "Team", icon: Shield },
+];
+
+export default function TeamHub() {
+  const [data, setData] = useState(null);
+  const [view, setView] = useState("dashboard");
+  const [navOpen, setNavOpen] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const [loggedIn, setLoggedIn] = useState(null); // { id, name, color, pin }
+  const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let channel = null;
+
+    (async () => {
+      // Load (or create) the single shared row every device reads/writes.
+      let loadedData = null;
+      const { data: row, error } = await supabase.from("hub_state").select("data").eq("id", "main").single();
+
+      if (row && row.data) {
+        loadedData = row.data;
+      } else {
+        loadedData = seedData();
+        await supabase.from("hub_state").upsert({ id: "main", data: loadedData });
+      }
+      if (!loadedData.profiles) loadedData.profiles = [];
+      if (cancelled) return;
+      setData(loadedData);
+
+      // This device's "who's checked in" pointer is local on purpose — it's not shared data.
+      try {
+        const savedId = localStorage.getItem("my-profile-id");
+        if (savedId) {
+          const match = loadedData.profiles.find((p) => p.id === savedId);
+          if (match) setLoggedIn(match);
+        }
+      } catch {
+        // stay on login screen
+      }
+      if (!cancelled) setAuthReady(true);
+
+      // Live sync: whenever anyone on the team saves, every other phone gets pushed the update.
+      channel = supabase
+        .channel("hub_state_live")
+        .on(
+          "postgres_changes",
+          { event: "UPDATE", schema: "public", table: "hub_state", filter: "id=eq.main" },
+          (payload) => { if (!cancelled && payload.new && payload.new.data) setData(payload.new.data); }
+        )
+        .subscribe();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const saveData = async (next) => {
+    setData(next); // update this device instantly
+    try {
+      const { error } = await supabase.from("hub_state").update({ data: next, updated_at: new Date().toISOString() }).eq("id", "main");
+      setSaveError(!!error);
+    } catch {
+      setSaveError(true);
+    }
+  };
+
+  const handleLogin = (p) => {
+    setLoggedIn(p);
+    try { localStorage.setItem("my-profile-id", p.id); } catch { /* ignore */ }
+  };
+  const handleLogout = () => {
+    setLoggedIn(null);
+    try { localStorage.removeItem("my-profile-id"); } catch { /* ignore */ }
+  };
+
+  if (!data || !authReady) {
+    return (
+      <>
+        <style>{CSS}</style>
+        <div className="loading-screen">LOADING BRIEFING ROOM…</div>
+      </>
+    );
+  }
+
+  if (!loggedIn) {
+    return (
+      <>
+        <style>{CSS}</style>
+        <LoginScreen data={data} saveData={saveData} onLogin={handleLogin} />
+      </>
+    );
+  }
+
+  const profile = loggedIn.name;
+  const initials = profile.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  const Comp = {
+    dashboard: <Dashboard data={data} saveData={saveData} profile={profile} />,
+    myduties: <MyDuties data={data} saveData={saveData} profile={profile} />,
+    duties: <Duties data={data} saveData={saveData} />,
+    calendar: <Calendar data={data} saveData={saveData} />,
+    notes: <Notes data={data} saveData={saveData} />,
+    content: <ContentReview data={data} saveData={saveData} />,
+    ideas: <IdeaBank data={data} saveData={saveData} />,
+    guidelines: <Guidelines data={data} saveData={saveData} />,
+    team: <TeamManage data={data} saveData={saveData} />,
+  }[view];
+
+  return (
+    <div className="hub">
+      <style>{CSS}</style>
+
+      <button className="menu-toggle btn btn-ghost" style={{ position: "fixed", top: 16, left: 16, zIndex: 20 }} onClick={() => setNavOpen((o) => !o)}>
+        <Menu size={18} />
+      </button>
+
+      <div className={`sidebar ${navOpen ? "open" : ""}`}>
+        <div className="brand">
+          <span className="brand-dot" />
+          <div>
+            <div className="brand-text">Broadcast Desk</div>
+            <div className="brand-sub">Social Ops</div>
+          </div>
+        </div>
+        <div className="profile-box">
+          <div className="profile-chip">
+            <div className="av" style={{ background: `var(--${loggedIn.color})` }}>{initials}</div>
+            <div className="info">
+              <div className="name">{profile}</div>
+              <button className="change" onClick={handleLogout}>switch profile</button>
+            </div>
+          </div>
+        </div>
+
+        {NAV.map((n) => {
+          const Icon = n.icon;
+          return (
+            <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setNavOpen(false); }}>
+              <Icon size={16} /> {n.label}
+            </button>
+          );
+        })}
+        <div className="sidebar-foot">
+          <div className="live-tag"><span className="dot" /> LIVE</div>
+          <div style={{ marginTop: 6 }}>Everything here — board, profiles, and progress — is shared and saved for the whole team, even after updates.</div>
+        </div>
+      </div>
+
+      <div className="main">{Comp}</div>
+    </div>
+  );
+}
