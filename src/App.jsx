@@ -50,14 +50,32 @@ const CAL_STATUS = [
   { id: "posted", label: "Posted", color: "var(--good)" },
   { id: "skipped", label: "Skipped", color: "var(--alert)" },
 ];
+const TASK_TYPES = [
+  { id: "film", label: "Film", verb: "Film", icon: Video, color: "var(--gold)" },
+  { id: "edit", label: "Edit", verb: "Edit", icon: Pencil, color: "var(--teal)" },
+  { id: "write", label: "Write", verb: "Write", icon: StickyNote, color: "var(--good)" },
+  { id: "post", label: "Post", verb: "Post", icon: Send, color: "var(--alert)" },
+  { id: "review", label: "Review", verb: "Review", icon: CheckCircle2, color: "var(--muted)" },
+  { id: "other", label: "Other", verb: "Do", icon: ListChecks, color: "var(--muted)" },
+];
+
+const STEP_TEMPLATES = {
+  film: ["Check the brief or idea reference", "Charge batteries & pack gear", "Confirm location or subject", "Shoot the footage"],
+  edit: ["Import and organize footage", "Build a rough cut", "Add captions, music, or graphics", "Export and share the draft"],
+  write: ["Outline the key points", "Write a first draft", "Edit for tone and length", "Get a second pair of eyes"],
+  post: ["Do a final review of the asset", "Write the caption", "Add hashtags or tags", "Schedule or publish"],
+  review: ["Watch or read through fully", "Note specific timestamps or lines", "Leave clear feedback", "Confirm the status update"],
+  other: ["Break this into one small first step", "Do that step", "Check in if you get stuck"],
+};
+const defaultSteps = (type) => (STEP_TEMPLATES[type] || STEP_TEMPLATES.other).map((text) => ({ id: uid(), text, done: false }));
 
 function buildExamples() {
   return {
     tasks: [
-      { id: uid(), title: "Example: Cut Reels for this week's post", description: "This is what a duty looks like — reassign it to a teammate and drag it through the board.", assignee: "Example", dueDate: todayISO(), status: "progress", priority: "high" },
-      { id: uid(), title: "Example: Write caption copy", description: "Duties move through columns: To Do → In Progress → In Review → Done.", assignee: "Example", dueDate: addDays(1), status: "todo", priority: "medium" },
-      { id: uid(), title: "Example: Approve final thumbnail", description: "", assignee: "Example", dueDate: addDays(2), status: "review", priority: "low" },
-      { id: uid(), title: "Example: Publish launch post", description: "Overdue duties show up in red, like this one.", assignee: "Example", dueDate: addDays(-1), status: "todo", priority: "high" },
+      { id: uid(), title: "Example: Reels for this week's post", description: "This is what a duty looks like — reassign it to a teammate and drag it through the board.", assignee: "Example", dueDate: todayISO(), status: "progress", priority: "high", type: "edit", steps: [{ id: uid(), text: "Import and organize footage", done: true }, ...defaultSteps("edit").slice(1)] },
+      { id: uid(), title: "Example: Caption copy", description: "Duties move through columns: To Do → In Progress → In Review → Done.", assignee: "Example", dueDate: addDays(1), status: "todo", priority: "medium", type: "write", steps: defaultSteps("write") },
+      { id: uid(), title: "Example: Approve final thumbnail", description: "", assignee: "Example", dueDate: addDays(2), status: "review", priority: "low", type: "review", steps: defaultSteps("review") },
+      { id: uid(), title: "Example: Publish launch post", description: "Overdue duties show up in red, like this one.", assignee: "Example", dueDate: addDays(-1), status: "todo", priority: "high", type: "post", steps: defaultSteps("post") },
     ],
     calendarEvents: [
       { id: uid(), title: "Example: Publish product post", date: todayISO(), time: "09:00", type: "post", status: "ready", notes: "Caption is drafted, waiting on final approval." },
@@ -91,17 +109,28 @@ function buildExamples() {
 const seedData = () => ({
   adminCode: "",
   profiles: [],
+  deletedTasks: [],
   tasks: [
-    { id: uid(), title: "Cut Reels for product launch", description: "3 vertical cuts from the studio B-roll, captions burned in.", assignee: "Jordan", dueDate: todayISO(), status: "progress", priority: "high" },
-    { id: uid(), title: "Write carousel copy — Q3 recap", description: "10-slide carousel, tone: confident, data-forward.", assignee: "Sam", dueDate: todayISO(), status: "review", priority: "medium" },
-    { id: uid(), title: "Community reply sweep", description: "Clear comment queue across IG + TikTok.", assignee: "Priya", dueDate: todayISO(), status: "todo", priority: "low" },
-    { id: uid(), title: "Thumbnail set — creator interview", description: "3 thumbnail options, A/B test on YouTube.", assignee: "Alex", dueDate: todayISO(), status: "done", priority: "medium" },
-    { id: uid(), title: "Draft posting calendar — next sprint", description: "Two-week grid across all channels.", assignee: "Jordan", dueDate: todayISO(), status: "todo", priority: "high" },
+    { id: uid(), title: "Reels for product launch", description: "3 vertical cuts from the studio B-roll, captions burned in.", assignee: "Jordan", dueDate: todayISO(), status: "progress", priority: "high", type: "edit", steps: [{ id: uid(), text: "Import and organize footage", done: true }, { id: uid(), text: "Build a rough cut", done: false }, { id: uid(), text: "Add captions, music, or graphics", done: false }, { id: uid(), text: "Export and share the draft", done: false }] },
+    { id: uid(), title: "Carousel copy — Q3 recap", description: "10-slide carousel, tone: confident, data-forward.", assignee: "Sam", dueDate: todayISO(), status: "review", priority: "medium", type: "write", steps: defaultSteps("write") },
+    { id: uid(), title: "Community reply sweep", description: "Clear comment queue across IG + TikTok.", assignee: "Priya", dueDate: todayISO(), status: "todo", priority: "low", type: "other", steps: defaultSteps("other") },
+    { id: uid(), title: "Thumbnail set — creator interview", description: "3 thumbnail options, A/B test on YouTube.", assignee: "Alex", dueDate: todayISO(), status: "done", priority: "medium", type: "edit", steps: defaultSteps("edit").map((s) => ({ ...s, done: true })) },
+    { id: uid(), title: "Posting calendar — next sprint", description: "Two-week grid across all channels.", assignee: "Jordan", dueDate: todayISO(), status: "todo", priority: "high", type: "write", steps: defaultSteps("write") },
   ],
   calendarEvents: [
-    { id: uid(), title: "Product launch post — all channels", date: todayISO(), time: "09:00", type: "post" },
-    { id: uid(), title: "Content review sync", date: todayISO(), time: "18:00", type: "meeting" },
+    { id: uid(), title: "Product launch post — all channels", date: todayISO(), time: "09:00", type: "post", assignee: "Jordan", status: "planned" },
+    { id: uid(), title: "Content review sync", date: todayISO(), time: "18:00", type: "meeting", assignee: "", status: "planned" },
   ],
+  meetingItems: [
+    { id: uid(), text: "Review the new hook format results before next sprint", author: "Team Lead", date: todayISO(), done: false },
+  ],
+  announcements: [
+    { id: uid(), text: "Welcome to Broadcast Desk — this is where team news and heads-up messages will show.", author: "Team Lead", date: todayISO() },
+  ],
+  goals: {
+    teamWeeklyTarget: 6,
+    individualTargets: {},
+  },
   notes: [
     { id: uid(), text: "Reminder: new hook format is testing well on Reels — keep the first 1.5s a question or a bold claim.", author: "Team Lead", date: todayISO(), color: "gold", pinned: true },
     { id: uid(), text: "Client wants fewer stock transitions, more handheld feel for BTS content.", author: "Sam", date: todayISO(), color: "teal", pinned: false },
@@ -120,9 +149,9 @@ const seedData = () => ({
     },
   ],
   ideas: [
-    { id: uid(), title: "Day-in-the-life of the editing team", description: "Behind the scenes of how a post goes from brief to published.", tags: ["BTS", "Reels"], votes: 4, author: "Priya" },
-    { id: uid(), title: "Myth-busting series for our category", description: "Short-form series knocking down 5 common misconceptions.", tags: ["Series", "Educational"], votes: 6, author: "Alex" },
-    { id: uid(), title: "Duet reaction to top comment each week", description: "Turns community feedback into content, builds loyalty.", tags: ["Community"], votes: 2, author: "Jordan" },
+    { id: uid(), title: "Day-in-the-life of the editing team", description: "Behind the scenes of how a post goes from brief to published.", tags: ["BTS", "Reels"], votes: 4, author: "Priya", link: "" },
+    { id: uid(), title: "Myth-busting series for our category", description: "Short-form series knocking down 5 common misconceptions.", tags: ["Series", "Educational"], votes: 6, author: "Alex", link: "" },
+    { id: uid(), title: "Duet reaction to top comment each week", description: "Turns community feedback into content, builds loyalty.", tags: ["Community"], votes: 2, author: "Jordan", link: "" },
   ],
   resources: [
     { id: uid(), title: "Brand Voice Guide", description: "Tone, vocabulary, and phrases to avoid across every channel.", link: "", category: "Guidelines" },
@@ -164,6 +193,7 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
 .sidebar{
   width:230px; flex-shrink:0; background:var(--panel); border-right:1px solid var(--hair);
   display:flex; flex-direction:column; padding:22px 14px; position:sticky; top:0; height:100vh; z-index:5;
+  overflow-y:auto;
 }
 .brand{ display:flex; align-items:center; gap:9px; padding:4px 8px 22px; border-bottom:1px solid var(--hair); margin-bottom:14px; }
 .brand-dot{ width:9px; height:9px; border-radius:50%; background:var(--alert); box-shadow:0 0 8px var(--alert); flex-shrink:0; }
@@ -484,9 +514,29 @@ function Modal({ title, onClose, children }) {
 
 /* ---------------------------------- Dashboard ---------------------------------- */
 
-function Dashboard({ data, saveData, profile }) {
+function Dashboard({ data, saveData, profile, setView, isEmployer }) {
   const { tasks, calendarEvents, notes, content } = data;
   const [quickAdd, setQuickAdd] = useState({});
+  const [showGoals, setShowGoals] = useState(false);
+  const [goalForm, setGoalForm] = useState({ team: 6, mine: 0 });
+
+  const openGoals = () => {
+    setGoalForm({
+      team: (data.goals && data.goals.teamWeeklyTarget) || 0,
+      mine: profile ? ((data.goals && data.goals.individualTargets && data.goals.individualTargets[profile]) || 0) : 0,
+    });
+    setShowGoals(true);
+  };
+  const saveGoals = () => {
+    saveData({
+      ...data,
+      goals: {
+        teamWeeklyTarget: Number(goalForm.team) || 0,
+        individualTargets: { ...((data.goals && data.goals.individualTargets) || {}), ...(profile ? { [profile]: Number(goalForm.mine) || 0 } : {}) },
+      },
+    });
+    setShowGoals(false);
+  };
 
   const addQuickTask = (member) => {
     const title = (quickAdd[member] || "").trim();
@@ -497,7 +547,16 @@ function Dashboard({ data, saveData, profile }) {
   };
   const done = tasks.filter((t) => t.status === "done").length;
   const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
-  const overdue = tasks.filter((t) => t.status !== "done" && daysUntil(t.dueDate) < 0).length;
+  const overdueTasks = tasks.filter((t) => t.status !== "done" && daysUntil(t.dueDate) < 0);
+  const overdue = overdueTasks.length;
+
+  const myPlate = profile
+    ? tasks
+        .filter((t) => t.assignee === profile && t.status !== "done" && daysUntil(t.dueDate) <= 0)
+        .sort((a, b) => daysUntil(a.dueDate) - daysUntil(b.dueDate))
+    : [];
+  const hour = new Date().getHours();
+  const greeting = hour < 5 ? "Still up," : hour < 12 ? "Good morning," : hour < 18 ? "Good afternoon," : "Good evening,";
   const inProgress = tasks.filter((t) => t.status === "progress").length;
   const pendingReview = tasks.filter((t) => t.status === "review").length + content.filter(c=>c.status==="review").length;
 
@@ -516,29 +575,123 @@ function Dashboard({ data, saveData, profile }) {
   const recentNotes = [...notes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)).slice(0, 3);
   const circumference = 2 * Math.PI * 50;
 
+  const weekStart = startOfWeek(new Date());
+  const weekStartIso = isoOf(weekStart);
+  const weekEndDate = new Date(weekStart); weekEndDate.setDate(weekEndDate.getDate() + 6);
+  const weekEndIso = isoOf(weekEndDate);
+  const postedThisWeek = calendarEvents.filter((e) => e.type === "post" && e.status === "posted" && e.date >= weekStartIso && e.date <= weekEndIso);
+  const teamTarget = (data.goals && data.goals.teamWeeklyTarget) || 0;
+  const teamPosted = postedThisWeek.length;
+  const myTarget = profile ? ((data.goals && data.goals.individualTargets && data.goals.individualTargets[profile]) || 0) : 0;
+  const myPosted = profile ? postedThisWeek.filter((e) => e.assignee === profile).length : 0;
+
   return (
     <div>
-      <div className="hero">
-        <div className="ring-wrap">
-          <svg width="118" height="118" viewBox="0 0 118 118">
-            <circle cx="59" cy="59" r="50" fill="none" stroke="var(--panel-raised)" strokeWidth="10" />
-            <circle
-              cx="59" cy="59" r="50" fill="none" stroke="var(--gold)" strokeWidth="10" strokeLinecap="round"
-              strokeDasharray={circumference} strokeDashoffset={circumference - (pct / 100) * circumference}
-              transform="rotate(-90 59 59)" style={{ transition: "stroke-dashoffset .5s ease" }}
-            />
-          </svg>
-          <div className="ring-num"><div className="n">{pct}%</div><div className="l">On Track</div></div>
+      <div className="hero" style={{ display: "block", padding: "24px 28px", marginBottom: 16 }}>
+        <div className="display" style={{ fontSize: 21, fontWeight: 600 }}>{greeting} {profile || "there"}</div>
+        <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4, marginBottom: myPlate.length ? 14 : 0 }}>
+          {!profile ? "Sign in to see your own plate for today." : myPlate.length === 0 ? "Nothing due today or overdue — you're clear." : "Here's what's on your plate today:"}
         </div>
-        <div className="hero-stats">
-          <div className="hstat"><div className="n">{tasks.length}</div><div className="l">Active duties</div></div>
-          <div className="hstat"><div className="n" style={{ color: inProgress ? "var(--gold)" : "var(--text)" }}>{inProgress}</div><div className="l">In progress</div></div>
-          <div className="hstat"><div className="n" style={{ color: pendingReview ? "var(--teal)" : "var(--text)" }}>{pendingReview}</div><div className="l">Awaiting review</div></div>
-          <div className="hstat"><div className="n" style={{ color: overdue ? "var(--alert)" : "var(--text)" }}>{overdue}</div><div className="l">Overdue</div></div>
-        </div>
+        {myPlate.map((t) => {
+          const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
+          const TyIcon = ty.icon;
+          const late = daysUntil(t.dueDate) < 0;
+          const nextStep = (t.steps || []).find((s) => !s.done);
+          return (
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+              <span style={{ width: 28, height: 28, borderRadius: 7, background: ty.color + "1f", color: ty.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><TyIcon size={14} /></span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ty.verb} — {t.title}</div>
+                {nextStep ? (
+                  <div style={{ fontSize: 11.5, color: "var(--gold)", marginTop: 2 }}>Next: {nextStep.text}</div>
+                ) : t.description ? (
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{t.description}</div>
+                ) : null}
+              </div>
+              {late && <span className="pill" style={{ background: "var(--alert-soft)", color: "var(--alert)" }}>Overdue</span>}
+            </div>
+          );
+        })}
       </div>
 
-      <div className="grid two-col">
+      {isEmployer && overdueTasks.length > 0 && (
+        <div className="card" style={{ border: "1px solid rgba(217,86,75,0.35)", marginBottom: 16 }}>
+          <div className="section-title" style={{ color: "var(--alert)" }}><AlertTriangle size={16} color="var(--alert)" /> Needs attention · {overdueTasks.length} overdue</div>
+          {overdueTasks.map((t) => (
+            <div key={t.id} style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid var(--hair)", fontSize: 13 }}>
+              <span>{t.title}</span><span style={{ color: "var(--muted)" }}>{t.assignee || "Unassigned"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {isEmployer ? (
+        <div className="card" style={{ marginBottom: 16, padding: 0, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 28, flexWrap: "wrap", padding: "22px 24px" }}>
+            <div className="ring-wrap" style={{ width: 88, height: 88 }}>
+              <svg width="88" height="88" viewBox="0 0 118 118">
+                <circle cx="59" cy="59" r="50" fill="none" stroke="var(--panel-raised)" strokeWidth="10" />
+                <circle
+                  cx="59" cy="59" r="50" fill="none" stroke="var(--gold)" strokeWidth="10" strokeLinecap="round"
+                  strokeDasharray={circumference} strokeDashoffset={circumference - (pct / 100) * circumference}
+                  transform="rotate(-90 59 59)" style={{ transition: "stroke-dashoffset .5s ease" }}
+                />
+              </svg>
+              <div className="ring-num"><div className="n" style={{ fontSize: 19 }}>{pct}%</div><div className="l" style={{ fontSize: 8.5 }}>On track</div></div>
+            </div>
+            <div className="hero-stats" style={{ gap: 22 }}>
+              <div className="hstat"><div className="n" style={{ fontSize: 19 }}>{tasks.length}</div><div className="l">Active duties</div></div>
+              <div className="hstat"><div className="n" style={{ fontSize: 19, color: inProgress ? "var(--gold)" : "var(--text)" }}>{inProgress}</div><div className="l">In progress</div></div>
+              <div className="hstat"><div className="n" style={{ fontSize: 19, color: pendingReview ? "var(--teal)" : "var(--text)" }}>{pendingReview}</div><div className="l">Awaiting review</div></div>
+              <div className="hstat"><div className="n" style={{ fontSize: 19, color: overdue ? "var(--alert)" : "var(--text)" }}>{overdue}</div><div className="l">Overdue</div></div>
+            </div>
+          </div>
+
+          <div style={{ borderTop: "1px solid var(--hair)", padding: "18px 24px" }}>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 10 }}>Content pipeline</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }}>
+              {CONTENT_STATUS.map((s) => (
+                <div key={s.id} style={{ background: "var(--panel-raised)", borderRadius: 9, padding: "10px 8px", textAlign: "center" }}>
+                  <div style={{ fontFamily: "Fraunces, serif", fontSize: 19, fontWeight: 700, color: s.color }}>{content.filter((c) => c.status === s.id).length}</div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ borderTop: "1px solid var(--hair)", padding: "18px 24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>This week's goals</div>
+              <button className="btn" style={{ padding: "5px 11px", fontSize: 11.5 }} onClick={openGoals}>Edit goals</button>
+            </div>
+            <div className="member-row">
+              <div className="mtop"><span style={{ fontWeight: 600 }}>Team</span><span style={{ color: "var(--muted)" }}>{teamPosted}/{teamTarget || "—"} posts</span></div>
+              <ProgressBar pct={teamTarget ? (teamPosted / teamTarget) * 100 : 0} color={teamTarget && teamPosted >= teamTarget ? "var(--good)" : "var(--gold)"} />
+            </div>
+            {profile && (
+              <div className="member-row" style={{ marginBottom: 0 }}>
+                <div className="mtop"><span style={{ fontWeight: 600 }}>{profile}</span><span style={{ color: "var(--muted)" }}>{myPosted}/{myTarget || "—"} posts</span></div>
+                <ProgressBar pct={myTarget ? (myPosted / myTarget) * 100 : 0} color={myTarget && myPosted >= myTarget ? "var(--good)" : "var(--teal)"} />
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        profile && (
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="topbar" style={{ marginBottom: 10 }}>
+              <div className="section-title" style={{ marginBottom: 0 }}>Your goal this week</div>
+              <button className="btn" style={{ padding: "5px 11px", fontSize: 11.5 }} onClick={openGoals}>Edit</button>
+            </div>
+            <div className="member-row" style={{ marginBottom: 0 }}>
+              <div className="mtop"><span style={{ fontWeight: 600 }}>{profile}</span><span style={{ color: "var(--muted)" }}>{myPosted}/{myTarget || "—"} posts</span></div>
+              <ProgressBar pct={myTarget ? (myPosted / myTarget) * 100 : 0} color={myTarget && myPosted >= myTarget ? "var(--good)" : "var(--teal)"} />
+            </div>
+          </div>
+        )
+      )}
+
+      <div className={`grid ${isEmployer ? "two-col" : ""}`}>
         <div className="card">
           <div className="section-title"><CalendarDays size={16} color="var(--gold)" /> Upcoming on the calendar</div>
           {upcoming.length === 0 && <div className="empty">Nothing scheduled yet — add something on the Calendar page.</div>}
@@ -558,6 +711,7 @@ function Dashboard({ data, saveData, profile }) {
           })}
         </div>
 
+        {isEmployer && (
         <div className="card">
           <div className="section-title"><Users size={16} color="var(--gold)" /> Team workload</div>
           {memberStats.length === 0 && <div className="empty">Assign a duty to see workload here.</div>}
@@ -611,7 +765,20 @@ function Dashboard({ data, saveData, profile }) {
             </div>
           </div>
         </div>
+        )}
       </div>
+
+      {data.announcements && data.announcements.length > 0 && (
+        <div className="card" style={{ marginTop: 16, borderColor: "var(--gold-soft)" }}>
+          <div className="section-title"><Radio size={16} color="var(--gold)" /> Announcements</div>
+          {[...data.announcements].reverse().slice(0, 3).map((a) => (
+            <div key={a.id} style={{ padding: "9px 0", borderBottom: "1px solid var(--hair)", fontSize: 13 }}>
+              {a.text}
+              <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{a.author} · {fmtDate(a.date)}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="section-title"><Pin size={16} color="var(--gold)" /> Pinned & recent notes</div>
@@ -625,26 +792,161 @@ function Dashboard({ data, saveData, profile }) {
           {recentNotes.length === 0 && <div className="empty">No notes yet.</div>}
         </div>
       </div>
+
+      {showGoals && (
+        <Modal title="Edit weekly goals" onClose={() => setShowGoals(false)}>
+          {isEmployer && (
+            <div className="field"><label>Team weekly post target</label><input type="number" min="0" value={goalForm.team} onChange={(e) => setGoalForm({ ...goalForm, team: e.target.value })} /></div>
+          )}
+          {profile && (
+            <div className="field"><label>{profile}'s personal weekly post target</label><input type="number" min="0" value={goalForm.mine} onChange={(e) => setGoalForm({ ...goalForm, mine: e.target.value })} /></div>
+          )}
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Progress counts calendar events with type "Post" and status "Posted" this week (Sunday–Saturday).
+          </div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowGoals(false)}>Cancel</button><button className="btn btn-gold" onClick={saveGoals}>Save goals</button></div>
+        </Modal>
+      )}
     </div>
+  );
+}
+
+/* ---------------------------------- Task detail (shared by Duties & My Duties) ---------------------------------- */
+
+function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignees, onDelete }) {
+  const task = data.tasks.find((t) => t.id === taskId);
+  const [newStep, setNewStep] = useState("");
+  const [editingStepId, setEditingStepId] = useState(null);
+  const [editingStepText, setEditingStepText] = useState("");
+  const [noteText, setNoteText] = useState("");
+
+  if (!task) return null;
+
+  const updateTask = (patch) => {
+    saveData({ ...data, tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, ...patch } : t)) });
+  };
+  const addStep = () => {
+    if (!newStep.trim()) return;
+    updateTask({ steps: [...(task.steps || []), { id: uid(), text: newStep.trim(), done: false }] });
+    setNewStep("");
+  };
+  const toggleStep = (id) => updateTask({ steps: (task.steps || []).map((s) => (s.id === id ? { ...s, done: !s.done } : s)) });
+  const removeStep = (id) => updateTask({ steps: (task.steps || []).filter((s) => s.id !== id) });
+  const startEditStep = (s) => { setEditingStepId(s.id); setEditingStepText(s.text); };
+  const saveEditStep = () => {
+    if (editingStepText.trim()) updateTask({ steps: (task.steps || []).map((s) => (s.id === editingStepId ? { ...s, text: editingStepText.trim() } : s)) });
+    setEditingStepId(null);
+  };
+  const addNote = () => {
+    if (!noteText.trim()) return;
+    updateTask({ notes: [...(task.notes || []), { id: uid(), author: profile || "Team", text: noteText.trim(), date: todayISO() }] });
+    setNoteText("");
+  };
+
+  const yt = youtubeId(task.link);
+  const drive = !yt ? driveEmbedUrl(task.link) : null;
+  const steps = task.steps || [];
+
+  return (
+    <Modal title="Duty details" onClose={onClose}>
+      <div className="field"><label>Title</label><input value={task.title} onChange={(e) => updateTask({ title: e.target.value })} /></div>
+      <div className="field"><label>Details</label><textarea value={task.description || ""} onChange={(e) => updateTask({ description: e.target.value })} placeholder="Any brief, links, or notes" /></div>
+      <div className="field-row">
+        <div className="field"><label>Action</label>
+          <select value={task.type} onChange={(e) => updateTask({ type: e.target.value })}>
+            {TASK_TYPES.map((t) => <option value={t.id} key={t.id}>{t.label}</option>)}
+          </select>
+        </div>
+        <div className="field"><label>Priority</label>
+          <select value={task.priority} onChange={(e) => updateTask({ priority: e.target.value })}>
+            {PRIORITY.map((p) => <option value={p.id} key={p.id}>{p.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field"><label>Assignee</label>
+          <input list="detail-assignee-list" value={task.assignee || ""} onChange={(e) => updateTask({ assignee: e.target.value })} placeholder="Name" />
+          <datalist id="detail-assignee-list">{allAssignees.map((a) => <option value={a} key={a} />)}</datalist>
+        </div>
+        <div className="field"><label>Due date</label><input type="date" value={task.dueDate} onChange={(e) => updateTask({ dueDate: e.target.value })} /></div>
+      </div>
+      <div className="field"><label>Reference link (optional)</label><input value={task.link || ""} onChange={(e) => updateTask({ link: e.target.value })} placeholder="YouTube, Drive, or an example link" /></div>
+      {(yt || drive) && (
+        <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 14, borderRadius: 8, overflow: "hidden" }}>
+          <iframe src={yt ? `https://www.youtube.com/embed/${yt}` : drive} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }} allowFullScreen title={task.title} />
+        </div>
+      )}
+
+      <div className="section-title" style={{ fontSize: 13 }}><ListChecks size={14} color="var(--gold)" /> Checklist</div>
+      {steps.map((s) => (
+        <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0" }}>
+          <button className={`check-btn ${s.done ? "done" : ""}`} style={{ width: 16, height: 16, flexShrink: 0 }} onClick={() => toggleStep(s.id)}><CheckCircle2 size={10} /></button>
+          {editingStepId === s.id ? (
+            <input
+              autoFocus value={editingStepText} onChange={(e) => setEditingStepText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") saveEditStep(); }} onBlur={saveEditStep}
+              style={{ flex: 1, background: "var(--panel-raised)", border: "1px solid var(--gold)", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: "var(--text)", outline: "none" }}
+            />
+          ) : (
+            <span onClick={() => startEditStep(s)} style={{ flex: 1, fontSize: 12.5, textDecoration: s.done ? "line-through" : "none", opacity: s.done ? 0.55 : 1, cursor: "pointer" }}>{s.text}</span>
+          )}
+          <button className="icon-btn" onClick={() => removeStep(s.id)}><Trash2 size={12} /></button>
+        </div>
+      ))}
+      {steps.length === 0 && <div className="empty" style={{ padding: "8px 0" }}>No checklist yet — add the first step below.</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 8, marginBottom: 18 }}>
+        <input
+          value={newStep} onChange={(e) => setNewStep(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addStep(); }}
+          placeholder="Add a step…" style={{ flex: 1, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 6, padding: "7px 9px", fontSize: 12.5, color: "var(--text)", outline: "none" }}
+        />
+        <button className="btn" onClick={addStep}><Plus size={13} /></button>
+      </div>
+
+      <div className="section-title" style={{ fontSize: 13 }}><MessageSquare size={14} color="var(--gold)" /> Notes</div>
+      {(task.notes || []).map((n) => (
+        <div key={n.id} style={{ fontSize: 12, padding: "7px 0", borderBottom: "1px solid var(--hair)" }}>
+          <div>{n.text}</div>
+          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{n.author} · {fmtDate(n.date)}</div>
+        </div>
+      ))}
+      {(!task.notes || task.notes.length === 0) && <div className="empty" style={{ padding: "8px 0" }}>No notes yet.</div>}
+      <div className="comment-form" style={{ marginTop: 8, marginBottom: 4 }}>
+        <textarea value={noteText} onChange={(e) => setNoteText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addNote(); } }} placeholder="Leave a quick note for whoever's on this…" />
+        <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addNote}><Send size={13} /></button>
+      </div>
+
+      <div className="modal-actions">
+        <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)" }} onClick={() => { onDelete(task.id); onClose(); }}><Trash2 size={13} /> Delete duty</button>
+        <button className="btn btn-gold" onClick={onClose}>Done</button>
+      </div>
+    </Modal>
   );
 }
 
 /* ---------------------------------- Duties board ---------------------------------- */
 
-function Duties({ data, saveData }) {
+function Duties({ data, saveData, profile }) {
   const [filter, setFilter] = useState("all");
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium" });
+  const [form, setForm] = useState({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium", type: "other" });
+  const [expanded, setExpanded] = useState({});
+  const [openTaskId, setOpenTaskId] = useState(null);
 
   const members = [...new Set(data.tasks.map((t) => t.assignee).filter(Boolean))];
   const filtered = filter === "all" ? data.tasks : data.tasks.filter((t) => t.assignee === filter);
 
   const addTask = () => {
     if (!form.title.trim()) return;
-    const task = { id: uid(), status: "todo", ...form };
+    const task = { id: uid(), status: "todo", steps: defaultSteps(form.type), link: "", notes: [], ...form };
     saveData({ ...data, tasks: [task, ...data.tasks] });
-    setForm({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium" });
+    setForm({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium", type: "other" });
     setShowForm(false);
+  };
+  const toggleStep = (taskId, stepId) => {
+    saveData({
+      ...data,
+      tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, steps: (t.steps || []).map((s) => (s.id === stepId ? { ...s, done: !s.done } : s)) } : t)),
+    });
   };
   const updateStatus = (id, status) => {
     saveData({
@@ -652,7 +954,15 @@ function Duties({ data, saveData }) {
       tasks: data.tasks.map((t) => (t.id === id ? { ...t, status, completedAt: status === "done" ? todayISO() : null } : t)),
     });
   };
-  const removeTask = (id) => saveData({ ...data, tasks: data.tasks.filter((t) => t.id !== id) });
+  const removeTask = (id) => {
+    const task = data.tasks.find((t) => t.id === id);
+    if (!task) return;
+    saveData({
+      ...data,
+      tasks: data.tasks.filter((t) => t.id !== id),
+      deletedTasks: [{ ...task, deletedBy: profile || "Unknown", deletedAt: todayISO() }, ...(data.deletedTasks || [])],
+    });
+  };
 
   return (
     <div>
@@ -679,15 +989,46 @@ function Duties({ data, saveData }) {
               </div>
               {items.map((t) => {
                 const p = PRIORITY.find((x) => x.id === t.priority) || PRIORITY[1];
+                const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
+                const TyIcon = ty.icon;
                 const d = daysUntil(t.dueDate);
                 const overdue = d < 0 && t.status !== "done";
+                const steps = t.steps || [];
+                const stepsDone = steps.filter((s) => s.done).length;
+                const nextStep = steps.find((s) => !s.done);
+                const isOpen = expanded[t.id];
                 return (
                   <div className="task-card" style={{ borderLeftColor: p.color }} key={t.id}>
                     <button className="icon-btn" style={{ position: "absolute", top: 8, right: 8 }} onClick={() => removeTask(t.id)}>
                       <Trash2 size={13} />
                     </button>
-                    <div className="tt" style={{ paddingRight: 18 }}>{t.title}</div>
+                    <div style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: ty.color, background: ty.color + "1f", padding: "2px 7px", borderRadius: 5, marginBottom: 6 }}>
+                      <TyIcon size={10} /> {ty.label}
+                    </div>
+                    <div className="tt" style={{ paddingRight: 18, cursor: "pointer" }} onClick={() => setOpenTaskId(t.id)}>{t.title}</div>
                     {t.description && <div className="td">{t.description}</div>}
+                    {steps.length > 0 && (
+                      <div style={{ marginBottom: 8 }}>
+                        <button
+                          onClick={() => setExpanded({ ...expanded, [t.id]: !isOpen })}
+                          style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 6, padding: "6px 8px", fontSize: 11, color: "var(--muted)", textAlign: "left" }}
+                        >
+                          <span style={{ flexShrink: 0, fontWeight: 700, color: stepsDone === steps.length ? "var(--good)" : "var(--gold)" }}>{stepsDone}/{steps.length}</span>
+                          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStep ? `Next: ${nextStep.text}` : "All steps done"}</span>
+                          <ChevronRight size={12} style={{ flexShrink: 0, transform: isOpen ? "rotate(90deg)" : "none" }} />
+                        </button>
+                        {isOpen && (
+                          <div style={{ marginTop: 6, paddingLeft: 4 }}>
+                            {steps.map((s) => (
+                              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                                <button className={`check-btn ${s.done ? "done" : ""}`} style={{ width: 16, height: 16 }} onClick={() => toggleStep(t.id, s.id)}><CheckCircle2 size={10} /></button>
+                                <span style={{ fontSize: 11.5, textDecoration: s.done ? "line-through" : "none", opacity: s.done ? 0.55 : 1 }}>{s.text}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     <div className="task-meta">
                       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                         <Avatar name={t.assignee} />
@@ -713,6 +1054,11 @@ function Duties({ data, saveData }) {
         <Modal title="Assign a duty" onClose={() => setShowForm(false)}>
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Cut Reels for launch" autoFocus /></div>
           <div className="field"><label>Details</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Any brief, links, or notes" /></div>
+          <div className="field"><label>Action</label>
+            <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+              {TASK_TYPES.map((t) => <option value={t.id} key={t.id}>{t.label}</option>)}
+            </select>
+          </div>
           <div className="field-row">
             <div className="field"><label>Assignee</label><input list="member-list" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Name" />
               <datalist id="member-list">{members.map((m) => <option value={m} key={m} />)}</datalist>
@@ -730,6 +1076,13 @@ function Duties({ data, saveData }) {
           </div>
         </Modal>
       )}
+
+      {openTaskId && (
+        <TaskDetailModal
+          data={data} saveData={saveData} taskId={openTaskId} onClose={() => setOpenTaskId(null)}
+          profile={profile} allAssignees={members} onDelete={removeTask}
+        />
+      )}
     </div>
   );
 }
@@ -737,6 +1090,14 @@ function Duties({ data, saveData }) {
 /* ---------------------------------- Calendar ---------------------------------- */
 
 const WEEK_HOURS = Array.from({ length: 15 }, (_, i) => i + 7); // 07:00 - 21:00
+
+function personColor(name) {
+  if (!name) return "var(--muted)";
+  const ramp = ["var(--gold)", "var(--teal)", "var(--alert)", "var(--good)"];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) % 997;
+  return ramp[hash % ramp.length];
+}
 
 function startOfWeek(d) {
   const dt = new Date(d);
@@ -749,12 +1110,15 @@ function isoOf(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function Calendar({ data, saveData }) {
-  const [mode, setMode] = useState("week"); // "week" | "month"
+function Calendar({ data, saveData, profile }) {
+  const [mode, setMode] = useState("week"); // "week" | "month" | "day"
+  const [justMine, setJustMine] = useState(false);
   const [cursor, setCursor] = useState(new Date());
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", date: todayISO(), time: "09:00", type: "post", status: "planned", notes: "" });
+  const [form, setForm] = useState({ title: "", date: todayISO(), time: "09:00", type: "post", status: "planned", notes: "", assignee: "" });
   const [editId, setEditId] = useState(null);
+
+  const allAssignees = [...new Set([...(data.profiles || []).map((p) => p.name), ...data.calendarEvents.map((e) => e.assignee).filter(Boolean)])];
 
   const year = cursor.getFullYear();
   const month = cursor.getMonth();
@@ -771,8 +1135,9 @@ function Calendar({ data, saveData }) {
   }
   while (cells.length % 7 !== 0) cells.push({ day: cells.length, out: true, iso: null });
 
+  const visibleEvents = justMine && profile ? data.calendarEvents.filter((e) => e.assignee === profile) : data.calendarEvents;
   const eventsByDate = {};
-  data.calendarEvents.forEach((e) => { (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e); });
+  visibleEvents.forEach((e) => { (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e); });
 
   const saveEvent = () => {
     if (!form.title.trim()) return;
@@ -781,7 +1146,7 @@ function Calendar({ data, saveData }) {
     } else {
       saveData({ ...data, calendarEvents: [...data.calendarEvents, { id: uid(), ...form }] });
     }
-    setForm({ title: "", date: form.date, time: form.time, type: "post", status: "planned", notes: "" });
+    setForm({ title: "", date: form.date, time: form.time, type: "post", status: "planned", notes: "", assignee: "" });
     setEditId(null);
     setShowForm(false);
   };
@@ -791,12 +1156,12 @@ function Calendar({ data, saveData }) {
   };
 
   const openAdd = (iso, time) => {
-    setForm({ title: "", date: iso, time: time || "09:00", type: "post", status: "planned", notes: "" });
+    setForm({ title: "", date: iso, time: time || "09:00", type: "post", status: "planned", notes: "", assignee: profile || "" });
     setEditId(null);
     setShowForm(true);
   };
   const openEdit = (e) => {
-    setForm({ title: e.title, date: e.date, time: e.time || "09:00", type: e.type || "post", status: e.status || "planned", notes: e.notes || "" });
+    setForm({ title: e.title, date: e.date, time: e.time || "09:00", type: e.type || "post", status: e.status || "planned", notes: e.notes || "", assignee: e.assignee || "" });
     setEditId(e.id);
     setShowForm(true);
   };
@@ -817,17 +1182,61 @@ function Calendar({ data, saveData }) {
     <div>
       <div className="topbar">
         <div><div className="page-title">Calendar</div><div className="page-sub">Posting dates, deadlines, and meetings — by day and time.</div></div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div className="view-toggle">
+            <button className={mode === "day" ? "active" : ""} onClick={() => setMode("day")}>Day</button>
             <button className={mode === "week" ? "active" : ""} onClick={() => setMode("week")}>Week</button>
             <button className={mode === "month" ? "active" : ""} onClick={() => setMode("month")}>Month</button>
           </div>
+          {profile && (
+            <button className={`chip ${justMine ? "active" : ""}`} onClick={() => setJustMine(!justMine)}>Just mine</button>
+          )}
           <button className="btn" onClick={() => saveData({ ...data, calendarEvents: [...data.calendarEvents, ...buildExamples().calendarEvents] })}>See example events</button>
           <button className="btn btn-gold" onClick={() => openAdd(todayISO())}><Plus size={15} /> Add event</button>
         </div>
       </div>
 
-      {mode === "month" ? (
+      {mode === "day" ? (
+        <div className="card">
+          <div className="cal-head">
+            <div className="cal-month display">{cursor.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</div>
+            <div className="cal-nav">
+              <button className="btn-ghost btn" onClick={() => { const d = new Date(cursor); d.setDate(d.getDate() - 1); setCursor(d); }}><ChevronLeft size={16} /></button>
+              <button className="btn-ghost btn" onClick={() => setCursor(new Date())}>Today</button>
+              <button className="btn-ghost btn" onClick={() => { const d = new Date(cursor); d.setDate(d.getDate() + 1); setCursor(d); }}><ChevronRight size={16} /></button>
+            </div>
+          </div>
+          {(() => {
+            const dayIso = isoOf(cursor);
+            const dayEvents = eventsByDate[dayIso] || [];
+            return (
+              <div>
+                {WEEK_HOURS.map((h) => {
+                  const label = `${String(h).padStart(2, "0")}:00`;
+                  const slotEvents = dayEvents.filter((e) => parseInt((e.time || "0").split(":")[0], 10) === h).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+                  return (
+                    <div key={h} style={{ display: "flex", borderTop: "1px solid var(--hair)", minHeight: 52 }}>
+                      <div style={{ width: 60, flexShrink: 0, fontSize: 11, color: "var(--muted)", paddingTop: 8 }}>{label}</div>
+                      <div style={{ flex: 1, padding: "8px 0", cursor: "pointer" }} onClick={() => openAdd(dayIso, label)}>
+                        {slotEvents.map((e) => {
+                          const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                          return (
+                            <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--panel-raised)", borderLeft: `3px solid ${personColor(e.assignee)}`, borderRadius: 6, padding: "7px 10px", marginBottom: 6, fontSize: 13 }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                              <span className="evt-dot" style={{ background: st.color }} />
+                              <span style={{ fontWeight: 600 }}>{e.time}</span> {e.title}
+                              {e.assignee && <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--muted)" }}>{e.assignee}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      ) : mode === "month" ? (
         <div className="card">
           <div className="cal-head">
             <div className="cal-month display">{monthLabel}</div>
@@ -849,7 +1258,7 @@ function Calendar({ data, saveData }) {
                 {c.iso && (eventsByDate[c.iso] || []).sort((a, b) => (a.time || "").localeCompare(b.time || "")).slice(0, 3).map((e) => {
                   const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
                   return (
-                    <div className="cal-evt" key={e.id} title={e.title} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                    <div className="cal-evt" key={e.id} title={e.title} style={{ borderLeftColor: personColor(e.assignee) }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
                       <span className="evt-dot" style={{ background: st.color }} />
                       {e.time ? `${e.time} · ` : ""}{e.title}
                     </div>
@@ -891,7 +1300,7 @@ function Calendar({ data, saveData }) {
                       {slotEvents.map((e) => {
                         const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
                         return (
-                          <div key={e.id} className={`week-evt type-${e.type}`} title={`${e.time} · ${e.title}`} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                          <div key={e.id} className={`week-evt type-${e.type}`} title={`${e.time} · ${e.title}`} style={{ borderLeft: `3px solid ${personColor(e.assignee)}` }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
                             <span className="evt-dot light" style={{ background: st.color }} />
                             {e.time} {e.title}
                           </div>
@@ -924,6 +1333,10 @@ function Calendar({ data, saveData }) {
                 {CAL_STATUS.map((s) => <option value={s.id} key={s.id}>{s.label}</option>)}
               </select>
             </div>
+          </div>
+          <div className="field"><label>Assignee</label>
+            <input list="cal-assignee-list" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Who's responsible for this" />
+            <datalist id="cal-assignee-list">{allAssignees.map((a) => <option value={a} key={a} />)}</datalist>
           </div>
           <div className="field"><label>Note (optional)</label><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Raw info, link, or anything quick to jot down" /></div>
           {editId && (
@@ -1162,13 +1575,13 @@ function ContentReview({ data, saveData }) {
 
 function IdeaBank({ data, saveData }) {
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", tags: "", author: "" });
+  const [form, setForm] = useState({ title: "", description: "", tags: "", author: "", link: "" });
 
   const addIdea = () => {
     if (!form.title.trim()) return;
     const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
     saveData({ ...data, ideas: [{ id: uid(), votes: 0, ...form, tags }, ...data.ideas] });
-    setForm({ title: "", description: "", tags: "", author: form.author });
+    setForm({ title: "", description: "", tags: "", author: form.author, link: "" });
     setShowForm(false);
   };
   const vote = (id) => saveData({ ...data, ideas: data.ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
@@ -1183,13 +1596,28 @@ function IdeaBank({ data, saveData }) {
         <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add idea</button>
       </div>
       <div className="grid idea-grid">
-        {sorted.map((i) => (
+        {sorted.map((i) => {
+          const yt = youtubeId(i.link);
+          const drive = !yt ? driveEmbedUrl(i.link) : null;
+          return (
           <div className="card idea-card" key={i.id}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
               <div className="idea-title">{i.title}</div>
               <button className="icon-btn" onClick={() => removeIdea(i.id)}><Trash2 size={13} /></button>
             </div>
             {i.description && <div className="idea-desc">{i.description}</div>}
+            {(yt || drive) && (
+              <div style={{ position: "relative", paddingTop: "56.25%", borderRadius: 8, overflow: "hidden" }}>
+                <iframe
+                  src={yt ? `https://www.youtube.com/embed/${yt}` : drive}
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+                  allowFullScreen title={i.title}
+                />
+              </div>
+            )}
+            {i.link && !yt && !drive && (
+              <a href={i.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11.5, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Link2 size={11} /> View reference</a>
+            )}
             {i.tags && i.tags.length > 0 && (
               <div className="content-tags">
                 {i.tags.map((t) => <span className="pill" key={t} style={{ background: "var(--teal-soft)", color: "var(--teal)" }}>{t}</span>)}
@@ -1200,7 +1628,7 @@ function IdeaBank({ data, saveData }) {
               <button className="vote-btn" onClick={() => vote(i.id)}><ThumbsUp size={13} /> {i.votes}</button>
             </div>
           </div>
-        ))}
+        );})}
         {sorted.length === 0 && <div className="empty">No ideas yet — be the first to add one.</div>}
       </div>
 
@@ -1208,6 +1636,7 @@ function IdeaBank({ data, saveData }) {
         <Modal title="Add an idea" onClose={() => setShowForm(false)}>
           <div className="field"><label>Idea</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Myth-busting series" autoFocus /></div>
           <div className="field"><label>Description</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What's the concept?" /></div>
+          <div className="field"><label>Video or reference link (optional)</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="Paste a YouTube, Drive, or inspiration link" /></div>
           <div className="field-row">
             <div className="field"><label>Tags (comma separated)</label><input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="Reels, Series" /></div>
             <div className="field"><label>Your name</label><input value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} placeholder="e.g. Alex" /></div>
@@ -1215,6 +1644,82 @@ function IdeaBank({ data, saveData }) {
           <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addIdea}>Add idea</button></div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Meeting (agenda + announcements) ---------------------------------- */
+
+function Meeting({ data, saveData, profile }) {
+  const [agendaText, setAgendaText] = useState("");
+  const [announceText, setAnnounceText] = useState("");
+
+  const meetingItems = data.meetingItems || [];
+  const announcements = data.announcements || [];
+
+  const addAgendaItem = () => {
+    if (!agendaText.trim()) return;
+    saveData({ ...data, meetingItems: [{ id: uid(), text: agendaText.trim(), author: profile || "Team", date: todayISO(), done: false }, ...meetingItems] });
+    setAgendaText("");
+  };
+  const toggleAgendaDone = (id) => saveData({ ...data, meetingItems: meetingItems.map((m) => (m.id === id ? { ...m, done: !m.done } : m)) });
+  const removeAgendaItem = (id) => saveData({ ...data, meetingItems: meetingItems.filter((m) => m.id !== id) });
+  const clearDiscussed = () => saveData({ ...data, meetingItems: meetingItems.filter((m) => !m.done) });
+
+  const addAnnouncement = () => {
+    if (!announceText.trim()) return;
+    saveData({ ...data, announcements: [...announcements, { id: uid(), text: announceText.trim(), author: profile || "Team", date: todayISO() }] });
+    setAnnounceText("");
+  };
+  const removeAnnouncement = (id) => saveData({ ...data, announcements: announcements.filter((a) => a.id !== id) });
+
+  const sortedAgenda = [...meetingItems].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0));
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Meeting</div><div className="page-sub">Collect what to bring up next time, and post team-wide announcements.</div></div>
+      </div>
+
+      <div className="grid two-col">
+        <div className="card">
+          <div className="section-title"><ListChecks size={16} color="var(--gold)" /> Agenda for next meeting</div>
+          <div className="comment-form" style={{ marginBottom: 16 }}>
+            <textarea placeholder="Something to bring up next meeting…" value={agendaText} onChange={(e) => setAgendaText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addAgendaItem(); } }} />
+            <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addAgendaItem}><Plus size={14} /></button>
+          </div>
+          {sortedAgenda.map((m) => (
+            <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+              <button className={`check-btn ${m.done ? "done" : ""}`} onClick={() => toggleAgendaDone(m.id)}><CheckCircle2 size={12} /></button>
+              <div style={{ flex: 1, fontSize: 13, textDecoration: m.done ? "line-through" : "none", opacity: m.done ? 0.55 : 1 }}>{m.text}</div>
+              <span style={{ fontSize: 10.5, color: "var(--muted)" }}>{m.author}</span>
+              <button className="icon-btn" onClick={() => removeAgendaItem(m.id)}><Trash2 size={13} /></button>
+            </div>
+          ))}
+          {sortedAgenda.length === 0 && <div className="empty">Nothing on the agenda yet.</div>}
+          {meetingItems.some((m) => m.done) && (
+            <button className="btn" style={{ marginTop: 14 }} onClick={clearDiscussed}>Clear discussed items</button>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="section-title"><Radio size={16} color="var(--gold)" /> Announcements</div>
+          <div className="comment-form" style={{ marginBottom: 16 }}>
+            <textarea placeholder="Post something the whole team should see…" value={announceText} onChange={(e) => setAnnounceText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addAnnouncement(); } }} />
+            <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addAnnouncement}><Plus size={14} /></button>
+          </div>
+          {[...announcements].reverse().map((a) => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13 }}>{a.text}</div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{a.author} · {fmtDate(a.date)}</div>
+              </div>
+              <button className="icon-btn" onClick={() => removeAnnouncement(a.id)}><Trash2 size={13} /></button>
+            </div>
+          ))}
+          {announcements.length === 0 && <div className="empty">No announcements yet — post one for the team to see on the Dashboard.</div>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1280,7 +1785,9 @@ function Guidelines({ data, saveData }) {
 
 function MyDuties({ data, saveData, profile }) {
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", dueDate: todayISO(), priority: "medium" });
+  const [form, setForm] = useState({ title: "", description: "", dueDate: todayISO(), priority: "medium", type: "other" });
+  const [expanded, setExpanded] = useState({});
+  const [openTaskId, setOpenTaskId] = useState(null);
 
   const mine = data.tasks.filter((t) => t.assignee === profile);
   const done = mine.filter((t) => t.status === "done").length;
@@ -1293,13 +1800,20 @@ function MyDuties({ data, saveData, profile }) {
     return isoOf(d);
   });
   const hitDates = new Set(mine.filter((t) => t.completedAt).map((t) => t.completedAt));
+  const allAssignees = [...new Set([...(data.profiles || []).map((p) => p.name), ...data.tasks.map((t) => t.assignee).filter(Boolean)])];
 
   const addTask = () => {
     if (!form.title.trim() || !profile) return;
-    const task = { id: uid(), status: "todo", assignee: profile, ...form };
+    const task = { id: uid(), status: "todo", assignee: profile, steps: defaultSteps(form.type), link: "", notes: [], ...form };
     saveData({ ...data, tasks: [task, ...data.tasks] });
-    setForm({ title: "", description: "", dueDate: todayISO(), priority: "medium" });
+    setForm({ title: "", description: "", dueDate: todayISO(), priority: "medium", type: "other" });
     setShowForm(false);
+  };
+  const toggleStep = (taskId, stepId) => {
+    saveData({
+      ...data,
+      tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, steps: (t.steps || []).map((s) => (s.id === stepId ? { ...s, done: !s.done } : s)) } : t)),
+    });
   };
   const toggleDone = (t) => {
     const nextStatus = t.status === "done" ? "todo" : "done";
@@ -1308,7 +1822,15 @@ function MyDuties({ data, saveData, profile }) {
       tasks: data.tasks.map((x) => (x.id === t.id ? { ...x, status: nextStatus, completedAt: nextStatus === "done" ? todayISO() : null } : x)),
     });
   };
-  const removeTask = (id) => saveData({ ...data, tasks: data.tasks.filter((t) => t.id !== id) });
+  const removeTask = (id) => {
+    const task = data.tasks.find((t) => t.id === id);
+    if (!task) return;
+    saveData({
+      ...data,
+      tasks: data.tasks.filter((t) => t.id !== id),
+      deletedTasks: [{ ...task, deletedBy: profile || "Unknown", deletedAt: todayISO() }, ...(data.deletedTasks || [])],
+    });
+  };
 
   const sorted = [...mine].sort((a, b) => (a.status === "done") - (b.status === "done") || a.dueDate.localeCompare(b.dueDate));
 
@@ -1359,15 +1881,46 @@ function MyDuties({ data, saveData, profile }) {
         <div className="section-title"><ListChecks size={16} color="var(--gold)" /> {profile}'s tasks</div>
         {sorted.map((t) => {
           const p = PRIORITY.find((x) => x.id === t.priority) || PRIORITY[1];
+          const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
+          const TyIcon = ty.icon;
           const overdue = t.status !== "done" && daysUntil(t.dueDate) < 0;
+          const dueToday = t.status !== "done" && daysUntil(t.dueDate) === 0;
+          const rowColor = t.status === "done" ? "var(--good)" : overdue ? "var(--alert)" : dueToday ? "var(--gold)" : "var(--hair)";
+          const steps = t.steps || [];
+          const stepsDone = steps.filter((s) => s.done).length;
+          const nextStep = steps.find((s) => !s.done);
+          const isOpen = expanded[t.id];
           return (
-            <div className="personal-task-row" key={t.id}>
-              <button className={`check-btn ${t.status === "done" ? "done" : ""}`} onClick={() => toggleDone(t)}>
+            <div className="personal-task-row" key={t.id} style={{ borderLeft: `3px solid ${rowColor}`, paddingLeft: 10, background: t.status === "done" ? "var(--good-soft)" : overdue ? "var(--alert-soft)" : "transparent", borderRadius: 6, alignItems: "flex-start" }}>
+              <button className={`check-btn ${t.status === "done" ? "done" : ""}`} style={{ marginTop: 2 }} onClick={() => toggleDone(t)}>
                 <CheckCircle2 size={13} />
               </button>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600, textDecoration: t.status === "done" ? "line-through" : "none", opacity: t.status === "done" ? 0.6 : 1 }}>{t.title}</div>
+              <span style={{ width: 26, height: 26, borderRadius: 7, background: ty.color + "1f", color: ty.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><TyIcon size={13} /></span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, textDecoration: t.status === "done" ? "line-through" : "none", opacity: t.status === "done" ? 0.6 : 1, cursor: "pointer" }} onClick={() => setOpenTaskId(t.id)}>{ty.verb} — {t.title}</div>
                 {t.description && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{t.description}</div>}
+                {steps.length > 0 && t.status !== "done" && (
+                  <div style={{ marginTop: 6 }}>
+                    <button
+                      onClick={() => setExpanded({ ...expanded, [t.id]: !isOpen })}
+                      style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 6, padding: "5px 8px", fontSize: 11, color: "var(--muted)", maxWidth: 320 }}
+                    >
+                      <span style={{ flexShrink: 0, fontWeight: 700, color: stepsDone === steps.length ? "var(--good)" : "var(--gold)" }}>{stepsDone}/{steps.length}</span>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStep ? `Next: ${nextStep.text}` : "All steps done"}</span>
+                      <ChevronRight size={11} style={{ flexShrink: 0, transform: isOpen ? "rotate(90deg)" : "none" }} />
+                    </button>
+                    {isOpen && (
+                      <div style={{ marginTop: 6 }}>
+                        {steps.map((s) => (
+                          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                            <button className={`check-btn ${s.done ? "done" : ""}`} style={{ width: 16, height: 16 }} onClick={() => toggleStep(t.id, s.id)}><CheckCircle2 size={10} /></button>
+                            <span style={{ fontSize: 11.5, textDecoration: s.done ? "line-through" : "none", opacity: s.done ? 0.55 : 1 }}>{s.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <span className="pill" style={{ background: p.color + "22", color: p.color }}>{p.label}</span>
               <span className="due-tag" style={{ color: overdue ? "var(--alert)" : "var(--muted)" }}>{overdue ? "Overdue" : fmtDate(t.dueDate)}</span>
@@ -1382,6 +1935,11 @@ function MyDuties({ data, saveData, profile }) {
         <Modal title="Add my task" onClose={() => setShowForm(false)}>
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Prep tomorrow's caption drafts" autoFocus /></div>
           <div className="field"><label>Details</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Optional notes" /></div>
+          <div className="field"><label>Action</label>
+            <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+              {TASK_TYPES.map((t) => <option value={t.id} key={t.id}>{t.label}</option>)}
+            </select>
+          </div>
           <div className="field-row">
             <div className="field"><label>Due date</label><input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} /></div>
             <div className="field"><label>Priority</label>
@@ -1392,6 +1950,13 @@ function MyDuties({ data, saveData, profile }) {
           </div>
           <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addTask}>Add task</button></div>
         </Modal>
+      )}
+
+      {openTaskId && (
+        <TaskDetailModal
+          data={data} saveData={saveData} taskId={openTaskId} onClose={() => setOpenTaskId(null)}
+          profile={profile} allAssignees={allAssignees} onDelete={removeTask}
+        />
       )}
     </div>
   );
@@ -1489,7 +2054,7 @@ function LoginScreen({ data, saveData, onLogin }) {
     if (!newName.trim()) return;
     if (!/^\d{4}$/.test(newCode)) { setNewCodeError("Code must be exactly 4 digits."); return; }
     if (codeTaken(newCode)) { setNewCodeError("That code is already assigned to someone else."); return; }
-    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length] };
+    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length], isLead: profiles.length === 0 };
     saveData({ ...data, profiles: [...profiles, np] });
     setNewName("");
     setNewCode(genCode());
@@ -1701,7 +2266,7 @@ function TeamManage({ data, saveData }) {
     if (!newName.trim()) return;
     if (!/^\d{4}$/.test(newCode)) { setNewCodeError("Code must be exactly 4 digits."); return; }
     if (codeTaken(newCode)) { setNewCodeError("That code is already assigned to someone else."); return; }
-    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length] };
+    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length], isLead: profiles.length === 0 };
     saveData({ ...data, profiles: [...profiles, np] });
     setNewName("");
     setNewCode(genCode());
@@ -1710,6 +2275,9 @@ function TeamManage({ data, saveData }) {
   const removeProfile = (id) => {
     saveData({ ...data, profiles: profiles.filter((p) => p.id !== id) });
     if (editingProfile && editingProfile.id === id) setEditingProfile(null);
+  };
+  const toggleLead = (id) => {
+    saveData({ ...data, profiles: profiles.map((p) => (p.id === id ? { ...p, isLead: !p.isLead } : p)) });
   };
   const openEditCode = (p) => { setEditingProfile(p); setEditCode(p.pin); setEditCodeError(""); };
   const saveEditCode = () => {
@@ -1743,6 +2311,18 @@ function TeamManage({ data, saveData }) {
       if (next === adminCode) clearDemoContent();
       else { setClearPinError(true); setClearPin(""); }
     }
+  };
+
+  const deletedTasks = data.deletedTasks || [];
+  const restoreTask = (dt) => {
+    const { deletedBy, deletedAt, ...task } = dt;
+    saveData({ ...data, tasks: [task, ...data.tasks], deletedTasks: deletedTasks.filter((x) => x.id !== dt.id) });
+  };
+  const purgeTask = (id) => {
+    saveData({ ...data, deletedTasks: deletedTasks.filter((x) => x.id !== id) });
+  };
+  const purgeAllDeleted = () => {
+    saveData({ ...data, deletedTasks: [] });
   };
 
   if (!unlocked) {
@@ -1807,6 +2387,8 @@ function TeamManage({ data, saveData }) {
                 <div className="admin-row" key={p.id}>
                   <div className="profile-avatar-lg" style={{ width: 32, height: 32, fontSize: 11, background: `var(--${p.color}-soft)`, color: `var(--${p.color})` }}>{initials(p.name)}</div>
                   <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                  {p.isLead && <span className="pill" style={{ background: "var(--gold-soft)", color: "var(--gold)" }}>Employer</span>}
+                  <button className="icon-btn" title={p.isLead ? "Remove employer access" : "Make this person an employer"} onClick={() => toggleLead(p.id)}><Shield size={13} color={p.isLead ? "var(--gold)" : undefined} /></button>
                   <button className="code code-btn" onClick={() => openEditCode(p)}>{p.pin}</button>
                   <button className="icon-btn" title="Change this person's code" onClick={() => openEditCode(p)}><Pencil size={13} /></button>
                   <button className="icon-btn" onClick={() => removeProfile(p.id)}><Trash2 size={13} /></button>
@@ -1859,6 +2441,31 @@ function TeamManage({ data, saveData }) {
       )}
 
       {!editingProfile && (
+        <div className="card" style={{ maxWidth: 480, marginTop: 16 }}>
+          <div className="topbar" style={{ marginBottom: 12 }}>
+            <div className="section-title" style={{ marginBottom: 0 }}><Trash2 size={16} color="var(--gold)" /> Deleted duties · {deletedTasks.length}</div>
+            {deletedTasks.length > 0 && <button className="btn" onClick={purgeAllDeleted}>Empty all</button>}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Anyone's deletions land here first instead of disappearing right away — you can restore a duty or clear it out for good.
+          </div>
+          {deletedTasks.length === 0 && <div className="empty" style={{ padding: "10px 0" }}>Nothing deleted recently.</div>}
+          {deletedTasks.map((dt) => (
+            <div key={dt.id} className="admin-row" style={{ marginBottom: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{dt.title}</div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
+                  {dt.assignee ? `${dt.assignee} · ` : ""}deleted by {dt.deletedBy || "someone"} · {fmtDate(dt.deletedAt)}
+                </div>
+              </div>
+              <button className="btn" style={{ padding: "5px 10px", fontSize: 11.5 }} onClick={() => restoreTask(dt)}>Restore</button>
+              <button className="icon-btn" title="Delete permanently" onClick={() => purgeTask(dt.id)}><Trash2 size={13} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!editingProfile && (
         <div className="card danger-zone" style={{ maxWidth: 480, marginTop: 16 }}>
           <div className="section-title" style={{ color: "var(--alert)" }}><AlertTriangle size={16} color="var(--alert)" /> Clear sample content</div>
           {!clearConfirm ? (
@@ -1897,6 +2504,7 @@ const NAV = [
   { id: "myduties", label: "My Duties", icon: User },
   { id: "duties", label: "Team Duties", icon: ListChecks },
   { id: "calendar", label: "Calendar", icon: CalendarDays },
+  { id: "meeting", label: "Meeting", icon: Radio },
   { id: "notes", label: "Notes", icon: StickyNote },
   { id: "content", label: "Content Review", icon: Video },
   { id: "ideas", label: "Idea Bank", icon: Lightbulb },
@@ -1928,6 +2536,11 @@ export default function TeamHub() {
         await supabase.from("hub_state").upsert({ id: "main", data: loadedData });
       }
       if (!loadedData.profiles) loadedData.profiles = [];
+      if (!loadedData.deletedTasks) loadedData.deletedTasks = [];
+      if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
+        loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
+      }
+
       if (cancelled) return;
       setData(loadedData);
 
@@ -1999,12 +2612,15 @@ export default function TeamHub() {
 
   const profile = loggedIn.name;
   const initials = profile.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+  const myProfileObj = (data.profiles || []).find((p) => p.name === profile);
+  const isEmployer = !!(myProfileObj && myProfileObj.isLead);
 
   const Comp = {
-    dashboard: <Dashboard data={data} saveData={saveData} profile={profile} />,
+    dashboard: <Dashboard data={data} saveData={saveData} profile={profile} setView={setView} isEmployer={isEmployer} />,
     myduties: <MyDuties data={data} saveData={saveData} profile={profile} />,
-    duties: <Duties data={data} saveData={saveData} />,
-    calendar: <Calendar data={data} saveData={saveData} />,
+    duties: <Duties data={data} saveData={saveData} profile={profile} />,
+    calendar: <Calendar data={data} saveData={saveData} profile={profile} />,
+    meeting: <Meeting data={data} saveData={saveData} profile={profile} />,
     notes: <Notes data={data} saveData={saveData} />,
     content: <ContentReview data={data} saveData={saveData} />,
     ideas: <IdeaBank data={data} saveData={saveData} />,
@@ -2032,13 +2648,13 @@ export default function TeamHub() {
           <div className="profile-chip">
             <div className="av" style={{ background: `var(--${loggedIn.color})` }}>{initials}</div>
             <div className="info">
-              <div className="name">{profile}</div>
+              <div className="name">{profile}{isEmployer && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "var(--gold)", background: "var(--gold-soft)", padding: "2px 6px", borderRadius: 4, verticalAlign: "middle" }}>EMPLOYER</span>}</div>
               <button className="change" onClick={handleLogout}>switch profile</button>
             </div>
           </div>
         </div>
 
-        {NAV.map((n) => {
+        {NAV.filter((n) => n.id !== "team" || isEmployer).map((n) => {
           const Icon = n.icon;
           return (
             <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setNavOpen(false); }}>
