@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -50,14 +50,85 @@ const CAL_STATUS = [
   { id: "posted", label: "Posted", color: "var(--good)" },
   { id: "skipped", label: "Skipped", color: "var(--alert)" },
 ];
+const TASK_TYPES = [
+  { id: "film", label: "Film", verb: "Film", icon: Video, color: "var(--gold)" },
+  { id: "edit", label: "Edit", verb: "Edit", icon: Pencil, color: "var(--teal)" },
+  { id: "write", label: "Write", verb: "Write", icon: StickyNote, color: "var(--good)" },
+  { id: "post", label: "Post", verb: "Post", icon: Send, color: "var(--alert)" },
+  { id: "review", label: "Review", verb: "Review", icon: CheckCircle2, color: "var(--muted)" },
+  { id: "other", label: "Other", verb: "Do", icon: ListChecks, color: "var(--muted)" },
+];
+
+const STEP_TEMPLATES = {
+  film: ["Check the brief or idea reference", "Charge batteries & pack gear", "Confirm location or subject", "Shoot the footage"],
+  edit: ["Import and organize footage", "Build a rough cut", "Add captions, music, or graphics", "Export and share the draft"],
+  write: ["Outline the key points", "Write a first draft", "Edit for tone and length", "Get a second pair of eyes"],
+  post: ["Do a final review of the asset", "Write the caption", "Add hashtags or tags", "Schedule or publish"],
+  review: ["Watch or read through fully", "Note specific timestamps or lines", "Leave clear feedback", "Confirm the status update"],
+  other: ["Break this into one small first step", "Do that step", "Check in if you get stuck"],
+};
+const defaultSteps = (type) => (STEP_TEMPLATES[type] || STEP_TEMPLATES.other).map((text) => ({ id: uid(), text, done: false }));
+
+const CONTENT_FORMATS = [
+  { id: "video", label: "Video / Reel", icon: Video, color: "var(--gold)" },
+  { id: "photo", label: "Photo", icon: Image, color: "var(--teal)" },
+  { id: "graphic", label: "Graphic", icon: Layers, color: "var(--good)" },
+];
+
+const CONTENT_STEP_TEMPLATES = {
+  video: [
+    { text: "Plan the shot list or script", tip: "Keep it to 3–5 beats — over-planning slows down filming." },
+    { text: "Film the footage", tip: "Grab a bit more footage than you think you need for the edit." },
+    { text: "Edit the rough cut", tip: "Cut the first 1.5 seconds hard — that's where people scroll past." },
+    { text: "Add captions, music, or graphics", tip: "Auto-captions first, then clean up typos by hand." },
+    { text: "Write the caption", tip: "Lead with a question or a bold claim, not a summary." },
+    { text: "Final review", tip: "Watch it once with sound off — does it still make sense?" },
+    { text: "Schedule or publish", tip: "Check the platform's peak times before posting." },
+  ],
+  photo: [
+    { text: "Plan the shot or set", tip: "One clear focal point beats a busy frame." },
+    { text: "Shoot the photo(s)", tip: "Take a few angles — cropping later can save an average shot." },
+    { text: "Select and edit the best shot", tip: "Consistent color grading keeps the feed cohesive." },
+    { text: "Write the caption", tip: "A photo carries less context than video — the caption does more work." },
+    { text: "Final review", tip: "Check it at thumbnail size — does it still read clearly?" },
+    { text: "Schedule or publish", tip: "Pair with a handful of relevant tags, not dozens." },
+  ],
+  graphic: [
+    { text: "Sketch the layout or message", tip: "One key message per graphic — resist adding more." },
+    { text: "Design the graphic", tip: "Stick to the brand fonts and colors from Guidelines." },
+    { text: "Proofread all text on it", tip: "Get a second pair of eyes — typos on graphics are highly visible." },
+    { text: "Write the caption", tip: "The caption can add context the graphic doesn't have room for." },
+    { text: "Final review", tip: "Export at the right size for the platform before uploading." },
+    { text: "Schedule or publish", tip: "Save the source file somewhere the team can find it later." },
+  ],
+};
+const defaultContentSteps = (format) => (CONTENT_STEP_TEMPLATES[format] || CONTENT_STEP_TEMPLATES.video).map((s) => ({ id: uid(), text: s.text, tip: s.tip, done: false }));
+
+function makeNotification({ toProfile, type, text, link, fromProfile }) {
+  return { id: uid(), toProfile: toProfile || null, type, text, link, date: todayISO(), readBy: fromProfile ? [fromProfile] : [] };
+}
+
+// Fires a real lock-screen push notification via the /api/send-push serverless function.
+// toProfile: a profile name to target one person, or null to notify everyone subscribed.
+function sendPush(toProfile, title, body) {
+  try {
+    fetch("/api/send-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toProfile, title, body }),
+    }).catch(() => {});
+  } catch {
+    // push is best-effort — never block the app if it fails
+  }
+}
 
 function buildExamples() {
   return {
     tasks: [
-      { id: uid(), title: "Example: Cut Reels for this week's post", description: "This is what a duty looks like — reassign it to a teammate and drag it through the board.", assignee: "Example", dueDate: todayISO(), status: "progress", priority: "high" },
-      { id: uid(), title: "Example: Write caption copy", description: "Duties move through columns: To Do → In Progress → In Review → Done.", assignee: "Example", dueDate: addDays(1), status: "todo", priority: "medium" },
-      { id: uid(), title: "Example: Approve final thumbnail", description: "", assignee: "Example", dueDate: addDays(2), status: "review", priority: "low" },
-      { id: uid(), title: "Example: Publish launch post", description: "Overdue duties show up in red, like this one.", assignee: "Example", dueDate: addDays(-1), status: "todo", priority: "high" },
+      { id: uid(), title: "Example: Reels for this week's post", description: "This is what a duty looks like — reassign it to a teammate and drag it through the board.", assignee: "Example", dueDate: todayISO(), status: "progress", priority: "high", type: "edit", steps: [{ id: uid(), text: "Import and organize footage", done: true }, ...defaultSteps("edit").slice(1)] },
+      { id: uid(), title: "Example: Caption copy", description: "Duties move through columns: To Do → In Progress → In Review → Done.", assignee: "Example", dueDate: addDays(1), status: "todo", priority: "medium", type: "write", steps: defaultSteps("write") },
+      { id: uid(), title: "Example: Approve final thumbnail", description: "", assignee: "Example", dueDate: addDays(2), status: "review", priority: "low", type: "review", steps: defaultSteps("review") },
+      { id: uid(), title: "Example: Publish launch post", description: "Overdue duties show up in red, like this one.", assignee: "Example", dueDate: addDays(-1), status: "todo", priority: "high", type: "post", steps: defaultSteps("post") },
     ],
     calendarEvents: [
       { id: uid(), title: "Example: Publish product post", date: todayISO(), time: "09:00", type: "post", status: "ready", notes: "Caption is drafted, waiting on final approval." },
@@ -72,7 +143,8 @@ function buildExamples() {
     ],
     content: [
       {
-        id: uid(), title: "Example: Launch teaser", platform: "TikTok", link: "", assignee: "Example", status: "review",
+        id: uid(), title: "Example: Launch teaser", platform: "TikTok", link: "", assignee: "Example", status: "review", format: "video",
+        caption: "", steps: defaultContentSteps("video").map((s, i) => ({ ...s, done: i < 2 })),
         comments: [{ id: uid(), author: "Example", text: "This is what feedback looks like — click into a content card to leave notes like this one.", date: todayISO() }],
       },
     ],
@@ -91,38 +163,53 @@ function buildExamples() {
 const seedData = () => ({
   adminCode: "",
   profiles: [],
+  deletedTasks: [],
+  messages: [],
+  projects: [],
+  notifications: [],
   tasks: [
-    { id: uid(), title: "Cut Reels for product launch", description: "3 vertical cuts from the studio B-roll, captions burned in.", assignee: "Jordan", dueDate: todayISO(), status: "progress", priority: "high" },
-    { id: uid(), title: "Write carousel copy — Q3 recap", description: "10-slide carousel, tone: confident, data-forward.", assignee: "Sam", dueDate: todayISO(), status: "review", priority: "medium" },
-    { id: uid(), title: "Community reply sweep", description: "Clear comment queue across IG + TikTok.", assignee: "Priya", dueDate: todayISO(), status: "todo", priority: "low" },
-    { id: uid(), title: "Thumbnail set — creator interview", description: "3 thumbnail options, A/B test on YouTube.", assignee: "Alex", dueDate: todayISO(), status: "done", priority: "medium" },
-    { id: uid(), title: "Draft posting calendar — next sprint", description: "Two-week grid across all channels.", assignee: "Jordan", dueDate: todayISO(), status: "todo", priority: "high" },
+    { id: uid(), title: "Reels for product launch", description: "3 vertical cuts from the studio B-roll, captions burned in.", assignee: "Jordan", dueDate: todayISO(), status: "progress", priority: "high", type: "edit", steps: [{ id: uid(), text: "Import and organize footage", done: true }, { id: uid(), text: "Build a rough cut", done: false }, { id: uid(), text: "Add captions, music, or graphics", done: false }, { id: uid(), text: "Export and share the draft", done: false }] },
+    { id: uid(), title: "Carousel copy — Q3 recap", description: "10-slide carousel, tone: confident, data-forward.", assignee: "Sam", dueDate: todayISO(), status: "review", priority: "medium", type: "write", steps: defaultSteps("write") },
+    { id: uid(), title: "Community reply sweep", description: "Clear comment queue across IG + TikTok.", assignee: "Priya", dueDate: todayISO(), status: "todo", priority: "low", type: "other", steps: defaultSteps("other") },
+    { id: uid(), title: "Thumbnail set — creator interview", description: "3 thumbnail options, A/B test on YouTube.", assignee: "Alex", dueDate: todayISO(), status: "done", priority: "medium", type: "edit", steps: defaultSteps("edit").map((s) => ({ ...s, done: true })) },
+    { id: uid(), title: "Posting calendar — next sprint", description: "Two-week grid across all channels.", assignee: "Jordan", dueDate: todayISO(), status: "todo", priority: "high", type: "write", steps: defaultSteps("write") },
   ],
   calendarEvents: [
-    { id: uid(), title: "Product launch post — all channels", date: todayISO(), time: "09:00", type: "post" },
-    { id: uid(), title: "Content review sync", date: todayISO(), time: "18:00", type: "meeting" },
+    { id: uid(), title: "Product launch post — all channels", date: todayISO(), time: "09:00", type: "post", assignee: "Jordan", status: "planned" },
+    { id: uid(), title: "Content review sync", date: todayISO(), time: "18:00", type: "meeting", assignee: "", status: "planned" },
   ],
+  meetingItems: [
+    { id: uid(), text: "Review the new hook format results before next sprint", author: "Team Lead", date: todayISO(), done: false },
+  ],
+  announcements: [
+    { id: uid(), text: "Welcome to Broadcast Desk — this is where team news and heads-up messages will show.", author: "Team Lead", date: todayISO() },
+  ],
+  goals: {
+    teamWeeklyTarget: 6,
+    individualTargets: {},
+  },
   notes: [
     { id: uid(), text: "Reminder: new hook format is testing well on Reels — keep the first 1.5s a question or a bold claim.", author: "Team Lead", date: todayISO(), color: "gold", pinned: true },
     { id: uid(), text: "Client wants fewer stock transitions, more handheld feel for BTS content.", author: "Sam", date: todayISO(), color: "teal", pinned: false },
   ],
   content: [
     {
-      id: uid(), title: "Launch teaser — 15s cut", platform: "TikTok",
+      id: uid(), title: "Launch teaser — 15s cut", platform: "TikTok", format: "video", caption: "",
       link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", assignee: "Jordan", status: "review",
+      steps: defaultContentSteps("video").map((s, i) => ({ ...s, done: i < 3 })),
       comments: [
         { id: uid(), author: "Team Lead", text: "Great pacing. Trim the last 2 seconds and boost the audio on the hook line.", date: todayISO() },
       ],
     },
     {
-      id: uid(), title: "Founder story — carousel", platform: "Instagram",
-      link: "", assignee: "Sam", status: "draft", comments: [],
+      id: uid(), title: "Founder story — carousel", platform: "Instagram", format: "photo", caption: "",
+      link: "", assignee: "Sam", status: "draft", steps: defaultContentSteps("photo"), comments: [],
     },
   ],
   ideas: [
-    { id: uid(), title: "Day-in-the-life of the editing team", description: "Behind the scenes of how a post goes from brief to published.", tags: ["BTS", "Reels"], votes: 4, author: "Priya" },
-    { id: uid(), title: "Myth-busting series for our category", description: "Short-form series knocking down 5 common misconceptions.", tags: ["Series", "Educational"], votes: 6, author: "Alex" },
-    { id: uid(), title: "Duet reaction to top comment each week", description: "Turns community feedback into content, builds loyalty.", tags: ["Community"], votes: 2, author: "Jordan" },
+    { id: uid(), title: "Day-in-the-life of the editing team", description: "Behind the scenes of how a post goes from brief to published.", tags: ["BTS", "Reels"], votes: 4, author: "Priya", link: "" },
+    { id: uid(), title: "Myth-busting series for our category", description: "Short-form series knocking down 5 common misconceptions.", tags: ["Series", "Educational"], votes: 6, author: "Alex", link: "" },
+    { id: uid(), title: "Duet reaction to top comment each week", description: "Turns community feedback into content, builds loyalty.", tags: ["Community"], votes: 2, author: "Jordan", link: "" },
   ],
   resources: [
     { id: uid(), title: "Brand Voice Guide", description: "Tone, vocabulary, and phrases to avoid across every channel.", link: "", category: "Guidelines" },
@@ -164,6 +251,7 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
 .sidebar{
   width:230px; flex-shrink:0; background:var(--panel); border-right:1px solid var(--hair);
   display:flex; flex-direction:column; padding:22px 14px; position:sticky; top:0; height:100vh; z-index:5;
+  overflow-y:auto;
 }
 .brand{ display:flex; align-items:center; gap:9px; padding:4px 8px 22px; border-bottom:1px solid var(--hair); margin-bottom:14px; }
 .brand-dot{ width:9px; height:9px; border-radius:50%; background:var(--alert); box-shadow:0 0 8px var(--alert); flex-shrink:0; }
@@ -352,6 +440,8 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
 .week-evt{ background:var(--gold); color:#171812; font-size:10px; font-weight:700; border-radius:5px; padding:3px 6px; margin-bottom:2px; line-height:1.3; overflow:hidden; cursor:pointer; display:flex; align-items:center; gap:4px; }
 .week-evt.type-meeting{ background:var(--teal); }
 .week-evt.type-deadline{ background:var(--alert); color:#fff; }
+.week-evt.type-photo{ background:var(--teal); }
+.week-evt.type-graphic{ background:var(--good); }
 
 /* ---- editable workload ---- */
 .member-add{ display:flex; gap:6px; margin-top:8px; }
@@ -484,9 +574,29 @@ function Modal({ title, onClose, children }) {
 
 /* ---------------------------------- Dashboard ---------------------------------- */
 
-function Dashboard({ data, saveData, profile }) {
+function Dashboard({ data, saveData, profile, setView, isEmployer }) {
   const { tasks, calendarEvents, notes, content } = data;
   const [quickAdd, setQuickAdd] = useState({});
+  const [showGoals, setShowGoals] = useState(false);
+  const [goalForm, setGoalForm] = useState({ team: 6, mine: 0 });
+
+  const openGoals = () => {
+    setGoalForm({
+      team: (data.goals && data.goals.teamWeeklyTarget) || 0,
+      mine: profile ? ((data.goals && data.goals.individualTargets && data.goals.individualTargets[profile]) || 0) : 0,
+    });
+    setShowGoals(true);
+  };
+  const saveGoals = () => {
+    saveData({
+      ...data,
+      goals: {
+        teamWeeklyTarget: Number(goalForm.team) || 0,
+        individualTargets: { ...((data.goals && data.goals.individualTargets) || {}), ...(profile ? { [profile]: Number(goalForm.mine) || 0 } : {}) },
+      },
+    });
+    setShowGoals(false);
+  };
 
   const addQuickTask = (member) => {
     const title = (quickAdd[member] || "").trim();
@@ -497,7 +607,16 @@ function Dashboard({ data, saveData, profile }) {
   };
   const done = tasks.filter((t) => t.status === "done").length;
   const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
-  const overdue = tasks.filter((t) => t.status !== "done" && daysUntil(t.dueDate) < 0).length;
+  const overdueTasks = tasks.filter((t) => t.status !== "done" && daysUntil(t.dueDate) < 0);
+  const overdue = overdueTasks.length;
+
+  const myPlate = profile
+    ? tasks
+        .filter((t) => t.assignee === profile && t.status !== "done" && daysUntil(t.dueDate) <= 0)
+        .sort((a, b) => daysUntil(a.dueDate) - daysUntil(b.dueDate))
+    : [];
+  const hour = new Date().getHours();
+  const greeting = hour < 5 ? "Still up," : hour < 12 ? "Good morning," : hour < 18 ? "Good afternoon," : "Good evening,";
   const inProgress = tasks.filter((t) => t.status === "progress").length;
   const pendingReview = tasks.filter((t) => t.status === "review").length + content.filter(c=>c.status==="review").length;
 
@@ -516,29 +635,123 @@ function Dashboard({ data, saveData, profile }) {
   const recentNotes = [...notes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)).slice(0, 3);
   const circumference = 2 * Math.PI * 50;
 
+  const weekStart = startOfWeek(new Date());
+  const weekStartIso = isoOf(weekStart);
+  const weekEndDate = new Date(weekStart); weekEndDate.setDate(weekEndDate.getDate() + 6);
+  const weekEndIso = isoOf(weekEndDate);
+  const postedThisWeek = calendarEvents.filter((e) => e.type === "post" && e.status === "posted" && e.date >= weekStartIso && e.date <= weekEndIso);
+  const teamTarget = (data.goals && data.goals.teamWeeklyTarget) || 0;
+  const teamPosted = postedThisWeek.length;
+  const myTarget = profile ? ((data.goals && data.goals.individualTargets && data.goals.individualTargets[profile]) || 0) : 0;
+  const myPosted = profile ? postedThisWeek.filter((e) => e.assignee === profile).length : 0;
+
   return (
     <div>
-      <div className="hero">
-        <div className="ring-wrap">
-          <svg width="118" height="118" viewBox="0 0 118 118">
-            <circle cx="59" cy="59" r="50" fill="none" stroke="var(--panel-raised)" strokeWidth="10" />
-            <circle
-              cx="59" cy="59" r="50" fill="none" stroke="var(--gold)" strokeWidth="10" strokeLinecap="round"
-              strokeDasharray={circumference} strokeDashoffset={circumference - (pct / 100) * circumference}
-              transform="rotate(-90 59 59)" style={{ transition: "stroke-dashoffset .5s ease" }}
-            />
-          </svg>
-          <div className="ring-num"><div className="n">{pct}%</div><div className="l">On Track</div></div>
+      <div className="hero" style={{ display: "block", padding: "24px 28px", marginBottom: 16 }}>
+        <div className="display" style={{ fontSize: 21, fontWeight: 600 }}>{greeting} {profile || "there"}</div>
+        <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4, marginBottom: myPlate.length ? 14 : 0 }}>
+          {!profile ? "Sign in to see your own plate for today." : myPlate.length === 0 ? "Nothing due today or overdue — you're clear." : "Here's what's on your plate today:"}
         </div>
-        <div className="hero-stats">
-          <div className="hstat"><div className="n">{tasks.length}</div><div className="l">Active duties</div></div>
-          <div className="hstat"><div className="n" style={{ color: inProgress ? "var(--gold)" : "var(--text)" }}>{inProgress}</div><div className="l">In progress</div></div>
-          <div className="hstat"><div className="n" style={{ color: pendingReview ? "var(--teal)" : "var(--text)" }}>{pendingReview}</div><div className="l">Awaiting review</div></div>
-          <div className="hstat"><div className="n" style={{ color: overdue ? "var(--alert)" : "var(--text)" }}>{overdue}</div><div className="l">Overdue</div></div>
-        </div>
+        {myPlate.map((t) => {
+          const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
+          const TyIcon = ty.icon;
+          const late = daysUntil(t.dueDate) < 0;
+          const nextStep = (t.steps || []).find((s) => !s.done);
+          return (
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+              <span style={{ width: 28, height: 28, borderRadius: 7, background: ty.color + "1f", color: ty.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><TyIcon size={14} /></span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ty.verb} — {t.title}</div>
+                {nextStep ? (
+                  <div style={{ fontSize: 11.5, color: "var(--gold)", marginTop: 2 }}>Next: {nextStep.text}</div>
+                ) : t.description ? (
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{t.description}</div>
+                ) : null}
+              </div>
+              {late && <span className="pill" style={{ background: "var(--alert-soft)", color: "var(--alert)" }}>Overdue</span>}
+            </div>
+          );
+        })}
       </div>
 
-      <div className="grid two-col">
+      {isEmployer && overdueTasks.length > 0 && (
+        <div className="card" style={{ border: "1px solid rgba(217,86,75,0.35)", marginBottom: 16 }}>
+          <div className="section-title" style={{ color: "var(--alert)" }}><AlertTriangle size={16} color="var(--alert)" /> Needs attention · {overdueTasks.length} overdue</div>
+          {overdueTasks.map((t) => (
+            <div key={t.id} style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid var(--hair)", fontSize: 13 }}>
+              <span>{t.title}</span><span style={{ color: "var(--muted)" }}>{t.assignee || "Unassigned"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {isEmployer ? (
+        <div className="card" style={{ marginBottom: 16, padding: 0, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 28, flexWrap: "wrap", padding: "22px 24px" }}>
+            <div className="ring-wrap" style={{ width: 88, height: 88 }}>
+              <svg width="88" height="88" viewBox="0 0 118 118">
+                <circle cx="59" cy="59" r="50" fill="none" stroke="var(--panel-raised)" strokeWidth="10" />
+                <circle
+                  cx="59" cy="59" r="50" fill="none" stroke="var(--gold)" strokeWidth="10" strokeLinecap="round"
+                  strokeDasharray={circumference} strokeDashoffset={circumference - (pct / 100) * circumference}
+                  transform="rotate(-90 59 59)" style={{ transition: "stroke-dashoffset .5s ease" }}
+                />
+              </svg>
+              <div className="ring-num"><div className="n" style={{ fontSize: 19 }}>{pct}%</div><div className="l" style={{ fontSize: 8.5 }}>On track</div></div>
+            </div>
+            <div className="hero-stats" style={{ gap: 22 }}>
+              <div className="hstat"><div className="n" style={{ fontSize: 19 }}>{tasks.length}</div><div className="l">Active duties</div></div>
+              <div className="hstat"><div className="n" style={{ fontSize: 19, color: inProgress ? "var(--gold)" : "var(--text)" }}>{inProgress}</div><div className="l">In progress</div></div>
+              <div className="hstat"><div className="n" style={{ fontSize: 19, color: pendingReview ? "var(--teal)" : "var(--text)" }}>{pendingReview}</div><div className="l">Awaiting review</div></div>
+              <div className="hstat"><div className="n" style={{ fontSize: 19, color: overdue ? "var(--alert)" : "var(--text)" }}>{overdue}</div><div className="l">Overdue</div></div>
+            </div>
+          </div>
+
+          <div style={{ borderTop: "1px solid var(--hair)", padding: "18px 24px" }}>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 10 }}>Content pipeline</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }}>
+              {CONTENT_STATUS.map((s) => (
+                <div key={s.id} style={{ background: "var(--panel-raised)", borderRadius: 9, padding: "10px 8px", textAlign: "center" }}>
+                  <div style={{ fontFamily: "Fraunces, serif", fontSize: 19, fontWeight: 700, color: s.color }}>{content.filter((c) => c.status === s.id).length}</div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ borderTop: "1px solid var(--hair)", padding: "18px 24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>This week's goals</div>
+              <button className="btn" style={{ padding: "5px 11px", fontSize: 11.5 }} onClick={openGoals}>Edit goals</button>
+            </div>
+            <div className="member-row">
+              <div className="mtop"><span style={{ fontWeight: 600 }}>Team</span><span style={{ color: "var(--muted)" }}>{teamPosted}/{teamTarget || "—"} posts</span></div>
+              <ProgressBar pct={teamTarget ? (teamPosted / teamTarget) * 100 : 0} color={teamTarget && teamPosted >= teamTarget ? "var(--good)" : "var(--gold)"} />
+            </div>
+            {profile && (
+              <div className="member-row" style={{ marginBottom: 0 }}>
+                <div className="mtop"><span style={{ fontWeight: 600 }}>{profile}</span><span style={{ color: "var(--muted)" }}>{myPosted}/{myTarget || "—"} posts</span></div>
+                <ProgressBar pct={myTarget ? (myPosted / myTarget) * 100 : 0} color={myTarget && myPosted >= myTarget ? "var(--good)" : "var(--teal)"} />
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        profile && (
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="topbar" style={{ marginBottom: 10 }}>
+              <div className="section-title" style={{ marginBottom: 0 }}>Your goal this week</div>
+              <button className="btn" style={{ padding: "5px 11px", fontSize: 11.5 }} onClick={openGoals}>Edit</button>
+            </div>
+            <div className="member-row" style={{ marginBottom: 0 }}>
+              <div className="mtop"><span style={{ fontWeight: 600 }}>{profile}</span><span style={{ color: "var(--muted)" }}>{myPosted}/{myTarget || "—"} posts</span></div>
+              <ProgressBar pct={myTarget ? (myPosted / myTarget) * 100 : 0} color={myTarget && myPosted >= myTarget ? "var(--good)" : "var(--teal)"} />
+            </div>
+          </div>
+        )
+      )}
+
+      <div className={`grid ${isEmployer ? "two-col" : ""}`}>
         <div className="card">
           <div className="section-title"><CalendarDays size={16} color="var(--gold)" /> Upcoming on the calendar</div>
           {upcoming.length === 0 && <div className="empty">Nothing scheduled yet — add something on the Calendar page.</div>}
@@ -558,6 +771,7 @@ function Dashboard({ data, saveData, profile }) {
           })}
         </div>
 
+        {isEmployer && (
         <div className="card">
           <div className="section-title"><Users size={16} color="var(--gold)" /> Team workload</div>
           {memberStats.length === 0 && <div className="empty">Assign a duty to see workload here.</div>}
@@ -611,7 +825,20 @@ function Dashboard({ data, saveData, profile }) {
             </div>
           </div>
         </div>
+        )}
       </div>
+
+      {data.announcements && data.announcements.length > 0 && (
+        <div className="card" style={{ marginTop: 16, borderColor: "var(--gold-soft)" }}>
+          <div className="section-title"><Radio size={16} color="var(--gold)" /> Announcements</div>
+          {[...data.announcements].reverse().slice(0, 3).map((a) => (
+            <div key={a.id} style={{ padding: "9px 0", borderBottom: "1px solid var(--hair)", fontSize: 13 }}>
+              {a.text}
+              <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{a.author} · {fmtDate(a.date)}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="section-title"><Pin size={16} color="var(--gold)" /> Pinned & recent notes</div>
@@ -625,26 +852,258 @@ function Dashboard({ data, saveData, profile }) {
           {recentNotes.length === 0 && <div className="empty">No notes yet.</div>}
         </div>
       </div>
+
+      {showGoals && (
+        <Modal title="Edit weekly goals" onClose={() => setShowGoals(false)}>
+          {isEmployer && (
+            <div className="field"><label>Team weekly post target</label><input type="number" min="0" value={goalForm.team} onChange={(e) => setGoalForm({ ...goalForm, team: e.target.value })} /></div>
+          )}
+          {profile && (
+            <div className="field"><label>{profile}'s personal weekly post target</label><input type="number" min="0" value={goalForm.mine} onChange={(e) => setGoalForm({ ...goalForm, mine: e.target.value })} /></div>
+          )}
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Progress counts calendar events with type "Post" and status "Posted" this week (Sunday–Saturday).
+          </div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowGoals(false)}>Cancel</button><button className="btn btn-gold" onClick={saveGoals}>Save goals</button></div>
+        </Modal>
+      )}
     </div>
+  );
+}
+
+/* ---------------------------------- Task detail (shared by Duties & My Duties) ---------------------------------- */
+
+function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignees, onDelete, onOpenTask }) {
+  const task = data.tasks.find((t) => t.id === taskId);
+  const [newStep, setNewStep] = useState("");
+  const [editingStepId, setEditingStepId] = useState(null);
+  const [editingStepText, setEditingStepText] = useState("");
+  const [noteText, setNoteText] = useState("");
+  const [newProjectName, setNewProjectName] = useState("");
+
+  if (!task) return null;
+
+  const updateTask = (patch) => {
+    saveData({ ...data, tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, ...patch } : t)) });
+  };
+  const addStep = () => {
+    if (!newStep.trim()) return;
+    updateTask({ steps: [...(task.steps || []), { id: uid(), text: newStep.trim(), done: false }] });
+    setNewStep("");
+  };
+  const toggleStep = (id) => updateTask({ steps: (task.steps || []).map((s) => (s.id === id ? { ...s, done: !s.done } : s)) });
+  const removeStep = (id) => updateTask({ steps: (task.steps || []).filter((s) => s.id !== id) });
+  const startEditStep = (s) => { setEditingStepId(s.id); setEditingStepText(s.text); };
+  const saveEditStep = () => {
+    if (editingStepText.trim()) updateTask({ steps: (task.steps || []).map((s) => (s.id === editingStepId ? { ...s, text: editingStepText.trim() } : s)) });
+    setEditingStepId(null);
+  };
+  const addNote = () => {
+    if (!noteText.trim()) return;
+    const newNotes = [...(task.notes || []), { id: uid(), author: profile || "Team", text: noteText.trim(), date: todayISO() }];
+    const notifyAssignee = task.assignee && task.assignee !== profile;
+    const notifications = notifyAssignee
+      ? [...(data.notifications || []), makeNotification({ toProfile: task.assignee, type: "note", text: `${profile || "Someone"} left a note on: ${task.title}`, link: "myduties", fromProfile: profile })]
+      : (data.notifications || []);
+    saveData({ ...data, tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, notes: newNotes } : t)), notifications });
+    if (notifyAssignee) sendPush(task.assignee, "New note on your duty", `${profile || "Someone"} left a note on: ${task.title}`);
+    setNoteText("");
+  };
+
+  const projects = data.projects || [];
+  const currentProject = task.projectId ? projects.find((p) => p.id === task.projectId) : null;
+  const siblingTasks = task.projectId ? data.tasks.filter((t) => t.projectId === task.projectId && t.id !== task.id) : [];
+  const linkToProject = (projectId) => updateTask({ projectId });
+  const unlinkProject = () => updateTask({ projectId: null });
+  const createAndLinkProject = () => {
+    if (!newProjectName.trim()) return;
+    const np = { id: uid(), name: newProjectName.trim(), createdAt: todayISO() };
+    saveData({ ...data, projects: [...projects, np], tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, projectId: np.id } : t)) });
+    setNewProjectName("");
+  };
+
+  const yt = youtubeId(task.link);
+  const drive = !yt ? driveEmbedUrl(task.link) : null;
+  const steps = task.steps || [];
+  const stepsDone = steps.filter((s) => s.done).length;
+  const nextStep = steps.find((s) => !s.done);
+  const reloadSteps = () => {
+    updateTask({ steps: defaultContentSteps(task.format || "video") });
+  };
+
+  return (
+    <Modal title="Duty details" onClose={onClose}>
+      <div className="field"><label>Title</label><input value={task.title} onChange={(e) => updateTask({ title: e.target.value })} /></div>
+      <div className="field"><label>Details</label><textarea value={task.description || ""} onChange={(e) => updateTask({ description: e.target.value })} placeholder="Any brief, links, or notes" /></div>
+      <div className="field-row">
+        <div className="field"><label>Action</label>
+          <select value={task.type} onChange={(e) => updateTask({ type: e.target.value })}>
+            {TASK_TYPES.map((t) => <option value={t.id} key={t.id}>{t.label}</option>)}
+          </select>
+        </div>
+        <div className="field"><label>Format</label>
+          <select value={task.format || "video"} onChange={(e) => updateTask({ format: e.target.value })}>
+            {CONTENT_FORMATS.map((f) => <option value={f.id} key={f.id}>{f.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field"><label>Assignee</label>
+          <input list="detail-assignee-list" value={task.assignee || ""} onChange={(e) => updateTask({ assignee: e.target.value })} placeholder="Name" />
+          <datalist id="detail-assignee-list">{allAssignees.map((a) => <option value={a} key={a} />)}</datalist>
+        </div>
+        <div className="field"><label>Due date</label><input type="date" value={task.dueDate} onChange={(e) => updateTask({ dueDate: e.target.value })} /></div>
+      </div>
+      <div className="field"><label>Priority</label>
+        <select value={task.priority} onChange={(e) => updateTask({ priority: e.target.value })}>
+          {PRIORITY.map((p) => <option value={p.id} key={p.id}>{p.label}</option>)}
+        </select>
+      </div>
+      <div className="field"><label>Reference link (optional)</label><input value={task.link || ""} onChange={(e) => updateTask({ link: e.target.value })} placeholder="YouTube, Drive, or an example link" /></div>
+      {(yt || drive) && (
+        <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 14, borderRadius: 8, overflow: "hidden" }}>
+          <iframe src={yt ? `https://www.youtube.com/embed/${yt}` : drive} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }} allowFullScreen title={task.title} />
+        </div>
+      )}
+
+      <div className="section-title" style={{ fontSize: 13 }}><Layers size={14} color="var(--gold)" /> Project</div>
+      {currentProject ? (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--gold)" }}>{currentProject.name}</span>
+            <button className="btn" style={{ padding: "4px 9px", fontSize: 10.5 }} onClick={unlinkProject}>Unlink</button>
+          </div>
+          {siblingTasks.length === 0 && <div className="empty" style={{ padding: "6px 0" }}>No other duties linked yet — link another one from its own detail page.</div>}
+          {siblingTasks.map((t) => {
+            const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
+            const TyIcon = ty.icon;
+            const st = STATUS.find((s) => s.id === t.status) || STATUS[0];
+            return (
+              <button
+                key={t.id}
+                onClick={() => onOpenTask && onOpenTask(t.id)}
+                style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", textAlign: "left", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 8, padding: "8px 10px", marginBottom: 6 }}
+              >
+                <span style={{ width: 24, height: 24, borderRadius: 7, background: ty.color + "1f", color: ty.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><TyIcon size={12} /></span>
+                <span style={{ flex: 1, fontSize: 12.5 }}>{ty.verb} — {t.title}</span>
+                <span style={{ fontSize: 10, fontWeight: 700, color: st.color }}>{st.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.4 }}>
+            Not linked yet — connect this if it's one step of a bigger piece (e.g. Film → Edit → Post for the same video).
+          </div>
+          {projects.length > 0 && (
+            <div className="field" style={{ marginBottom: 8 }}>
+              <select defaultValue="" onChange={(e) => { if (e.target.value) linkToProject(e.target.value); }}>
+                <option value="">Link to existing project…</option>
+                {projects.map((p) => <option value={p.id} key={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") createAndLinkProject(); }}
+              placeholder="Or name a new project…"
+              style={{ flex: 1, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 6, padding: "7px 9px", fontSize: 12.5, color: "var(--text)", outline: "none" }}
+            />
+            <button className="btn" onClick={createAndLinkProject}>Create & Link</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div className="section-title" style={{ fontSize: 13, marginBottom: 0 }}><ListChecks size={14} color="var(--gold)" /> Checklist · {stepsDone}/{steps.length}</div>
+        <button className="btn" style={{ padding: "4px 9px", fontSize: 10.5 }} onClick={reloadSteps} title="Replace the checklist with the default for this format"><RotateCw size={11} /> Reset for format</button>
+      </div>
+      {nextStep ? (
+        <div style={{ fontSize: 12.5, color: "var(--gold)", background: "var(--gold-soft)", borderRadius: 7, padding: "7px 10px", marginBottom: 10 }}>
+          Next: {nextStep.text}
+          {nextStep.tip && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3, fontStyle: "italic" }}>Tip: {nextStep.tip}</div>}
+        </div>
+      ) : steps.length > 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--good)", background: "var(--good-soft)", borderRadius: 7, padding: "7px 10px", marginBottom: 10, fontWeight: 600 }}>
+          All steps done — ready for review.
+        </div>
+      ) : null}
+      {steps.map((s) => (
+        <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0" }}>
+          <button className={`check-btn ${s.done ? "done" : ""}`} style={{ width: 16, height: 16, flexShrink: 0 }} onClick={() => toggleStep(s.id)}><CheckCircle2 size={10} /></button>
+          {editingStepId === s.id ? (
+            <input
+              autoFocus value={editingStepText} onChange={(e) => setEditingStepText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") saveEditStep(); }} onBlur={saveEditStep}
+              style={{ flex: 1, background: "var(--panel-raised)", border: "1px solid var(--gold)", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: "var(--text)", outline: "none" }}
+            />
+          ) : (
+            <span onClick={() => startEditStep(s)} style={{ flex: 1, fontSize: 12.5, textDecoration: s.done ? "line-through" : "none", opacity: s.done ? 0.55 : 1, cursor: "pointer" }}>{s.text}</span>
+          )}
+          <button className="icon-btn" onClick={() => removeStep(s.id)}><Trash2 size={12} /></button>
+        </div>
+      ))}
+      {steps.length === 0 && <div className="empty" style={{ padding: "8px 0" }}>No checklist yet — add the first step below.</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 8, marginBottom: 18 }}>
+        <input
+          value={newStep} onChange={(e) => setNewStep(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addStep(); }}
+          placeholder="Add a step…" style={{ flex: 1, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 6, padding: "7px 9px", fontSize: 12.5, color: "var(--text)", outline: "none" }}
+        />
+        <button className="btn" onClick={addStep}><Plus size={13} /></button>
+      </div>
+
+      <div className="section-title" style={{ fontSize: 13 }}><MessageSquare size={14} color="var(--gold)" /> Notes</div>
+      {(task.notes || []).map((n) => (
+        <div key={n.id} style={{ fontSize: 12, padding: "7px 0", borderBottom: "1px solid var(--hair)" }}>
+          <div>{n.text}</div>
+          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{n.author} · {fmtDate(n.date)}</div>
+        </div>
+      ))}
+      {(!task.notes || task.notes.length === 0) && <div className="empty" style={{ padding: "8px 0" }}>No notes yet.</div>}
+      <div className="comment-form" style={{ marginTop: 8, marginBottom: 4 }}>
+        <textarea value={noteText} onChange={(e) => setNoteText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addNote(); } }} placeholder="Leave a quick note for whoever's on this…" />
+        <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addNote}><Send size={13} /></button>
+      </div>
+
+      <div className="modal-actions">
+        <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)" }} onClick={() => { onDelete(task.id); onClose(); }}><Trash2 size={13} /> Delete duty</button>
+        <button className="btn btn-gold" onClick={onClose}>Done</button>
+      </div>
+    </Modal>
   );
 }
 
 /* ---------------------------------- Duties board ---------------------------------- */
 
-function Duties({ data, saveData }) {
+function Duties({ data, saveData, profile }) {
   const [filter, setFilter] = useState("all");
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium" });
+  const [form, setForm] = useState({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium", type: "other", format: "video" });
+  const [expanded, setExpanded] = useState({});
+  const [openTaskId, setOpenTaskId] = useState(null);
 
   const members = [...new Set(data.tasks.map((t) => t.assignee).filter(Boolean))];
   const filtered = filter === "all" ? data.tasks : data.tasks.filter((t) => t.assignee === filter);
 
   const addTask = () => {
     if (!form.title.trim()) return;
-    const task = { id: uid(), status: "todo", ...form };
-    saveData({ ...data, tasks: [task, ...data.tasks] });
-    setForm({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium" });
+    const task = { id: uid(), status: "todo", steps: defaultContentSteps(form.format), link: "", notes: [], ...form };
+    const notifyAssignee = task.assignee && task.assignee !== profile;
+    const notifications = notifyAssignee
+      ? [...(data.notifications || []), makeNotification({ toProfile: task.assignee, type: "task", text: `${profile || "Someone"} assigned you: ${task.title}`, link: "myduties", fromProfile: profile })]
+      : (data.notifications || []);
+    saveData({ ...data, tasks: [task, ...data.tasks], notifications });
+    if (notifyAssignee) sendPush(task.assignee, "New duty assigned", `${profile || "Someone"} assigned you: ${task.title}`);
+    setForm({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium", type: "other", format: "video" });
     setShowForm(false);
+  };
+  const toggleStep = (taskId, stepId) => {
+    saveData({
+      ...data,
+      tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, steps: (t.steps || []).map((s) => (s.id === stepId ? { ...s, done: !s.done } : s)) } : t)),
+    });
   };
   const updateStatus = (id, status) => {
     saveData({
@@ -652,7 +1111,15 @@ function Duties({ data, saveData }) {
       tasks: data.tasks.map((t) => (t.id === id ? { ...t, status, completedAt: status === "done" ? todayISO() : null } : t)),
     });
   };
-  const removeTask = (id) => saveData({ ...data, tasks: data.tasks.filter((t) => t.id !== id) });
+  const removeTask = (id) => {
+    const task = data.tasks.find((t) => t.id === id);
+    if (!task) return;
+    saveData({
+      ...data,
+      tasks: data.tasks.filter((t) => t.id !== id),
+      deletedTasks: [{ ...task, deletedBy: profile || "Unknown", deletedAt: todayISO() }, ...(data.deletedTasks || [])],
+    });
+  };
 
   return (
     <div>
@@ -679,15 +1146,54 @@ function Duties({ data, saveData }) {
               </div>
               {items.map((t) => {
                 const p = PRIORITY.find((x) => x.id === t.priority) || PRIORITY[1];
+                const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
+                const TyIcon = ty.icon;
                 const d = daysUntil(t.dueDate);
                 const overdue = d < 0 && t.status !== "done";
+                const steps = t.steps || [];
+                const stepsDone = steps.filter((s) => s.done).length;
+                const nextStep = steps.find((s) => !s.done);
+                const isOpen = expanded[t.id];
                 return (
                   <div className="task-card" style={{ borderLeftColor: p.color }} key={t.id}>
                     <button className="icon-btn" style={{ position: "absolute", top: 8, right: 8 }} onClick={() => removeTask(t.id)}>
                       <Trash2 size={13} />
                     </button>
-                    <div className="tt" style={{ paddingRight: 18 }}>{t.title}</div>
+                    <div style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: ty.color, background: ty.color + "1f", padding: "2px 7px", borderRadius: 5, marginBottom: 6, marginRight: 5 }}>
+                      <TyIcon size={10} /> {ty.label}
+                    </div>
+                    {t.projectId && (() => {
+                      const proj = (data.projects || []).find((p) => p.id === t.projectId);
+                      return proj ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10, fontWeight: 700, color: "var(--gold)", background: "var(--gold-soft)", padding: "2px 7px", borderRadius: 5, marginBottom: 6 }}>
+                          <Layers size={10} /> {proj.name}
+                        </span>
+                      ) : null;
+                    })()}
+                    <div className="tt" style={{ paddingRight: 18, cursor: "pointer" }} onClick={() => setOpenTaskId(t.id)}>{t.title}</div>
                     {t.description && <div className="td">{t.description}</div>}
+                    {steps.length > 0 && (
+                      <div style={{ marginBottom: 8 }}>
+                        <button
+                          onClick={() => setExpanded({ ...expanded, [t.id]: !isOpen })}
+                          style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 6, padding: "6px 8px", fontSize: 11, color: "var(--muted)", textAlign: "left" }}
+                        >
+                          <span style={{ flexShrink: 0, fontWeight: 700, color: stepsDone === steps.length ? "var(--good)" : "var(--gold)" }}>{stepsDone}/{steps.length}</span>
+                          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStep ? `Next: ${nextStep.text}` : "All steps done"}</span>
+                          <ChevronRight size={12} style={{ flexShrink: 0, transform: isOpen ? "rotate(90deg)" : "none" }} />
+                        </button>
+                        {isOpen && (
+                          <div style={{ marginTop: 6, paddingLeft: 4 }}>
+                            {steps.map((s) => (
+                              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                                <button className={`check-btn ${s.done ? "done" : ""}`} style={{ width: 16, height: 16 }} onClick={() => toggleStep(t.id, s.id)}><CheckCircle2 size={10} /></button>
+                                <span style={{ fontSize: 11.5, textDecoration: s.done ? "line-through" : "none", opacity: s.done ? 0.55 : 1 }}>{s.text}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     <div className="task-meta">
                       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                         <Avatar name={t.assignee} />
@@ -714,6 +1220,18 @@ function Duties({ data, saveData }) {
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Cut Reels for launch" autoFocus /></div>
           <div className="field"><label>Details</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Any brief, links, or notes" /></div>
           <div className="field-row">
+            <div className="field"><label>Action</label>
+              <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+                {TASK_TYPES.map((t) => <option value={t.id} key={t.id}>{t.label}</option>)}
+              </select>
+            </div>
+            <div className="field"><label>Format</label>
+              <select value={form.format} onChange={(e) => setForm({ ...form, format: e.target.value })}>
+                {CONTENT_FORMATS.map((f) => <option value={f.id} key={f.id}>{f.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field-row">
             <div className="field"><label>Assignee</label><input list="member-list" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Name" />
               <datalist id="member-list">{members.map((m) => <option value={m} key={m} />)}</datalist>
             </div>
@@ -730,6 +1248,13 @@ function Duties({ data, saveData }) {
           </div>
         </Modal>
       )}
+
+      {openTaskId && (
+        <TaskDetailModal
+          data={data} saveData={saveData} taskId={openTaskId} onClose={() => setOpenTaskId(null)}
+          profile={profile} allAssignees={members} onDelete={removeTask} onOpenTask={(id) => setOpenTaskId(id)}
+        />
+      )}
     </div>
   );
 }
@@ -737,6 +1262,14 @@ function Duties({ data, saveData }) {
 /* ---------------------------------- Calendar ---------------------------------- */
 
 const WEEK_HOURS = Array.from({ length: 15 }, (_, i) => i + 7); // 07:00 - 21:00
+
+function personColor(name) {
+  if (!name) return "var(--muted)";
+  const ramp = ["var(--gold)", "var(--teal)", "var(--alert)", "var(--good)"];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) % 997;
+  return ramp[hash % ramp.length];
+}
 
 function startOfWeek(d) {
   const dt = new Date(d);
@@ -749,12 +1282,15 @@ function isoOf(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function Calendar({ data, saveData }) {
-  const [mode, setMode] = useState("week"); // "week" | "month"
+function Calendar({ data, saveData, profile }) {
+  const [mode, setMode] = useState("week"); // "week" | "month" | "day"
+  const [justMine, setJustMine] = useState(false);
   const [cursor, setCursor] = useState(new Date());
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", date: todayISO(), time: "09:00", type: "post", status: "planned", notes: "" });
+  const [form, setForm] = useState({ title: "", date: todayISO(), time: "09:00", type: "post", status: "planned", notes: "", assignee: "" });
   const [editId, setEditId] = useState(null);
+
+  const allAssignees = [...new Set([...(data.profiles || []).map((p) => p.name), ...data.calendarEvents.map((e) => e.assignee).filter(Boolean)])];
 
   const year = cursor.getFullYear();
   const month = cursor.getMonth();
@@ -771,8 +1307,9 @@ function Calendar({ data, saveData }) {
   }
   while (cells.length % 7 !== 0) cells.push({ day: cells.length, out: true, iso: null });
 
+  const visibleEvents = justMine && profile ? data.calendarEvents.filter((e) => e.assignee === profile) : data.calendarEvents;
   const eventsByDate = {};
-  data.calendarEvents.forEach((e) => { (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e); });
+  visibleEvents.forEach((e) => { (eventsByDate[e.date] = eventsByDate[e.date] || []).push(e); });
 
   const saveEvent = () => {
     if (!form.title.trim()) return;
@@ -781,7 +1318,7 @@ function Calendar({ data, saveData }) {
     } else {
       saveData({ ...data, calendarEvents: [...data.calendarEvents, { id: uid(), ...form }] });
     }
-    setForm({ title: "", date: form.date, time: form.time, type: "post", status: "planned", notes: "" });
+    setForm({ title: "", date: form.date, time: form.time, type: "post", status: "planned", notes: "", assignee: "" });
     setEditId(null);
     setShowForm(false);
   };
@@ -791,12 +1328,12 @@ function Calendar({ data, saveData }) {
   };
 
   const openAdd = (iso, time) => {
-    setForm({ title: "", date: iso, time: time || "09:00", type: "post", status: "planned", notes: "" });
+    setForm({ title: "", date: iso, time: time || "09:00", type: "post", status: "planned", notes: "", assignee: profile || "" });
     setEditId(null);
     setShowForm(true);
   };
   const openEdit = (e) => {
-    setForm({ title: e.title, date: e.date, time: e.time || "09:00", type: e.type || "post", status: e.status || "planned", notes: e.notes || "" });
+    setForm({ title: e.title, date: e.date, time: e.time || "09:00", type: e.type || "post", status: e.status || "planned", notes: e.notes || "", assignee: e.assignee || "" });
     setEditId(e.id);
     setShowForm(true);
   };
@@ -817,17 +1354,61 @@ function Calendar({ data, saveData }) {
     <div>
       <div className="topbar">
         <div><div className="page-title">Calendar</div><div className="page-sub">Posting dates, deadlines, and meetings — by day and time.</div></div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div className="view-toggle">
+            <button className={mode === "day" ? "active" : ""} onClick={() => setMode("day")}>Day</button>
             <button className={mode === "week" ? "active" : ""} onClick={() => setMode("week")}>Week</button>
             <button className={mode === "month" ? "active" : ""} onClick={() => setMode("month")}>Month</button>
           </div>
+          {profile && (
+            <button className={`chip ${justMine ? "active" : ""}`} onClick={() => setJustMine(!justMine)}>Just mine</button>
+          )}
           <button className="btn" onClick={() => saveData({ ...data, calendarEvents: [...data.calendarEvents, ...buildExamples().calendarEvents] })}>See example events</button>
           <button className="btn btn-gold" onClick={() => openAdd(todayISO())}><Plus size={15} /> Add event</button>
         </div>
       </div>
 
-      {mode === "month" ? (
+      {mode === "day" ? (
+        <div className="card">
+          <div className="cal-head">
+            <div className="cal-month display">{cursor.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</div>
+            <div className="cal-nav">
+              <button className="btn-ghost btn" onClick={() => { const d = new Date(cursor); d.setDate(d.getDate() - 1); setCursor(d); }}><ChevronLeft size={16} /></button>
+              <button className="btn-ghost btn" onClick={() => setCursor(new Date())}>Today</button>
+              <button className="btn-ghost btn" onClick={() => { const d = new Date(cursor); d.setDate(d.getDate() + 1); setCursor(d); }}><ChevronRight size={16} /></button>
+            </div>
+          </div>
+          {(() => {
+            const dayIso = isoOf(cursor);
+            const dayEvents = eventsByDate[dayIso] || [];
+            return (
+              <div>
+                {WEEK_HOURS.map((h) => {
+                  const label = `${String(h).padStart(2, "0")}:00`;
+                  const slotEvents = dayEvents.filter((e) => parseInt((e.time || "0").split(":")[0], 10) === h).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+                  return (
+                    <div key={h} style={{ display: "flex", borderTop: "1px solid var(--hair)", minHeight: 52 }}>
+                      <div style={{ width: 60, flexShrink: 0, fontSize: 11, color: "var(--muted)", paddingTop: 8 }}>{label}</div>
+                      <div style={{ flex: 1, padding: "8px 0", cursor: "pointer" }} onClick={() => openAdd(dayIso, label)}>
+                        {slotEvents.map((e) => {
+                          const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                          return (
+                            <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--panel-raised)", borderLeft: `3px solid ${personColor(e.assignee)}`, borderRadius: 6, padding: "7px 10px", marginBottom: 6, fontSize: 13 }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                              <span className="evt-dot" style={{ background: st.color }} />
+                              <span style={{ fontWeight: 600 }}>{e.time}</span> {e.title}
+                              {e.assignee && <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--muted)" }}>{e.assignee}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      ) : mode === "month" ? (
         <div className="card">
           <div className="cal-head">
             <div className="cal-month display">{monthLabel}</div>
@@ -849,7 +1430,7 @@ function Calendar({ data, saveData }) {
                 {c.iso && (eventsByDate[c.iso] || []).sort((a, b) => (a.time || "").localeCompare(b.time || "")).slice(0, 3).map((e) => {
                   const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
                   return (
-                    <div className="cal-evt" key={e.id} title={e.title} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                    <div className="cal-evt" key={e.id} title={e.title} style={{ borderLeftColor: personColor(e.assignee) }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
                       <span className="evt-dot" style={{ background: st.color }} />
                       {e.time ? `${e.time} · ` : ""}{e.title}
                     </div>
@@ -891,7 +1472,7 @@ function Calendar({ data, saveData }) {
                       {slotEvents.map((e) => {
                         const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
                         return (
-                          <div key={e.id} className={`week-evt type-${e.type}`} title={`${e.time} · ${e.title}`} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                          <div key={e.id} className={`week-evt type-${e.type}`} title={`${e.time} · ${e.title}`} style={{ borderLeft: `3px solid ${personColor(e.assignee)}` }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
                             <span className="evt-dot light" style={{ background: st.color }} />
                             {e.time} {e.title}
                           </div>
@@ -916,7 +1497,7 @@ function Calendar({ data, saveData }) {
           <div className="field-row">
             <div className="field"><label>Type</label>
               <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
-                <option value="post">Post</option><option value="deadline">Deadline</option><option value="meeting">Meeting</option><option value="other">Other</option>
+                <option value="post">Post</option><option value="photo">Photo</option><option value="graphic">Graphic</option><option value="deadline">Deadline</option><option value="meeting">Meeting</option><option value="other">Other</option>
               </select>
             </div>
             <div className="field"><label>Status</label>
@@ -924,6 +1505,10 @@ function Calendar({ data, saveData }) {
                 {CAL_STATUS.map((s) => <option value={s.id} key={s.id}>{s.label}</option>)}
               </select>
             </div>
+          </div>
+          <div className="field"><label>Assignee</label>
+            <input list="cal-assignee-list" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Who's responsible for this" />
+            <datalist id="cal-assignee-list">{allAssignees.map((a) => <option value={a} key={a} />)}</datalist>
           </div>
           <div className="field"><label>Note (optional)</label><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Raw info, link, or anything quick to jot down" /></div>
           {editId && (
@@ -1022,16 +1607,89 @@ function driveEmbedUrl(url) {
   return m ? `https://drive.google.com/file/d/${m[1]}/preview` : null;
 }
 
+// Uploads a file straight to Google Drive from the browser (never through Vercel's own
+// server, so large videos don't hit the ~4.5MB serverless request limit). Two small
+// backend calls bracket the real upload: one to get an authorized upload slot, one to
+// make the finished file viewable by the team.
+function uploadToDrive(file, onProgress) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const startRes = await fetch("/api/drive-upload-start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name, mimeType: file.type || "application/octet-stream", size: file.size }),
+      });
+      const startData = await startRes.json().catch(() => ({}));
+      if (!startRes.ok || !startData.sessionUrl) {
+        reject(new Error(startData.error || "Couldn't start the upload — is Google Drive connected yet?"));
+        return;
+      }
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", startData.sessionUrl, true);
+      xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100)); };
+      xhr.onload = async () => {
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new Error("Upload to Drive failed (status " + xhr.status + ")"));
+          return;
+        }
+        try {
+          const uploaded = JSON.parse(xhr.responseText);
+          const finalizeRes = await fetch("/api/drive-finalize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fileId: uploaded.id }),
+          });
+          const finalizeData = await finalizeRes.json().catch(() => ({}));
+          if (!finalizeRes.ok || !finalizeData.link) {
+            reject(new Error(finalizeData.error || "Uploaded, but couldn't make it viewable."));
+            return;
+          }
+          resolve({ link: finalizeData.link, name: uploaded.name || file.name });
+        } catch (err) {
+          reject(err);
+        }
+      };
+      xhr.onerror = () => reject(new Error("Network error during upload."));
+      xhr.send(file);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 function ContentReview({ data, saveData }) {
   const [showForm, setShowForm] = useState(false);
   const [open, setOpen] = useState(null);
   const [commentText, setCommentText] = useState("");
-  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "" });
+  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
+  const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState("");
+
+  const handleFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadProgress(0);
+    setUploadError("");
+    try {
+      const result = await uploadToDrive(file, setUploadProgress);
+      setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, "") }));
+    } catch (err) {
+      setUploadError(err.message || "Upload failed.");
+    }
+    setUploading(false);
+    e.target.value = "";
+  };
 
   const addItem = () => {
     if (!form.title.trim()) return;
-    saveData({ ...data, content: [{ id: uid(), status: "draft", comments: [], ...form }, ...data.content] });
-    setForm({ title: "", platform: "Instagram", link: "", assignee: "" });
+    const item = { id: uid(), status: "review", comments: [], caption: "", ...form };
+    saveData({ ...data, content: [item, ...data.content] });
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
     setShowForm(false);
   };
   const updateStatus = (id, status) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)) });
@@ -1046,6 +1704,13 @@ function ContentReview({ data, saveData }) {
     });
     setCommentText("");
   };
+  const updateCaption = (id, caption) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, caption } : c)) });
+  const addToCalendar = (c) => {
+    const type = c.format === "photo" ? "photo" : c.format === "graphic" ? "graphic" : "post";
+    const event = { id: uid(), title: c.title, date: todayISO(), time: "09:00", type, assignee: c.assignee || "", status: "planned", notes: "Scheduled from Content Review" };
+    saveData({ ...data, calendarEvents: [...data.calendarEvents, event] });
+    setScheduled({ ...scheduled, [c.id]: true });
+  };
 
   return (
     <div>
@@ -1057,16 +1722,19 @@ function ContentReview({ data, saveData }) {
       <div className="content-list">
         {data.content.map((c) => {
           const st = CONTENT_STATUS.find((s) => s.id === c.status) || CONTENT_STATUS[0];
+          const fmt = CONTENT_FORMATS.find((f) => f.id === c.format) || CONTENT_FORMATS[0];
+          const FmtIcon = fmt.icon;
           const yt = youtubeId(c.link);
           const drive = !yt ? driveEmbedUrl(c.link) : null;
           const isOpen = open === c.id;
           return (
             <div className="content-item" key={c.id}>
               <div className="content-head" onClick={() => setOpen(isOpen ? null : c.id)}>
-                <div className="content-thumb"><Video size={19} /></div>
+                <div className="content-thumb" style={{ color: fmt.color }}><FmtIcon size={19} /></div>
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div className="content-title">{c.title}</div>
                   <div className="content-tags">
+                    <span className="pill" style={{ background: fmt.color + "22", color: fmt.color }}>{fmt.label}</span>
                     <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.platform}</span>
                     <span className="pill" style={{ background: st.color + "22", color: st.color }}>{st.label}</span>
                     {c.assignee && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.assignee}</span>}
@@ -1078,6 +1746,17 @@ function ContentReview({ data, saveData }) {
 
               {isOpen && (
                 <div className="content-body">
+                  <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+                    <button className="btn" style={{ flex: 1, minWidth: 130, justifyContent: "center", background: c.status === "approved" ? "var(--good-soft)" : undefined, borderColor: c.status === "approved" ? "var(--good)" : undefined, color: c.status === "approved" ? "var(--good)" : undefined }} onClick={() => updateStatus(c.id, "approved")}>
+                      <CheckCircle2 size={13} /> Approve
+                    </button>
+                    <button className="btn" style={{ flex: 1, minWidth: 130, justifyContent: "center", background: c.status === "review" ? "var(--alert-soft)" : undefined, borderColor: c.status === "review" ? "var(--alert)" : undefined, color: c.status === "review" ? "var(--alert)" : undefined }} onClick={() => updateStatus(c.id, "review")}>
+                      <AlertTriangle size={13} /> Needs changes
+                    </button>
+                    <button className="btn" style={{ padding: "9px 12px" }} onClick={() => addToCalendar(c)}>
+                      <CalendarDays size={13} /> {scheduled[c.id] ? "Added ✓" : "Add to Calendar"}
+                    </button>
+                  </div>
                   <div className="field-row" style={{ marginBottom: 14 }}>
                     <div className="field" style={{ marginBottom: 0 }}>
                       <label>Status</label>
@@ -1094,6 +1773,12 @@ function ContentReview({ data, saveData }) {
                       </div>
                     )}
                   </div>
+
+                  <div className="field">
+                    <label>Caption</label>
+                    <textarea value={c.caption || ""} onChange={(e) => updateCaption(c.id, e.target.value)} placeholder="The caption or copy that shipped with this piece…" />
+                  </div>
+
                   {yt && (
                     <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden" }}>
                       <iframe
@@ -1139,19 +1824,40 @@ function ContentReview({ data, saveData }) {
       {showForm && (
         <Modal title="Add content for review" onClose={() => setShowForm(false)}>
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Launch teaser — 15s cut" autoFocus /></div>
-          <div className="field"><label>Video or post link</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="Paste a YouTube, Drive, or post link" /></div>
+
+          <div className="field">
+            <label>Upload video or photo</label>
+            <label className="btn" style={{ width: "100%", justifyContent: "center", cursor: uploading ? "default" : "pointer", opacity: uploading ? 0.7 : 1 }}>
+              <Upload size={14} /> {uploading ? `Uploading… ${uploadProgress}%` : "Choose a file"}
+              <input type="file" accept="video/*,image/*" onChange={handleFileSelect} disabled={uploading} style={{ display: "none" }} />
+            </label>
+            {uploading && (
+              <div className="progress-track" style={{ marginTop: 8 }}>
+                <div className="progress-fill" style={{ width: `${uploadProgress}%`, background: "var(--gold)" }} />
+              </div>
+            )}
+            {uploadError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{uploadError}</div>}
+            {!uploading && form.link && driveEmbedUrl(form.link) && (
+              <div style={{ fontSize: 11.5, color: "var(--good)", marginTop: 6, display: "flex", alignItems: "center", gap: 5 }}><Check size={12} /> Uploaded — ready to add.</div>
+            )}
+          </div>
+
+          <div className="field"><label>Or paste a link instead</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="YouTube, Drive, or post link" /></div>
+
           <div className="field-row">
+            <div className="field"><label>Format</label>
+              <select value={form.format} onChange={(e) => setForm({ ...form, format: e.target.value })}>
+                {CONTENT_FORMATS.map((f) => <option value={f.id} key={f.id}>{f.label}</option>)}
+              </select>
+            </div>
             <div className="field"><label>Platform</label>
               <select value={form.platform} onChange={(e) => setForm({ ...form, platform: e.target.value })}>
                 <option>Instagram</option><option>TikTok</option><option>YouTube</option><option>X</option><option>LinkedIn</option><option>Other</option>
               </select>
             </div>
-            <div className="field"><label>Assignee</label><input value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Who made this" /></div>
           </div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
-            Uploading video files directly isn't supported here — paste a link instead. YouTube links and Google Drive "share" links (drive.google.com/file/d/…) preview inline; anything else opens in a new tab.
-          </div>
-          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addItem}>Add</button></div>
+          <div className="field"><label>Assignee</label><input value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Who made this" /></div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addItem} disabled={uploading}>Add</button></div>
         </Modal>
       )}
     </div>
@@ -1162,13 +1868,13 @@ function ContentReview({ data, saveData }) {
 
 function IdeaBank({ data, saveData }) {
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", tags: "", author: "" });
+  const [form, setForm] = useState({ title: "", description: "", tags: "", author: "", link: "" });
 
   const addIdea = () => {
     if (!form.title.trim()) return;
     const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
     saveData({ ...data, ideas: [{ id: uid(), votes: 0, ...form, tags }, ...data.ideas] });
-    setForm({ title: "", description: "", tags: "", author: form.author });
+    setForm({ title: "", description: "", tags: "", author: form.author, link: "" });
     setShowForm(false);
   };
   const vote = (id) => saveData({ ...data, ideas: data.ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
@@ -1183,13 +1889,28 @@ function IdeaBank({ data, saveData }) {
         <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add idea</button>
       </div>
       <div className="grid idea-grid">
-        {sorted.map((i) => (
+        {sorted.map((i) => {
+          const yt = youtubeId(i.link);
+          const drive = !yt ? driveEmbedUrl(i.link) : null;
+          return (
           <div className="card idea-card" key={i.id}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
               <div className="idea-title">{i.title}</div>
               <button className="icon-btn" onClick={() => removeIdea(i.id)}><Trash2 size={13} /></button>
             </div>
             {i.description && <div className="idea-desc">{i.description}</div>}
+            {(yt || drive) && (
+              <div style={{ position: "relative", paddingTop: "56.25%", borderRadius: 8, overflow: "hidden" }}>
+                <iframe
+                  src={yt ? `https://www.youtube.com/embed/${yt}` : drive}
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+                  allowFullScreen title={i.title}
+                />
+              </div>
+            )}
+            {i.link && !yt && !drive && (
+              <a href={i.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11.5, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Link2 size={11} /> View reference</a>
+            )}
             {i.tags && i.tags.length > 0 && (
               <div className="content-tags">
                 {i.tags.map((t) => <span className="pill" key={t} style={{ background: "var(--teal-soft)", color: "var(--teal)" }}>{t}</span>)}
@@ -1200,7 +1921,7 @@ function IdeaBank({ data, saveData }) {
               <button className="vote-btn" onClick={() => vote(i.id)}><ThumbsUp size={13} /> {i.votes}</button>
             </div>
           </div>
-        ))}
+        );})}
         {sorted.length === 0 && <div className="empty">No ideas yet — be the first to add one.</div>}
       </div>
 
@@ -1208,6 +1929,7 @@ function IdeaBank({ data, saveData }) {
         <Modal title="Add an idea" onClose={() => setShowForm(false)}>
           <div className="field"><label>Idea</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Myth-busting series" autoFocus /></div>
           <div className="field"><label>Description</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What's the concept?" /></div>
+          <div className="field"><label>Video or reference link (optional)</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="Paste a YouTube, Drive, or inspiration link" /></div>
           <div className="field-row">
             <div className="field"><label>Tags (comma separated)</label><input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="Reels, Series" /></div>
             <div className="field"><label>Your name</label><input value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} placeholder="e.g. Alex" /></div>
@@ -1215,6 +1937,162 @@ function IdeaBank({ data, saveData }) {
           <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addIdea}>Add idea</button></div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Meeting (agenda + announcements) ---------------------------------- */
+
+function Meeting({ data, saveData, profile }) {
+  const [agendaText, setAgendaText] = useState("");
+  const [announceText, setAnnounceText] = useState("");
+
+  const meetingItems = data.meetingItems || [];
+  const announcements = data.announcements || [];
+
+  const addAgendaItem = () => {
+    if (!agendaText.trim()) return;
+    saveData({ ...data, meetingItems: [{ id: uid(), text: agendaText.trim(), author: profile || "Team", date: todayISO(), done: false }, ...meetingItems] });
+    setAgendaText("");
+  };
+  const toggleAgendaDone = (id) => saveData({ ...data, meetingItems: meetingItems.map((m) => (m.id === id ? { ...m, done: !m.done } : m)) });
+  const removeAgendaItem = (id) => saveData({ ...data, meetingItems: meetingItems.filter((m) => m.id !== id) });
+  const clearDiscussed = () => saveData({ ...data, meetingItems: meetingItems.filter((m) => !m.done) });
+
+  const addAnnouncement = () => {
+    if (!announceText.trim()) return;
+    const notifications = [...(data.notifications || []), makeNotification({ toProfile: null, type: "announcement", text: `${profile || "Team"} posted an announcement`, link: "dashboard", fromProfile: profile })];
+    saveData({ ...data, announcements: [...announcements, { id: uid(), text: announceText.trim(), author: profile || "Team", date: todayISO() }], notifications });
+    sendPush(null, "New announcement", announceText.trim().slice(0, 100));
+    setAnnounceText("");
+  };
+  const removeAnnouncement = (id) => saveData({ ...data, announcements: announcements.filter((a) => a.id !== id) });
+
+  const sortedAgenda = [...meetingItems].sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0));
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Meeting</div><div className="page-sub">Collect what to bring up next time, and post team-wide announcements.</div></div>
+      </div>
+
+      <div className="grid two-col">
+        <div className="card">
+          <div className="section-title"><ListChecks size={16} color="var(--gold)" /> Agenda for next meeting</div>
+          <div className="comment-form" style={{ marginBottom: 16 }}>
+            <textarea placeholder="Something to bring up next meeting…" value={agendaText} onChange={(e) => setAgendaText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addAgendaItem(); } }} />
+            <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addAgendaItem}><Plus size={14} /></button>
+          </div>
+          {sortedAgenda.map((m) => (
+            <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+              <button className={`check-btn ${m.done ? "done" : ""}`} onClick={() => toggleAgendaDone(m.id)}><CheckCircle2 size={12} /></button>
+              <div style={{ flex: 1, fontSize: 13, textDecoration: m.done ? "line-through" : "none", opacity: m.done ? 0.55 : 1 }}>{m.text}</div>
+              <span style={{ fontSize: 10.5, color: "var(--muted)" }}>{m.author}</span>
+              <button className="icon-btn" onClick={() => removeAgendaItem(m.id)}><Trash2 size={13} /></button>
+            </div>
+          ))}
+          {sortedAgenda.length === 0 && <div className="empty">Nothing on the agenda yet.</div>}
+          {meetingItems.some((m) => m.done) && (
+            <button className="btn" style={{ marginTop: 14 }} onClick={clearDiscussed}>Clear discussed items</button>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="section-title"><Radio size={16} color="var(--gold)" /> Announcements</div>
+          <div className="comment-form" style={{ marginBottom: 16 }}>
+            <textarea placeholder="Post something the whole team should see…" value={announceText} onChange={(e) => setAnnounceText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addAnnouncement(); } }} />
+            <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addAnnouncement}><Plus size={14} /></button>
+          </div>
+          {[...announcements].reverse().map((a) => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13 }}>{a.text}</div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{a.author} · {fmtDate(a.date)}</div>
+              </div>
+              <button className="icon-btn" onClick={() => removeAnnouncement(a.id)}><Trash2 size={13} /></button>
+            </div>
+          ))}
+          {announcements.length === 0 && <div className="empty">No announcements yet — post one for the team to see on the Dashboard.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- Chat ---------------------------------- */
+
+function Chat({ data, saveData, profile }) {
+  const [thread, setThread] = useState("team"); // "team" | a profile name
+  const [text, setText] = useState("");
+  const scrollRef = useRef(null);
+
+  const others = (data.profiles || []).filter((p) => p.name !== profile);
+  const messages = data.messages || [];
+  const visible = thread === "team"
+    ? messages.filter((m) => m.to === null)
+    : messages.filter((m) => (m.from === profile && m.to === thread) || (m.from === thread && m.to === profile));
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [visible.length, thread]);
+
+  const initials = (name) => (name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  const send = () => {
+    if (!text.trim() || !profile) return;
+    const msg = { id: uid(), from: profile, to: thread === "team" ? null : thread, text: text.trim(), date: todayISO(), time: new Date().toTimeString().slice(0, 5) };
+    let notifications = data.notifications || [];
+    if (thread === "team") {
+      notifications = [...notifications, makeNotification({ toProfile: null, type: "message", text: `${profile} in Team Chat: ${text.trim().slice(0, 60)}`, link: "chat", fromProfile: profile })];
+      saveData({ ...data, messages: [...messages, msg], notifications });
+      sendPush(null, `${profile} in Team Chat`, text.trim().slice(0, 100));
+    } else {
+      notifications = [...notifications, makeNotification({ toProfile: thread, type: "message", text: `${profile} sent you a message`, link: "chat", fromProfile: profile })];
+      saveData({ ...data, messages: [...messages, msg], notifications });
+      sendPush(thread, `Message from ${profile}`, text.trim().slice(0, 100));
+    }
+    setText("");
+  };
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Chat</div><div className="page-sub">Team chat, or message someone directly.</div></div>
+      </div>
+
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div className="card" style={{ width: 200, flexShrink: 0, padding: 12 }}>
+          <button className={`nav-item ${thread === "team" ? "active" : ""}`} onClick={() => setThread("team")}><Users size={16} /> Team Chat</button>
+          {others.map((p) => (
+            <button key={p.id} className={`nav-item ${thread === p.name ? "active" : ""}`} onClick={() => setThread(p.name)}>
+              <span style={{ width: 20, height: 20, borderRadius: "50%", background: `var(--${p.color}-soft)`, color: `var(--${p.color})`, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{initials(p.name)}</span>
+              {p.name}
+            </button>
+          ))}
+          {others.length === 0 && <div className="empty" style={{ padding: "10px 4px", fontSize: 11 }}>No one else has signed in yet.</div>}
+        </div>
+
+        <div className="card" style={{ flex: 1, minWidth: 260, display: "flex", flexDirection: "column" }}>
+          <div ref={scrollRef} style={{ maxHeight: 420, minHeight: 200, overflowY: "auto", paddingRight: 4 }}>
+            {visible.map((m) => (
+              <div key={m.id} style={{ marginBottom: 12, textAlign: m.from === profile ? "right" : "left" }}>
+                {thread === "team" && m.from !== profile && <div style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 3 }}>{m.from}</div>}
+                <div style={{ display: "inline-block", background: m.from === profile ? "var(--gold)" : "var(--panel-raised)", color: m.from === profile ? "#171812" : "var(--text)", padding: "8px 12px", borderRadius: 10, fontSize: 13, maxWidth: "75%", textAlign: "left" }}>{m.text}</div>
+                <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>{m.time}</div>
+              </div>
+            ))}
+            {visible.length === 0 && <div className="empty">{thread === "team" ? "No messages yet — say hi to the team." : `No messages with ${thread} yet.`}</div>}
+          </div>
+          <div className="comment-form" style={{ marginTop: 14 }}>
+            <textarea
+              value={text} onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              placeholder={thread === "team" ? "Message the team…" : `Message ${thread}…`}
+            />
+            <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={send}><Send size={14} /></button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1280,7 +2158,9 @@ function Guidelines({ data, saveData }) {
 
 function MyDuties({ data, saveData, profile }) {
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", dueDate: todayISO(), priority: "medium" });
+  const [form, setForm] = useState({ title: "", description: "", dueDate: todayISO(), priority: "medium", type: "other", format: "video" });
+  const [expanded, setExpanded] = useState({});
+  const [openTaskId, setOpenTaskId] = useState(null);
 
   const mine = data.tasks.filter((t) => t.assignee === profile);
   const done = mine.filter((t) => t.status === "done").length;
@@ -1293,13 +2173,20 @@ function MyDuties({ data, saveData, profile }) {
     return isoOf(d);
   });
   const hitDates = new Set(mine.filter((t) => t.completedAt).map((t) => t.completedAt));
+  const allAssignees = [...new Set([...(data.profiles || []).map((p) => p.name), ...data.tasks.map((t) => t.assignee).filter(Boolean)])];
 
   const addTask = () => {
     if (!form.title.trim() || !profile) return;
-    const task = { id: uid(), status: "todo", assignee: profile, ...form };
+    const task = { id: uid(), status: "todo", assignee: profile, steps: defaultContentSteps(form.format), link: "", notes: [], ...form };
     saveData({ ...data, tasks: [task, ...data.tasks] });
-    setForm({ title: "", description: "", dueDate: todayISO(), priority: "medium" });
+    setForm({ title: "", description: "", dueDate: todayISO(), priority: "medium", type: "other", format: "video" });
     setShowForm(false);
+  };
+  const toggleStep = (taskId, stepId) => {
+    saveData({
+      ...data,
+      tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, steps: (t.steps || []).map((s) => (s.id === stepId ? { ...s, done: !s.done } : s)) } : t)),
+    });
   };
   const toggleDone = (t) => {
     const nextStatus = t.status === "done" ? "todo" : "done";
@@ -1308,7 +2195,15 @@ function MyDuties({ data, saveData, profile }) {
       tasks: data.tasks.map((x) => (x.id === t.id ? { ...x, status: nextStatus, completedAt: nextStatus === "done" ? todayISO() : null } : x)),
     });
   };
-  const removeTask = (id) => saveData({ ...data, tasks: data.tasks.filter((t) => t.id !== id) });
+  const removeTask = (id) => {
+    const task = data.tasks.find((t) => t.id === id);
+    if (!task) return;
+    saveData({
+      ...data,
+      tasks: data.tasks.filter((t) => t.id !== id),
+      deletedTasks: [{ ...task, deletedBy: profile || "Unknown", deletedAt: todayISO() }, ...(data.deletedTasks || [])],
+    });
+  };
 
   const sorted = [...mine].sort((a, b) => (a.status === "done") - (b.status === "done") || a.dueDate.localeCompare(b.dueDate));
 
@@ -1359,15 +2254,54 @@ function MyDuties({ data, saveData, profile }) {
         <div className="section-title"><ListChecks size={16} color="var(--gold)" /> {profile}'s tasks</div>
         {sorted.map((t) => {
           const p = PRIORITY.find((x) => x.id === t.priority) || PRIORITY[1];
+          const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
+          const TyIcon = ty.icon;
           const overdue = t.status !== "done" && daysUntil(t.dueDate) < 0;
+          const dueToday = t.status !== "done" && daysUntil(t.dueDate) === 0;
+          const rowColor = t.status === "done" ? "var(--good)" : overdue ? "var(--alert)" : dueToday ? "var(--gold)" : "var(--hair)";
+          const steps = t.steps || [];
+          const stepsDone = steps.filter((s) => s.done).length;
+          const nextStep = steps.find((s) => !s.done);
+          const isOpen = expanded[t.id];
           return (
-            <div className="personal-task-row" key={t.id}>
-              <button className={`check-btn ${t.status === "done" ? "done" : ""}`} onClick={() => toggleDone(t)}>
+            <div className="personal-task-row" key={t.id} style={{ borderLeft: `3px solid ${rowColor}`, paddingLeft: 10, background: t.status === "done" ? "var(--good-soft)" : overdue ? "var(--alert-soft)" : "transparent", borderRadius: 6, alignItems: "flex-start" }}>
+              <button className={`check-btn ${t.status === "done" ? "done" : ""}`} style={{ marginTop: 2 }} onClick={() => toggleDone(t)}>
                 <CheckCircle2 size={13} />
               </button>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600, textDecoration: t.status === "done" ? "line-through" : "none", opacity: t.status === "done" ? 0.6 : 1 }}>{t.title}</div>
+              <span style={{ width: 26, height: 26, borderRadius: 7, background: ty.color + "1f", color: ty.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><TyIcon size={13} /></span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, textDecoration: t.status === "done" ? "line-through" : "none", opacity: t.status === "done" ? 0.6 : 1, cursor: "pointer" }} onClick={() => setOpenTaskId(t.id)}>{ty.verb} — {t.title}</div>
+                {t.projectId && (() => {
+                  const proj = (data.projects || []).find((p) => p.id === t.projectId);
+                  return proj ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 9.5, fontWeight: 700, color: "var(--gold)", background: "var(--gold-soft)", padding: "1px 6px", borderRadius: 4, marginTop: 3 }}>
+                      <Layers size={9} /> {proj.name}
+                    </span>
+                  ) : null;
+                })()}
                 {t.description && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{t.description}</div>}
+                {steps.length > 0 && t.status !== "done" && (
+                  <div style={{ marginTop: 6 }}>
+                    <button
+                      onClick={() => setExpanded({ ...expanded, [t.id]: !isOpen })}
+                      style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 6, padding: "5px 8px", fontSize: 11, color: "var(--muted)", maxWidth: 320 }}
+                    >
+                      <span style={{ flexShrink: 0, fontWeight: 700, color: stepsDone === steps.length ? "var(--good)" : "var(--gold)" }}>{stepsDone}/{steps.length}</span>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStep ? `Next: ${nextStep.text}` : "All steps done"}</span>
+                      <ChevronRight size={11} style={{ flexShrink: 0, transform: isOpen ? "rotate(90deg)" : "none" }} />
+                    </button>
+                    {isOpen && (
+                      <div style={{ marginTop: 6 }}>
+                        {steps.map((s) => (
+                          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                            <button className={`check-btn ${s.done ? "done" : ""}`} style={{ width: 16, height: 16 }} onClick={() => toggleStep(t.id, s.id)}><CheckCircle2 size={10} /></button>
+                            <span style={{ fontSize: 11.5, textDecoration: s.done ? "line-through" : "none", opacity: s.done ? 0.55 : 1 }}>{s.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <span className="pill" style={{ background: p.color + "22", color: p.color }}>{p.label}</span>
               <span className="due-tag" style={{ color: overdue ? "var(--alert)" : "var(--muted)" }}>{overdue ? "Overdue" : fmtDate(t.dueDate)}</span>
@@ -1383,6 +2317,18 @@ function MyDuties({ data, saveData, profile }) {
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Prep tomorrow's caption drafts" autoFocus /></div>
           <div className="field"><label>Details</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Optional notes" /></div>
           <div className="field-row">
+            <div className="field"><label>Action</label>
+              <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+                {TASK_TYPES.map((t) => <option value={t.id} key={t.id}>{t.label}</option>)}
+              </select>
+            </div>
+            <div className="field"><label>Format</label>
+              <select value={form.format} onChange={(e) => setForm({ ...form, format: e.target.value })}>
+                {CONTENT_FORMATS.map((f) => <option value={f.id} key={f.id}>{f.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field-row">
             <div className="field"><label>Due date</label><input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} /></div>
             <div className="field"><label>Priority</label>
               <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
@@ -1392,6 +2338,13 @@ function MyDuties({ data, saveData, profile }) {
           </div>
           <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addTask}>Add task</button></div>
         </Modal>
+      )}
+
+      {openTaskId && (
+        <TaskDetailModal
+          data={data} saveData={saveData} taskId={openTaskId} onClose={() => setOpenTaskId(null)}
+          profile={profile} allAssignees={allAssignees} onDelete={removeTask} onOpenTask={(id) => setOpenTaskId(id)}
+        />
       )}
     </div>
   );
@@ -1489,7 +2442,7 @@ function LoginScreen({ data, saveData, onLogin }) {
     if (!newName.trim()) return;
     if (!/^\d{4}$/.test(newCode)) { setNewCodeError("Code must be exactly 4 digits."); return; }
     if (codeTaken(newCode)) { setNewCodeError("That code is already assigned to someone else."); return; }
-    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length] };
+    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length], isLead: profiles.length === 0 };
     saveData({ ...data, profiles: [...profiles, np] });
     setNewName("");
     setNewCode(genCode());
@@ -1701,7 +2654,7 @@ function TeamManage({ data, saveData }) {
     if (!newName.trim()) return;
     if (!/^\d{4}$/.test(newCode)) { setNewCodeError("Code must be exactly 4 digits."); return; }
     if (codeTaken(newCode)) { setNewCodeError("That code is already assigned to someone else."); return; }
-    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length] };
+    const np = { id: uid(), name: newName.trim(), pin: newCode, color: PROFILE_COLORS[profiles.length % PROFILE_COLORS.length], isLead: profiles.length === 0 };
     saveData({ ...data, profiles: [...profiles, np] });
     setNewName("");
     setNewCode(genCode());
@@ -1710,6 +2663,9 @@ function TeamManage({ data, saveData }) {
   const removeProfile = (id) => {
     saveData({ ...data, profiles: profiles.filter((p) => p.id !== id) });
     if (editingProfile && editingProfile.id === id) setEditingProfile(null);
+  };
+  const toggleLead = (id) => {
+    saveData({ ...data, profiles: profiles.map((p) => (p.id === id ? { ...p, isLead: !p.isLead } : p)) });
   };
   const openEditCode = (p) => { setEditingProfile(p); setEditCode(p.pin); setEditCodeError(""); };
   const saveEditCode = () => {
@@ -1743,6 +2699,18 @@ function TeamManage({ data, saveData }) {
       if (next === adminCode) clearDemoContent();
       else { setClearPinError(true); setClearPin(""); }
     }
+  };
+
+  const deletedTasks = data.deletedTasks || [];
+  const restoreTask = (dt) => {
+    const { deletedBy, deletedAt, ...task } = dt;
+    saveData({ ...data, tasks: [task, ...data.tasks], deletedTasks: deletedTasks.filter((x) => x.id !== dt.id) });
+  };
+  const purgeTask = (id) => {
+    saveData({ ...data, deletedTasks: deletedTasks.filter((x) => x.id !== id) });
+  };
+  const purgeAllDeleted = () => {
+    saveData({ ...data, deletedTasks: [] });
   };
 
   if (!unlocked) {
@@ -1807,6 +2775,8 @@ function TeamManage({ data, saveData }) {
                 <div className="admin-row" key={p.id}>
                   <div className="profile-avatar-lg" style={{ width: 32, height: 32, fontSize: 11, background: `var(--${p.color}-soft)`, color: `var(--${p.color})` }}>{initials(p.name)}</div>
                   <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                  {p.isLead && <span className="pill" style={{ background: "var(--gold-soft)", color: "var(--gold)" }}>Employer</span>}
+                  <button className="icon-btn" title={p.isLead ? "Remove employer access" : "Make this person an employer"} onClick={() => toggleLead(p.id)}><Shield size={13} color={p.isLead ? "var(--gold)" : undefined} /></button>
                   <button className="code code-btn" onClick={() => openEditCode(p)}>{p.pin}</button>
                   <button className="icon-btn" title="Change this person's code" onClick={() => openEditCode(p)}><Pencil size={13} /></button>
                   <button className="icon-btn" onClick={() => removeProfile(p.id)}><Trash2 size={13} /></button>
@@ -1859,6 +2829,31 @@ function TeamManage({ data, saveData }) {
       )}
 
       {!editingProfile && (
+        <div className="card" style={{ maxWidth: 480, marginTop: 16 }}>
+          <div className="topbar" style={{ marginBottom: 12 }}>
+            <div className="section-title" style={{ marginBottom: 0 }}><Trash2 size={16} color="var(--gold)" /> Deleted duties · {deletedTasks.length}</div>
+            {deletedTasks.length > 0 && <button className="btn" onClick={purgeAllDeleted}>Empty all</button>}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Anyone's deletions land here first instead of disappearing right away — you can restore a duty or clear it out for good.
+          </div>
+          {deletedTasks.length === 0 && <div className="empty" style={{ padding: "10px 0" }}>Nothing deleted recently.</div>}
+          {deletedTasks.map((dt) => (
+            <div key={dt.id} className="admin-row" style={{ marginBottom: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{dt.title}</div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
+                  {dt.assignee ? `${dt.assignee} · ` : ""}deleted by {dt.deletedBy || "someone"} · {fmtDate(dt.deletedAt)}
+                </div>
+              </div>
+              <button className="btn" style={{ padding: "5px 10px", fontSize: 11.5 }} onClick={() => restoreTask(dt)}>Restore</button>
+              <button className="icon-btn" title="Delete permanently" onClick={() => purgeTask(dt.id)}><Trash2 size={13} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!editingProfile && (
         <div className="card danger-zone" style={{ maxWidth: 480, marginTop: 16 }}>
           <div className="section-title" style={{ color: "var(--alert)" }}><AlertTriangle size={16} color="var(--alert)" /> Clear sample content</div>
           {!clearConfirm ? (
@@ -1890,6 +2885,140 @@ function TeamManage({ data, saveData }) {
   );
 }
 
+/* ---------------------------------- Notification bell ---------------------------------- */
+
+function NotificationBell({ data, saveData, profile, setView }) {
+  const [open, setOpen] = useState(false);
+  const all = data.notifications || [];
+  const mine = all.filter((n) => n.toProfile === profile || n.toProfile === null).sort((a, b) => b.id.localeCompare(a.id));
+  const unread = mine.filter((n) => !(n.readBy || []).includes(profile));
+
+  const markRead = (id) => {
+    saveData({ ...data, notifications: all.map((n) => (n.id === id ? { ...n, readBy: [...new Set([...(n.readBy || []), profile])] } : n)) });
+  };
+  const markAllRead = () => {
+    saveData({ ...data, notifications: all.map((n) => ((n.toProfile === profile || n.toProfile === null) ? { ...n, readBy: [...new Set([...(n.readBy || []), profile])] } : n)) });
+  };
+  const openNotif = (n) => {
+    markRead(n.id);
+    if (n.link) setView(n.link);
+    setOpen(false);
+  };
+
+  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="btn-ghost btn" style={{ position: "relative", width: "100%", justifyContent: "flex-start", gap: 10 }} onClick={() => setOpen(!open)}>
+        <Bell size={16} />
+        Notifications
+        {unread.length > 0 && (
+          <span style={{ marginLeft: "auto", background: "var(--alert)", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 6px" }}>{unread.length}</span>
+        )}
+      </button>
+      {open && (
+        <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 6, width: 300, maxHeight: 360, overflowY: "auto", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)", zIndex: 50, padding: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 6px 8px" }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Notifications</span>
+            {unread.length > 0 && <button onClick={markAllRead} style={{ fontSize: 10.5, color: "var(--gold)", background: "none", border: "none" }}>Mark all read</button>}
+          </div>
+          {mine.length === 0 && <div className="empty" style={{ padding: "16px 6px" }}>Nothing yet.</div>}
+          {mine.slice(0, 25).map((n) => {
+            const Icon = ICONS[n.type] || Bell;
+            const isUnread = !(n.readBy || []).includes(profile);
+            return (
+              <button key={n.id} onClick={() => openNotif(n)} style={{ display: "flex", gap: 9, width: "100%", textAlign: "left", padding: "8px 6px", borderRadius: 7, background: isUnread ? "var(--gold-soft)" : "transparent", border: "none", marginBottom: 3 }}>
+                <span style={{ width: 26, height: 26, borderRadius: 7, background: "var(--panel)", color: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon size={13} /></span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.35 }}>{n.text}</div>
+                  <div style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2 }}>{fmtDate(n.date)}</div>
+                </div>
+                {isUnread && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)", flexShrink: 0, marginTop: 5 }} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Push notification opt-in ---------------------------------- */
+
+const VAPID_PUBLIC_KEY = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_VAPID_PUBLIC_KEY) || "";
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+function PushEnableButton({ profile }) {
+  const [status, setStatus] = useState("checking"); // checking | off | on | unsupported | error
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+        if (!cancelled) setStatus("unsupported");
+        return;
+      }
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (!cancelled) setStatus(sub ? "on" : "off");
+      } catch {
+        if (!cancelled) setStatus("off");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const enable = async () => {
+    if (!VAPID_PUBLIC_KEY) { setStatus("error"); return; }
+    setBusy(true);
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") { setBusy(false); return; }
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+      const json = sub.toJSON();
+      await supabase.from("push_subscriptions").upsert({
+        profile_name: profile,
+        endpoint: json.endpoint,
+        p256dh: json.keys.p256dh,
+        auth: json.keys.auth,
+      }, { onConflict: "endpoint" });
+      setStatus("on");
+    } catch {
+      setStatus("error");
+    }
+    setBusy(false);
+  };
+
+  if (status === "unsupported") return null; // e.g. iPhone not yet added to home screen
+  if (status === "checking") return null;
+
+  return (
+    <button
+      className="btn-ghost btn"
+      style={{ width: "100%", justifyContent: "flex-start", gap: 10, fontSize: 12.5, marginBottom: 4 }}
+      onClick={status === "off" || status === "error" ? enable : undefined}
+      disabled={busy}
+    >
+      <Bell size={14} color={status === "on" ? "var(--good)" : undefined} />
+      {status === "on" ? "Notifications on" : status === "error" ? "Couldn't enable — try again" : busy ? "Enabling…" : "Enable notifications"}
+    </button>
+  );
+}
+
 /* ---------------------------------- App shell ---------------------------------- */
 
 const NAV = [
@@ -1897,6 +3026,8 @@ const NAV = [
   { id: "myduties", label: "My Duties", icon: User },
   { id: "duties", label: "Team Duties", icon: ListChecks },
   { id: "calendar", label: "Calendar", icon: CalendarDays },
+  { id: "meeting", label: "Meeting", icon: Radio },
+  { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "notes", label: "Notes", icon: StickyNote },
   { id: "content", label: "Content Review", icon: Video },
   { id: "ideas", label: "Idea Bank", icon: Lightbulb },
@@ -1916,8 +3047,11 @@ export default function TeamHub() {
     let cancelled = false;
     let channel = null;
 
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+
     (async () => {
-      // Load (or create) the single shared row every device reads/writes.
       let loadedData = null;
       const { data: row, error } = await supabase.from("hub_state").select("data").eq("id", "main").single();
 
@@ -1928,10 +3062,17 @@ export default function TeamHub() {
         await supabase.from("hub_state").upsert({ id: "main", data: loadedData });
       }
       if (!loadedData.profiles) loadedData.profiles = [];
+      if (!loadedData.deletedTasks) loadedData.deletedTasks = [];
+      if (!loadedData.messages) loadedData.messages = [];
+      if (!loadedData.notifications) loadedData.notifications = [];
+      if (!loadedData.projects) loadedData.projects = [];
+      if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
+        loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
+      }
+
       if (cancelled) return;
       setData(loadedData);
 
-      // This device's "who's checked in" pointer is local on purpose — it's not shared data.
       try {
         const savedId = localStorage.getItem("my-profile-id");
         if (savedId) {
@@ -1943,7 +3084,6 @@ export default function TeamHub() {
       }
       if (!cancelled) setAuthReady(true);
 
-      // Live sync: whenever anyone on the team saves, every other phone gets pushed the update.
       channel = supabase
         .channel("hub_state_live")
         .on(
@@ -1961,7 +3101,7 @@ export default function TeamHub() {
   }, []);
 
   const saveData = async (next) => {
-    setData(next); // update this device instantly
+    setData(next);
     try {
       const { error } = await supabase.from("hub_state").update({ data: next, updated_at: new Date().toISOString() }).eq("id", "main");
       setSaveError(!!error);
@@ -1999,12 +3139,16 @@ export default function TeamHub() {
 
   const profile = loggedIn.name;
   const initials = profile.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+  const myProfileObj = (data.profiles || []).find((p) => p.name === profile);
+  const isEmployer = !!(myProfileObj && myProfileObj.isLead);
 
   const Comp = {
-    dashboard: <Dashboard data={data} saveData={saveData} profile={profile} />,
+    dashboard: <Dashboard data={data} saveData={saveData} profile={profile} setView={setView} isEmployer={isEmployer} />,
     myduties: <MyDuties data={data} saveData={saveData} profile={profile} />,
-    duties: <Duties data={data} saveData={saveData} />,
-    calendar: <Calendar data={data} saveData={saveData} />,
+    duties: <Duties data={data} saveData={saveData} profile={profile} />,
+    calendar: <Calendar data={data} saveData={saveData} profile={profile} />,
+    meeting: <Meeting data={data} saveData={saveData} profile={profile} />,
+    chat: <Chat data={data} saveData={saveData} profile={profile} />,
     notes: <Notes data={data} saveData={saveData} />,
     content: <ContentReview data={data} saveData={saveData} />,
     ideas: <IdeaBank data={data} saveData={saveData} />,
@@ -2032,13 +3176,18 @@ export default function TeamHub() {
           <div className="profile-chip">
             <div className="av" style={{ background: `var(--${loggedIn.color})` }}>{initials}</div>
             <div className="info">
-              <div className="name">{profile}</div>
+              <div className="name">{profile}{isEmployer && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "var(--gold)", background: "var(--gold-soft)", padding: "2px 6px", borderRadius: 4, verticalAlign: "middle" }}>EMPLOYER</span>}</div>
               <button className="change" onClick={handleLogout}>switch profile</button>
             </div>
           </div>
         </div>
 
-        {NAV.map((n) => {
+        <div style={{ marginBottom: 8 }}>
+          <NotificationBell data={data} saveData={saveData} profile={profile} setView={setView} />
+          <PushEnableButton profile={profile} />
+        </div>
+
+        {NAV.filter((n) => n.id !== "team" || isEmployer).map((n) => {
           const Icon = n.icon;
           return (
             <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setNavOpen(false); }}>
