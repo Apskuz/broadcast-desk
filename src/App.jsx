@@ -1219,11 +1219,6 @@ function Duties({ data, saveData, profile }) {
         <Modal title="Assign a duty" onClose={() => setShowForm(false)}>
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Cut Reels for launch" autoFocus /></div>
           <div className="field"><label>Details</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Any brief, links, or notes" /></div>
-          <div className="field"><label>Action</label>
-            <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
-              {TASK_TYPES.map((t) => <option value={t.id} key={t.id}>{t.label}</option>)}
-            </select>
-          </div>
           <div className="field-row">
             <div className="field"><label>Action</label>
               <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
