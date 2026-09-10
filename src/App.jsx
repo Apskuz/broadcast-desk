@@ -2539,6 +2539,14 @@ function IdeaBank({ data, saveData, profile }) {
     if (!drawingMode || tool === "erase") return;
     e.preventDefault();
     const { x, y } = pointOn(e);
+    if (tool === "text") {
+      // Drop a text box where you tapped and start typing straight away.
+      const created = addBoardItem({ type: "text", x, y, w: 220, text: "", color: drawColor });
+      setEditingTextId(created.id);
+      setEditingText("");
+      setTool("move");
+      return;
+    }
     const shape = tool === "pen"
       ? { tool: "pen", color: drawColor, points: [x, y] }
       : { tool, color: drawColor, x1: x, y1: y, x2: x, y2: y };
@@ -2590,7 +2598,7 @@ function IdeaBank({ data, saveData, profile }) {
   const renderShape = (s, key, isDraft) => {
     const common = { stroke: s.color, strokeWidth: 3, fill: "none", strokeLinecap: "round", strokeLinejoin: "round" };
     const hit = tool === "erase" && !isDraft
-      ? { stroke: "transparent", strokeWidth: 16, fill: "none", style: { cursor: "pointer" }, onClick: () => eraseShape(s.id) }
+      ? { stroke: "transparent", strokeWidth: 16, fill: "none", style: { cursor: "pointer", pointerEvents: "stroke" }, onClick: () => eraseShape(s.id) }
       : null;
     const shapes = [];
     if (s.tool === "pen") {
@@ -2616,12 +2624,106 @@ function IdeaBank({ data, saveData, profile }) {
 
   const TOOLS = [
     { id: "move", label: "Move", icon: Pin },
+    { id: "text", label: "Text", icon: TypeIcon },
     { id: "pen", label: "Pen", icon: Pencil },
     { id: "line", label: "Line", icon: ChevronRight },
     { id: "rect", label: "Box", icon: Layers },
     { id: "circle", label: "Circle", icon: Globe },
     { id: "erase", label: "Erase", icon: Trash2 },
   ];
+
+  // ---- loose pictures and text placed straight on the board ----
+  // Separate from idea cards: these are for laying out a case — a wall of
+  // reference shots with notes around them — rather than pitching one idea.
+  const allBoardItems = data.boardItems || [];
+  const boardItems = allBoardItems.filter((b) => (openFolderId ? b.folderId === openFolderId : !b.folderId));
+  const [editingTextId, setEditingTextId] = useState(null);
+  const [editingText, setEditingText] = useState("");
+  const [resizing, setResizing] = useState(null); // { id, w }
+  const boardFileInputRef = useRef(null);
+  const [boardUploading, setBoardUploading] = useState(false);
+  const [boardUploadProgress, setBoardUploadProgress] = useState(0);
+
+  const saveBoardItemPos = (id, x, y) => saveData({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
+  const boardItemDrag = useDraggable(saveBoardItemPos, (id) => {
+    const item = allBoardItems.find((b) => b.id === id);
+    if (!item) return;
+    if (tool === "erase") return removeBoardItem(id);
+    if (item.type === "text") { setEditingTextId(id); setEditingText(item.text || ""); }
+    else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
+  });
+
+  const addBoardItem = (item) => {
+    const created = { id: uid(), folderId: openFolderId || null, ...item };
+    saveData({ ...data, boardItems: [...allBoardItems, created] });
+    return created;
+  };
+  const removeBoardItem = (id) => {
+    const item = allBoardItems.find((b) => b.id === id);
+    if (item && item.fileId) deleteDriveFile(item.fileId);
+    saveData({ ...data, boardItems: allBoardItems.filter((b) => b.id !== id) });
+    if (editingTextId === id) setEditingTextId(null);
+  };
+  const commitText = () => {
+    if (!editingTextId) return;
+    const id = editingTextId;
+    const text = editingText;
+    setEditingTextId(null);
+    // An empty text box is just clutter — drop it rather than leave a blank.
+    if (!text.trim()) return removeBoardItem(id);
+    saveData({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, text } : b)) });
+  };
+
+  const handleBoardFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setBoardUploading(true);
+    setBoardUploadProgress(0);
+    try {
+      const result = await uploadToDrive(file, setBoardUploadProgress, profile);
+      const count = boardItems.filter((b) => b.type === "image").length;
+      addBoardItem({
+        type: "image",
+        fileId: driveFileId(result.link),
+        kind: result.kind,
+        name: result.name,
+        x: 60 + (count % 5) * 60,
+        y: 60 + (count % 5) * 40,
+        w: 260,
+      });
+    } catch {
+      // the picker can just be used again — nothing half-created is left behind
+    }
+    setBoardUploading(false);
+    e.target.value = "";
+  };
+
+  // Dragging the corner of a picture to size it, saved once on release.
+  const startResize = (e, item) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const p = e.touches ? e.touches[0] : e;
+    const startX = p.clientX;
+    const startW = item.w || 260;
+    let latest = startW;
+    const move = (ev) => {
+      const q = ev.touches ? ev.touches[0] : ev;
+      latest = Math.max(80, Math.min(900, Math.round(startW + (q.clientX - startX))));
+      setResizing({ id: item.id, w: latest });
+    };
+    const end = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", end);
+      window.removeEventListener("touchmove", move);
+      window.removeEventListener("touchend", end);
+      setResizing(null);
+      saveData({ ...data, boardItems: allBoardItems.map((b) => (b.id === item.id ? { ...b, w: latest } : b)) });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", end);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("touchend", end);
+  };
 
   return (
     <div>
@@ -2657,9 +2759,19 @@ function IdeaBank({ data, saveData, profile }) {
             </button>
           );
         })}
+        <button
+          className="btn"
+          style={{ padding: "6px 10px", fontSize: 12 }}
+          onClick={() => boardFileInputRef.current && boardFileInputRef.current.click()}
+          disabled={boardUploading}
+          title="Drop a picture straight onto the board"
+        >
+          <Image size={13} /> {boardUploading ? `Adding… ${boardUploadProgress}%` : "Picture"}
+        </button>
+        <input ref={boardFileInputRef} type="file" accept="video/*,image/*" onChange={handleBoardFileSelect} disabled={boardUploading} style={{ display: "none" }} />
         <span style={{ display: "flex", gap: 5, marginLeft: 4 }}>
           {IDEA_COLORS.map((c) => (
-            <button key={c} onClick={() => setDrawColor(c)} title="Pen colour" style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: drawColor === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+            <button key={c} onClick={() => setDrawColor(c)} title="Pen and text colour" style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: drawColor === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
           ))}
         </span>
         {drawings.length > 0 && (
@@ -2677,11 +2789,72 @@ function IdeaBank({ data, saveData, profile }) {
           <svg
             width={BOARD_W}
             height={BOARD_H}
-            style={{ position: "absolute", inset: 0, pointerEvents: tool === "erase" ? "auto" : "none", zIndex: tool === "erase" ? 5 : 1 }}
+            // The layer itself never catches clicks — only the strokes do, and
+            // only while erasing — so cards and pictures underneath stay usable.
+            style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 3 }}
           >
             {drawings.map((s) => renderShape(s, s.id, false))}
             {draft && renderShape(draft, "draft", true)}
           </svg>
+
+          {boardItems.map((b) => {
+            const pos = boardItemDrag.dragging && boardItemDrag.dragging.id === b.id ? boardItemDrag.dragging : b;
+            const width = resizing && resizing.id === b.id ? resizing.w : (b.w || 220);
+            const isEditing = editingTextId === b.id;
+            return (
+              <div
+                key={b.id}
+                onMouseDown={(e) => { if (!drawingMode && !isEditing) boardItemDrag.startDrag(e, b.id, b.x, b.y); }}
+                onTouchStart={(e) => { if (!drawingMode && !isEditing) boardItemDrag.startDrag(e, b.id, b.x, b.y); }}
+                style={{
+                  position: "absolute", left: pos.x, top: pos.y, width,
+                  pointerEvents: drawingMode && tool !== "erase" ? "none" : "auto",
+                  cursor: isEditing ? "text" : tool === "erase" ? "pointer" : "grab",
+                  userSelect: isEditing ? "text" : "none",
+                  touchAction: "none", zIndex: 2,
+                }}
+              >
+                {b.type === "image" ? (
+                  <div style={{ position: "relative" }}>
+                    <img
+                      src={driveThumbSrc(b.fileId, "s800")}
+                      alt={b.name || ""}
+                      draggable={false}
+                      style={{ width: "100%", borderRadius: 8, display: "block", boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}
+                    />
+                    {b.kind !== "image" && (
+                      <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                        <span style={{ width: 44, height: 44, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Play size={18} fill="#fff" color="#fff" />
+                        </span>
+                      </span>
+                    )}
+                    {!drawingMode && (
+                      <span
+                        onMouseDown={(e) => startResize(e, b)}
+                        onTouchStart={(e) => startResize(e, b)}
+                        title="Drag to resize"
+                        style={{ position: "absolute", right: -6, bottom: -6, width: 18, height: 18, borderRadius: 4, background: "var(--gold)", cursor: "nwse-resize", border: "2px solid var(--panel)" }}
+                      />
+                    )}
+                  </div>
+                ) : isEditing ? (
+                  <textarea
+                    autoFocus
+                    value={editingText}
+                    onChange={(e) => setEditingText(e.target.value)}
+                    onBlur={commitText}
+                    onKeyDown={(e) => { if (e.key === "Escape") commitText(); }}
+                    style={{ width: "100%", minHeight: 70, background: "var(--panel-raised)", color: "var(--text)", border: `1px solid ${b.color || "var(--gold)"}`, borderRadius: 6, padding: "8px 10px", fontSize: 14, lineHeight: 1.45, resize: "none" }}
+                  />
+                ) : (
+                  <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", color: b.color || "var(--text)", fontSize: 15, lineHeight: 1.45, padding: "6px 8px", textShadow: "0 1px 3px rgba(0,0,0,0.5)" }}>
+                    {b.text}
+                  </div>
+                )}
+              </div>
+            );
+          })}
           {!currentFolder && folders.map((f) => {
             const pos = folderDrag.dragging && folderDrag.dragging.id === f.id ? folderDrag.dragging : f;
             const count = ideas.filter((i) => i.folderId === f.id).length;
@@ -4182,6 +4355,7 @@ function TeamManage({ data, saveData }) {
       ideas: [],
       ideaFolders: [],
       ideaDrawings: [],
+      boardItems: [],
       resources: [],
       moodboard: [],
       approvedOrder: [],
@@ -4633,6 +4807,7 @@ export default function TeamHub() {
       if (!loadedData.approvedOrder) loadedData.approvedOrder = [];
       if (!loadedData.ideaFolders) loadedData.ideaFolders = [];
       if (!loadedData.ideaDrawings) loadedData.ideaDrawings = [];
+      if (!loadedData.boardItems) loadedData.boardItems = [];
       if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
         loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
       }
