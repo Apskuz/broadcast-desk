@@ -19,7 +19,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { fileId } = req.query;
+    const { fileId, thumb, size } = req.query;
     if (!fileId) return res.status(400).json({ error: "Missing fileId" });
 
     const clientEmail = process.env.GDRIVE_CLIENT_EMAIL;
@@ -29,6 +29,20 @@ export default async function handler(req, res) {
     }
 
     const accessToken = await getAccessToken(clientEmail, privateKey);
+
+    // A file id always points at the same bytes (a new upload gets a new id),
+    // so this can be cached hard. Repeat views then cost no bandwidth at all,
+    // which matters because every byte served here counts against the hosting
+    // plan's monthly transfer allowance.
+    const CACHE = "private, max-age=31536000, immutable";
+
+    // Thumbnail mode: hand back Drive's own small preview rather than the full
+    // file. A board full of phone photos at ~4MB each would otherwise transfer
+    // tens of megabytes just to fill 90px squares.
+    if (thumb) {
+      const served = await serveThumbnail(accessToken, fileId, size || "s400", res, CACHE);
+      if (served) return;
+    }
 
     const headers = { Authorization: `Bearer ${accessToken}` };
     // A <video> normally opens with "bytes=0-", i.e. "send me the whole file".
@@ -63,12 +77,13 @@ export default async function handler(req, res) {
     }
 
     res.status(driveRes.status);
-    const passthrough = ["content-type", "content-length", "content-range", "accept-ranges", "cache-control"];
+    const passthrough = ["content-type", "content-length", "content-range", "accept-ranges"];
     for (const h of passthrough) {
       const v = driveRes.headers.get(h);
       if (v) res.setHeader(h, v);
     }
     if (!driveRes.headers.get("accept-ranges")) res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", CACHE);
 
     if (req.method === "HEAD" || !driveRes.body) {
       return res.end();
@@ -84,6 +99,34 @@ export default async function handler(req, res) {
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: String(err) });
     else res.end();
+  }
+}
+
+// Drive generates its own small preview for images and a poster frame for
+// videos. Returns false if there isn't one, so the caller can fall back to
+// streaming the real file.
+async function serveThumbnail(accessToken, fileId, size, res, cacheHeader) {
+  try {
+    const metaRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?fields=thumbnailLink&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!metaRes.ok) return false;
+    const meta = await metaRes.json();
+    if (!meta.thumbnailLink) return false;
+
+    const thumbUrl = meta.thumbnailLink.replace(/=s\d+(-c)?$/, `=${size}`);
+    const thumbRes = await fetch(thumbUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!thumbRes.ok) return false;
+
+    res.status(200);
+    res.setHeader("Content-Type", thumbRes.headers.get("content-type") || "image/jpeg");
+    res.setHeader("Cache-Control", cacheHeader);
+    const buf = Buffer.from(await thumbRes.arrayBuffer());
+    res.end(buf);
+    return true;
+  } catch {
+    return false;
   }
 }
 

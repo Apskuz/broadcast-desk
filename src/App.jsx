@@ -1798,6 +1798,10 @@ function isPhotoItem(item) {
 // sharing outside the domain, so public links can't be relied on to render.
 const driveMediaSrc = (fileId) => `/api/drive-stream?fileId=${fileId}`;
 
+// Small previews pull Drive's own thumbnail instead of the full file — a wall
+// of phone photos would otherwise transfer megabytes each to fill tiny squares.
+const driveThumbSrc = (fileId, size = "s400") => `/api/drive-stream?fileId=${fileId}&thumb=1&size=${size}`;
+
 // Fire-and-forget cleanup so an abandoned or deleted upload doesn't sit in
 // Drive forever taking up the team's space.
 function deleteDriveFile(fileIdOrLink) {
@@ -2651,7 +2655,7 @@ function IdeaBank({ data, saveData, profile }) {
               >
                 {i.attachments && i.attachments.length > 0 && (
                   i.attachments[0].kind === "image" ? (
-                    <img src={driveMediaSrc(i.attachments[0].fileId)} alt="" draggable={false} style={{ width: "100%", height: 66, objectFit: "cover", borderRadius: 5, marginBottom: 7, display: "block" }} />
+                    <img src={driveThumbSrc(i.attachments[0].fileId)} alt="" draggable={false} style={{ width: "100%", height: 66, objectFit: "cover", borderRadius: 5, marginBottom: 7, display: "block" }} />
                   ) : (
                     <div style={{ width: "100%", height: 66, borderRadius: 5, marginBottom: 7, background: "rgba(0,0,0,0.25)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                       <Play size={18} fill="#22232b" color="#22232b" />
@@ -2736,7 +2740,7 @@ function IdeaBank({ data, saveData, profile }) {
                   <div key={a.fileId} style={{ position: "relative" }}>
                     <button onClick={() => setLightbox(a)} title={`Open ${a.name}`} style={{ padding: 0, border: "none", background: "none", cursor: "zoom-in", lineHeight: 0 }}>
                       {a.kind === "image" ? (
-                        <img src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 92, height: 92, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                        <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 92, height: 92, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                       ) : (
                         <div style={{ width: 92, height: 92, borderRadius: 6, background: "var(--panel-raised)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                           <span style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -2901,9 +2905,9 @@ function Meeting({ data, saveData, profile }) {
                 {pendingAttachments.map((a) => (
                   <div key={a.fileId} style={{ position: "relative", width: 84 }}>
                     {a.kind === "image" ? (
-                      <img src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                      <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                     ) : (
-                      <video src={driveMediaSrc(a.fileId)} controls preload="none" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "#000", display: "block" }} />
+                      <video src={driveMediaSrc(a.fileId)} poster={driveThumbSrc(a.fileId)} controls preload="none" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "#000", display: "block" }} />
                     )}
                     <button
                       onClick={() => removePendingAttachment(a.fileId)}
@@ -2943,7 +2947,7 @@ function Meeting({ data, saveData, profile }) {
                         style={{ position: "relative", padding: 0, border: "none", background: "none", cursor: "zoom-in", lineHeight: 0 }}
                       >
                         {a.kind === "image" ? (
-                          <img src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                          <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                         ) : (
                           <div style={{ width: 120, height: 120, borderRadius: 6, background: "var(--panel-raised)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <span style={{ width: 38, height: 38, borderRadius: "50%", background: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -3295,7 +3299,7 @@ function Guidelines({ data, saveData, profile }) {
             {moodboard.map((m) => (
               <div key={m.id} className="card" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {m.type === "image" && m.fileId && (
-                  <img src={driveMediaSrc(m.fileId)} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
+                  <img src={driveThumbSrc(m.fileId, "s600")} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
                 )}
                 {m.type === "color" && (
                   <div style={{ width: "100%", aspectRatio: "1 / 1", background: m.hex }} />
