@@ -2956,6 +2956,16 @@ function urlBase64ToUint8Array(base64String) {
   return outputArray;
 }
 
+async function saveSubscription(sub, profile) {
+  const json = sub.toJSON();
+  await supabase.from("push_subscriptions").upsert({
+    profile_name: profile,
+    endpoint: json.endpoint,
+    p256dh: json.keys.p256dh,
+    auth: json.keys.auth,
+  }, { onConflict: "endpoint" });
+}
+
 function PushEnableButton({ profile }) {
   const [status, setStatus] = useState("checking"); // checking | off | on | unsupported | error
   const [busy, setBusy] = useState(false);
@@ -2970,13 +2980,17 @@ function PushEnableButton({ profile }) {
       try {
         const reg = await navigator.serviceWorker.ready;
         const sub = await reg.pushManager.getSubscription();
+        // A subscription can already exist from a previous tap even if the
+        // backend never stored it (e.g. the table didn't exist yet) — make
+        // sure it's (re)saved rather than trusting it's already on record.
+        if (sub) await saveSubscription(sub, profile).catch(() => {});
         if (!cancelled) setStatus(sub ? "on" : "off");
       } catch {
         if (!cancelled) setStatus("off");
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [profile]);
 
   const enable = async () => {
     if (!VAPID_PUBLIC_KEY) { setStatus("error"); return; }
@@ -2989,13 +3003,7 @@ function PushEnableButton({ profile }) {
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
       });
-      const json = sub.toJSON();
-      await supabase.from("push_subscriptions").upsert({
-        profile_name: profile,
-        endpoint: json.endpoint,
-        p256dh: json.keys.p256dh,
-        auth: json.keys.auth,
-      }, { onConflict: "endpoint" });
+      await saveSubscription(sub, profile);
       setStatus("on");
     } catch {
       setStatus("error");
