@@ -124,12 +124,14 @@ function makeNotification({ toProfile, type, text, link, fromProfile }) {
 
 // Fires a real lock-screen push notification via the /api/send-push serverless function.
 // toProfile: a profile name to target one person, or null to notify everyone subscribed.
-function sendPush(toProfile, title, body) {
+// fromProfile: who triggered this — excluded from a broadcast so people don't get
+// pushed a lock-screen alert about their own message/announcement.
+function sendPush(toProfile, title, body, fromProfile) {
   try {
     fetch("/api/send-push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ toProfile, title, body }),
+      body: JSON.stringify({ toProfile, title, body, fromProfile }),
     }).catch(() => {});
   } catch {
     // push is best-effort — never block the app if it fails
@@ -2088,7 +2090,7 @@ function Meeting({ data, saveData, profile }) {
     if (!announceText.trim()) return;
     const notifications = [...(data.notifications || []), makeNotification({ toProfile: null, type: "announcement", text: `${profile || "Team"} posted an announcement`, link: "dashboard", fromProfile: profile })];
     saveData({ ...data, announcements: [...announcements, { id: uid(), text: announceText.trim(), author: profile || "Team", date: todayISO() }], notifications });
-    sendPush(null, "New announcement", announceText.trim().slice(0, 100));
+    sendPush(null, "New announcement", announceText.trim().slice(0, 100), profile);
     setAnnounceText("");
   };
   const removeAnnouncement = (id) => saveData({ ...data, announcements: announcements.filter((a) => a.id !== id) });
@@ -2170,7 +2172,7 @@ function Chat({ data, saveData, profile }) {
     if (thread === "team") {
       notifications = [...notifications, makeNotification({ toProfile: null, type: "message", text: `${profile} in Team Chat: ${text.trim().slice(0, 60)}`, link: "chat", fromProfile: profile })];
       saveData({ ...data, messages: [...messages, msg], notifications });
-      sendPush(null, `${profile} in Team Chat`, text.trim().slice(0, 100));
+      sendPush(null, `${profile} in Team Chat`, text.trim().slice(0, 100), profile);
     } else {
       notifications = [...notifications, makeNotification({ toProfile: thread, type: "message", text: `${profile} sent you a message`, link: "chat", fromProfile: profile })];
       saveData({ ...data, messages: [...messages, msg], notifications });
@@ -3280,6 +3282,27 @@ export default function TeamHub() {
   const myProfileObj = (data.profiles || []).find((p) => p.name === profile);
   const isEmployer = !!(myProfileObj && myProfileObj.isLead);
 
+  // Unread counts shown on nav items (e.g. "Chat", "My Duties") — reuses the same
+  // notification rows the bell uses, filtered to the ones that link to that page.
+  const myUnreadNotifications = (data.notifications || []).filter(
+    (n) => (n.toProfile === profile || n.toProfile === null) && !(n.readBy || []).includes(profile)
+  );
+  const navBadgeCount = (navId) => myUnreadNotifications.filter((n) => n.link === navId).length;
+  const openNavItem = (navId) => {
+    setView(navId);
+    setNavOpen(false);
+    const idsToMark = myUnreadNotifications.filter((n) => n.link === navId).map((n) => n.id);
+    if (idsToMark.length > 0) {
+      const idSet = new Set(idsToMark);
+      saveData({
+        ...data,
+        notifications: (data.notifications || []).map((n) =>
+          idSet.has(n.id) ? { ...n, readBy: [...new Set([...(n.readBy || []), profile])] } : n
+        ),
+      });
+    }
+  };
+
   const Comp = {
     dashboard: <Dashboard data={data} saveData={saveData} profile={profile} setView={setView} isEmployer={isEmployer} />,
     myduties: <MyDuties data={data} saveData={saveData} profile={profile} />,
@@ -3327,9 +3350,13 @@ export default function TeamHub() {
 
         {NAV.filter((n) => n.id !== "team" || isEmployer).map((n) => {
           const Icon = n.icon;
+          const count = navBadgeCount(n.id);
           return (
-            <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setNavOpen(false); }}>
+            <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => openNavItem(n.id)}>
               <Icon size={16} /> {n.label}
+              {count > 0 && (
+                <span style={{ marginLeft: "auto", background: "var(--alert)", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 6px" }}>{count}</span>
+              )}
             </button>
           );
         })}

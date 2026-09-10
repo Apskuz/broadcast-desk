@@ -16,10 +16,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { toProfile, title, body } = req.body;
+    const { toProfile, title, body, fromProfile } = req.body;
 
     let query = supabase.from("push_subscriptions").select("*");
     if (toProfile) query = query.eq("profile_name", toProfile);
+    // Broadcasting to everyone shouldn't push a lock-screen alert to the person
+    // who triggered it about their own message/announcement.
+    else if (fromProfile) query = query.neq("profile_name", fromProfile);
     const { data: subs, error } = await query;
 
     if (error) return res.status(500).json({ error: error.message });
