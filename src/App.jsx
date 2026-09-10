@@ -1689,6 +1689,7 @@ function ContentReview({ data, saveData }) {
   const [open, setOpen] = useState(null);
   const [loadedVideo, setLoadedVideo] = useState(null); // content id whose embed the user tapped play on
   const [commentText, setCommentText] = useState("");
+  const fileInputRef = useRef(null);
   const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
   const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
   const [uploading, setUploading] = useState(false);
@@ -1905,16 +1906,23 @@ function ContentReview({ data, saveData }) {
 
           <div className="field">
             <label>Upload video or photo</label>
-            <label className="btn" style={{ position: "relative", width: "100%", justifyContent: "center", cursor: uploading ? "default" : "pointer", opacity: uploading ? 0.7 : 1 }}>
+            <button
+              type="button"
+              className="btn"
+              style={{ width: "100%", justifyContent: "center", cursor: uploading ? "default" : "pointer", opacity: uploading ? 0.7 : 1 }}
+              onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              disabled={uploading}
+            >
               <Upload size={14} /> {uploading ? `Uploading… ${uploadProgress}%` : "Choose a file"}
-              <input
-                type="file"
-                accept="video/*,image/*"
-                onChange={handleFileSelect}
-                disabled={uploading}
-                style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap", border: 0 }}
-              />
-            </label>
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="video/*,image/*"
+              onChange={handleFileSelect}
+              disabled={uploading}
+              style={{ display: "none" }}
+            />
             {uploading && (
               <div className="progress-track" style={{ marginTop: 8 }}>
                 <div className="progress-fill" style={{ width: `${uploadProgress}%`, background: "var(--gold)" }} />
