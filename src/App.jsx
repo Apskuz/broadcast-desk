@@ -5,7 +5,7 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play, Globe
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -1642,19 +1642,20 @@ function driveEmbedUrl(url) {
 // server, so large videos don't hit the ~4.5MB serverless request limit). Two small
 // backend calls bracket the real upload: one to get an authorized upload slot, one to
 // make the finished file viewable by the team.
-function uploadToDrive(file, onProgress) {
+function uploadToDrive(file, onProgress, profile) {
   return new Promise(async (resolve, reject) => {
     try {
       const startRes = await fetch("/api/drive-upload-start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: file.name, mimeType: file.type || "application/octet-stream", size: file.size }),
+        body: JSON.stringify({ filename: file.name, mimeType: file.type || "application/octet-stream", size: file.size, profile }),
       });
       const startData = await startRes.json().catch(() => ({}));
       if (!startRes.ok || !startData.sessionUrl) {
         reject(new Error(startData.error || "Couldn't start the upload — is Google Drive connected yet?"));
         return;
       }
+      const targetFolderId = startData.folderId;
 
       const xhr = new XMLHttpRequest();
       xhr.open("PUT", startData.sessionUrl, true);
@@ -1692,7 +1693,7 @@ function uploadToDrive(file, onProgress) {
           const finalizeRes = await fetch("/api/drive-finalize", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ filename: file.name }),
+            body: JSON.stringify({ filename: file.name, folderId: targetFolderId }),
           });
           const finalizeData = await finalizeRes.json().catch(() => ({}));
           if (!finalizeRes.ok || !finalizeData.link) {
@@ -1711,7 +1712,7 @@ function uploadToDrive(file, onProgress) {
   });
 }
 
-function ContentReview({ data, saveData }) {
+function ContentReview({ data, saveData, profile, isEmployer }) {
   const [showForm, setShowForm] = useState(false);
   const [open, setOpen] = useState(null);
   const [loadedVideo, setLoadedVideo] = useState(null); // content id whose embed the user tapped play on
@@ -1731,7 +1732,7 @@ function ContentReview({ data, saveData }) {
     setUploadProgress(0);
     setUploadError("");
     try {
-      const result = await uploadToDrive(file, setUploadProgress);
+      const result = await uploadToDrive(file, setUploadProgress, profile);
       setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, "") }));
     } catch (err) {
       setUploadError(err.message || "Upload failed.");
@@ -1742,11 +1743,20 @@ function ContentReview({ data, saveData }) {
 
   const addItem = () => {
     if (!form.title.trim()) return;
-    const item = { id: uid(), status: "review", comments: [], caption: "", ...form };
-    saveData({ ...data, content: [item, ...data.content] });
+    const item = { id: uid(), status: "review", comments: [], caption: "", uploadedBy: profile || "", visibility: "private", ...form };
+    // Only the leads need to know a new piece landed — the rest of the team
+    // isn't notified about every upload, just the people who need to know.
+    const leads = (data.profiles || []).filter((p) => p.isLead && p.name !== profile).map((p) => p.name);
+    const notifications = [
+      ...(data.notifications || []),
+      ...leads.map((leadName) => makeNotification({ toProfile: leadName, type: "upload", text: `${profile || "Someone"} uploaded: ${item.title}`, link: "content", fromProfile: profile })),
+    ];
+    saveData({ ...data, content: [item, ...data.content], notifications });
+    leads.forEach((leadName) => sendPush(leadName, "New content uploaded", `${profile || "Someone"} uploaded: ${item.title}`, profile));
     setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
     setShowForm(false);
   };
+  const makePublic = (id) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, visibility: "public" } : c)) });
   const updateStatus = (id, status) => {
     saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)) });
     // Once something's published there's no reason to keep the raw file taking
@@ -1770,12 +1780,20 @@ function ContentReview({ data, saveData }) {
   const removeItem = (id) => saveData({ ...data, content: data.content.filter((c) => c.id !== id) });
   const addComment = (id) => {
     if (!commentText.trim()) return;
+    const item = data.content.find((c) => c.id === id);
+    const comment = { id: uid(), author: profile || "Someone", text: commentText, date: todayISO() };
+    // Only the person whose content this is gets told about a comment on it —
+    // not the whole team, and not for comments left on other people's work.
+    const notifyOwner = item && item.uploadedBy && item.uploadedBy !== profile;
+    const notifications = notifyOwner
+      ? [...(data.notifications || []), makeNotification({ toProfile: item.uploadedBy, type: "note", text: `${profile || "Someone"} commented on: ${item.title}`, link: "content", fromProfile: profile })]
+      : (data.notifications || []);
     saveData({
       ...data,
-      content: data.content.map((c) => c.id === id
-        ? { ...c, comments: [...c.comments, { id: uid(), author: "Team Lead", text: commentText, date: todayISO() }] }
-        : c),
+      content: data.content.map((c) => (c.id === id ? { ...c, comments: [...c.comments, comment] } : c)),
+      notifications,
     });
+    if (notifyOwner) sendPush(item.uploadedBy, "New comment on your upload", `${profile || "Someone"} commented on: ${item.title}`, profile);
     setCommentText("");
   };
   const updateCaption = (id, caption) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, caption } : c)) });
@@ -1794,6 +1812,10 @@ function ContentReview({ data, saveData }) {
     setScheduled({ ...scheduled, [c.id]: true });
   };
 
+  // Uploads default to private — visible to whoever uploaded them and to leads,
+  // until the uploader (or a lead) makes it public for the whole team to see.
+  const visibleContent = data.content.filter((c) => isEmployer || !c.uploadedBy || c.uploadedBy === profile || c.visibility === "public");
+
   return (
     <div>
       <div className="topbar">
@@ -1802,7 +1824,7 @@ function ContentReview({ data, saveData }) {
       </div>
 
       <div className="content-list">
-        {data.content.map((c) => {
+        {visibleContent.map((c) => {
           const st = CONTENT_STATUS.find((s) => s.id === c.status) || CONTENT_STATUS[0];
           const fmt = CONTENT_FORMATS.find((f) => f.id === c.format) || CONTENT_FORMATS[0];
           const FmtIcon = fmt.icon;
@@ -1821,6 +1843,9 @@ function ContentReview({ data, saveData }) {
                     <span className="pill" style={{ background: st.color + "22", color: st.color }}>{st.label}</span>
                     {c.assignee && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.assignee}</span>}
                     {c.comments.length > 0 && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}><MessageSquare size={10} style={{ verticalAlign: "-1px", marginRight: 3 }} />{c.comments.length}</span>}
+                    {c.uploadedBy && c.visibility !== "public" && (
+                      <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}><Lock size={10} style={{ verticalAlign: "-1px", marginRight: 3 }} />Private</span>
+                    )}
                   </div>
                 </div>
                 <button className="icon-btn" onClick={(e) => { e.stopPropagation(); removeItem(c.id); }}><Trash2 size={14} /></button>
@@ -1838,6 +1863,11 @@ function ContentReview({ data, saveData }) {
                     <button className="btn" style={{ padding: "9px 12px" }} onClick={() => addToCalendar(c)}>
                       <CalendarDays size={13} /> {scheduled[c.id] ? "Added ✓" : "Add to Calendar"}
                     </button>
+                    {c.uploadedBy && c.visibility !== "public" && (c.uploadedBy === profile || isEmployer) && (
+                      <button className="btn" style={{ padding: "9px 12px" }} onClick={() => makePublic(c.id)} title="Share this with the whole team instead of just you and the leads">
+                        <Globe size={13} /> Make public
+                      </button>
+                    )}
                   </div>
                   <div className="field-row" style={{ marginBottom: 14 }}>
                     <div className="field" style={{ marginBottom: 0 }}>
@@ -1933,7 +1963,7 @@ function ContentReview({ data, saveData }) {
             </div>
           );
         })}
-        {data.content.length === 0 && <div className="empty">Nothing submitted yet.</div>}
+        {visibleContent.length === 0 && <div className="empty">Nothing submitted yet.</div>}
       </div>
 
       {showForm && (
@@ -3049,7 +3079,7 @@ function NotificationBell({ data, saveData, profile, setView }) {
     setOpen((o) => !o);
   };
 
-  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send };
+  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video };
 
   return (
     <div>
@@ -3332,7 +3362,7 @@ export default function TeamHub() {
     meeting: <Meeting data={data} saveData={saveData} profile={profile} />,
     chat: <Chat data={data} saveData={saveData} profile={profile} />,
     notes: <Notes data={data} saveData={saveData} />,
-    content: <ContentReview data={data} saveData={saveData} />,
+    content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
     ideas: <IdeaBank data={data} saveData={saveData} />,
     guidelines: <Guidelines data={data} saveData={saveData} />,
     team: <TeamManage data={data} saveData={saveData} />,

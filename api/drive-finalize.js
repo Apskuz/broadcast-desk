@@ -6,7 +6,11 @@
 // so the browser can't read it even when the upload succeeded — the browser only
 // knows an error happened, not a real fileId. When that happens we're called with
 // a filename instead, and look the file up ourselves (server-to-server calls aren't
-// subject to that CORS restriction).
+// subject to that CORS restriction). For a larger file, Drive's search index can
+// take a few seconds to catch up after the bytes finish landing, so this retries
+// with backoff instead of giving up on the first empty result.
+
+export const config = { maxDuration: 30 };
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -14,12 +18,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { fileId: providedFileId, filename } = req.body || {};
+    const { fileId: providedFileId, filename, folderId: providedFolderId } = req.body || {};
     if (!providedFileId && !filename) return res.status(400).json({ error: "Missing fileId or filename" });
 
     const clientEmail = process.env.GDRIVE_CLIENT_EMAIL;
     const privateKey = (process.env.GDRIVE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-    const folderId = process.env.GDRIVE_FOLDER_ID;
+    const folderId = providedFolderId || process.env.GDRIVE_FOLDER_ID;
     if (!clientEmail || !privateKey) {
       return res.status(500).json({ error: "Google Drive isn't connected yet — missing server configuration." });
     }
@@ -28,7 +32,12 @@ export default async function handler(req, res) {
 
     let fileId = providedFileId;
     if (!fileId) {
-      fileId = await findRecentFile(accessToken, folderId, filename);
+      const delays = [0, 1500, 2500, 4000, 6000]; // ~14s total, well under the 30s limit above
+      for (const delay of delays) {
+        if (delay) await new Promise((r) => setTimeout(r, delay));
+        fileId = await findRecentFile(accessToken, folderId, filename);
+        if (fileId) break;
+      }
       if (!fileId) {
         return res.status(404).json({ error: "Couldn't find the uploaded file in Drive — it may not have finished uploading." });
       }
