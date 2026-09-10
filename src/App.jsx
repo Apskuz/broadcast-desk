@@ -5,7 +5,7 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play, Globe
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -2257,7 +2257,17 @@ function Chat({ data, saveData, profile }) {
 
 /* ---------------------------------- Guidelines / resources ---------------------------------- */
 
-function Guidelines({ data, saveData }) {
+const MOOD_TYPES = [
+  { id: "image", label: "Picture", icon: Image },
+  { id: "color", label: "Colour", icon: Palette },
+  { id: "font", label: "Font", icon: TypeIcon },
+  { id: "note", label: "Thought", icon: StickyNote },
+];
+
+function Guidelines({ data, saveData, profile }) {
+  const [tab, setTab] = useState("moodboard"); // "moodboard" | "docs"
+
+  // ---- docs & assets (the original simple resource list) ----
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ title: "", description: "", link: "", category: "Guidelines" });
 
@@ -2271,31 +2281,147 @@ function Guidelines({ data, saveData }) {
 
   const categories = [...new Set(data.resources.map((r) => r.category || "Other"))];
 
+  // ---- moodboard ----
+  const moodboard = data.moodboard || [];
+  const [showMoodForm, setShowMoodForm] = useState(false);
+  const [moodType, setMoodType] = useState("image");
+  const [moodForm, setMoodForm] = useState({ label: "", hex: "#C9A24B", font: "", note: "", link: "" });
+  const [moodUploading, setMoodUploading] = useState(false);
+  const [moodUploadProgress, setMoodUploadProgress] = useState(0);
+  const [moodUploadError, setMoodUploadError] = useState("");
+  const moodFileInputRef = useRef(null);
+
+  // Loads a font's real face from Google Fonts so its card previews accurately —
+  // falls back silently to the browser's default if the name isn't a real family.
+  useEffect(() => {
+    const fonts = moodboard.filter((m) => m.type === "font" && m.font);
+    fonts.forEach((m) => {
+      const linkId = `gf-${m.font.replace(/[^a-z0-9]/gi, "-")}`;
+      if (document.getElementById(linkId)) return;
+      const link = document.createElement("link");
+      link.id = linkId;
+      link.rel = "stylesheet";
+      link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(m.font).replace(/%20/g, "+")}:wght@400;600;700&display=swap`;
+      document.head.appendChild(link);
+    });
+  }, [moodboard]);
+
+  const handleMoodFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setMoodUploading(true);
+    setMoodUploadProgress(0);
+    setMoodUploadError("");
+    try {
+      const result = await uploadToDrive(file, setMoodUploadProgress, profile);
+      addMoodItem({ type: "image", fileId: driveFileId(result.link), label: moodForm.label });
+      setShowMoodForm(false);
+      setMoodForm({ label: "", hex: "#C9A24B", font: "", note: "", link: "" });
+    } catch (err) {
+      setMoodUploadError(err.message || "Upload failed.");
+    }
+    setMoodUploading(false);
+    e.target.value = "";
+  };
+
+  const addMoodItem = (fields) => {
+    saveData({ ...data, moodboard: [{ id: uid(), addedBy: profile || "", date: todayISO(), ...fields }, ...moodboard] });
+  };
+  const removeMoodItem = (id) => saveData({ ...data, moodboard: moodboard.filter((m) => m.id !== id) });
+
+  const submitMoodForm = () => {
+    if (moodType === "color") {
+      addMoodItem({ type: "color", hex: moodForm.hex, label: moodForm.label });
+    } else if (moodType === "font") {
+      if (!moodForm.font.trim()) return;
+      addMoodItem({ type: "font", font: moodForm.font.trim(), label: moodForm.label });
+    } else if (moodType === "note") {
+      if (!moodForm.note.trim()) return;
+      addMoodItem({ type: "note", note: moodForm.note.trim(), label: moodForm.label });
+    }
+    setShowMoodForm(false);
+    setMoodForm({ label: "", hex: "#C9A24B", font: "", note: "", link: "" });
+  };
+
   return (
     <div>
       <div className="topbar">
-        <div><div className="page-title">Guidelines & Resources</div><div className="page-sub">Everything the team needs to stay on-brand and unblocked.</div></div>
-        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add resource</button>
+        <div><div className="page-title">Guidelines & Resources</div><div className="page-sub">The look, the voice, and everything the team needs to stay on-brand.</div></div>
+        {tab === "moodboard" ? (
+          <button className="btn btn-gold" onClick={() => { setMoodType("image"); setShowMoodForm(true); }}><Plus size={15} /> Add to moodboard</button>
+        ) : (
+          <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add resource</button>
+        )}
       </div>
 
-      {categories.map((cat) => (
-        <div key={cat} style={{ marginBottom: 26 }}>
-          <div className="section-title"><BookOpen size={16} color="var(--gold)" /> {cat}</div>
-          <div className="grid res-grid">
-            {data.resources.filter((r) => (r.category || "Other") === cat).map((r) => (
-              <div className="card res-card" key={r.id}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.title}</div>
-                  <button className="icon-btn" onClick={() => removeResource(r.id)}><Trash2 size={13} /></button>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <button className="btn" style={{ background: tab === "moodboard" ? "var(--gold-soft)" : undefined, borderColor: tab === "moodboard" ? "var(--gold)" : undefined, color: tab === "moodboard" ? "var(--gold)" : undefined }} onClick={() => setTab("moodboard")}>
+          <Palette size={13} /> Moodboard
+        </button>
+        <button className="btn" style={{ background: tab === "docs" ? "var(--gold-soft)" : undefined, borderColor: tab === "docs" ? "var(--gold)" : undefined, color: tab === "docs" ? "var(--gold)" : undefined }} onClick={() => setTab("docs")}>
+          <BookOpen size={13} /> Docs & Assets
+        </button>
+      </div>
+
+      {tab === "moodboard" && (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 12 }}>
+            {moodboard.map((m) => (
+              <div key={m.id} className="card" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                {m.type === "image" && m.fileId && (
+                  <img src={`https://drive.google.com/thumbnail?id=${m.fileId}&sz=w500`} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
+                )}
+                {m.type === "color" && (
+                  <div style={{ width: "100%", aspectRatio: "1 / 1", background: m.hex }} />
+                )}
+                {m.type === "font" && (
+                  <div style={{ padding: "18px 14px 10px", minHeight: 90, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                    <div style={{ fontFamily: `"${m.font}", sans-serif`, fontSize: 30, lineHeight: 1.1, color: "var(--text)" }}>Aa Bb Cc</div>
+                  </div>
+                )}
+                {m.type === "note" && (
+                  <div style={{ padding: "16px 14px 10px", minHeight: 90 }}>
+                    <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.5, fontStyle: "italic" }}>&ldquo;{m.note}&rdquo;</div>
+                  </div>
+                )}
+                <div style={{ padding: "9px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, borderTop: "1px solid var(--hair)" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {m.label || (m.type === "color" ? m.hex : m.type === "font" ? m.font : m.type === "note" ? "Thought" : "Picture")}
+                    </div>
+                    {m.type === "color" && <div style={{ fontSize: 10, color: "var(--muted)" }} className="mono">{m.hex}</div>}
+                  </div>
+                  <button className="icon-btn" onClick={() => removeMoodItem(m.id)}><Trash2 size={12} /></button>
                 </div>
-                {r.description && <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>{r.description}</div>}
-                {r.link && <a href={r.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Link2 size={12} /> Open resource</a>}
               </div>
             ))}
           </div>
+          {moodboard.length === 0 && <div className="empty">Nothing on the moodboard yet — add a photo, a brand colour, a font, or a quick thought.</div>}
         </div>
-      ))}
-      {data.resources.length === 0 && <div className="empty">No resources yet — add the first guideline or asset.</div>}
+      )}
+
+      {tab === "docs" && (
+        <div>
+          {categories.map((cat) => (
+            <div key={cat} style={{ marginBottom: 26 }}>
+              <div className="section-title"><BookOpen size={16} color="var(--gold)" /> {cat}</div>
+              <div className="grid res-grid">
+                {data.resources.filter((r) => (r.category || "Other") === cat).map((r) => (
+                  <div className="card res-card" key={r.id}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.title}</div>
+                      <button className="icon-btn" onClick={() => removeResource(r.id)}><Trash2 size={13} /></button>
+                    </div>
+                    {r.description && <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>{r.description}</div>}
+                    {r.link && <a href={r.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Link2 size={12} /> Open resource</a>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {data.resources.length === 0 && <div className="empty">No resources yet — add the first guideline or asset.</div>}
+        </div>
+      )}
 
       {showForm && (
         <Modal title="Add a resource" onClose={() => setShowForm(false)}>
@@ -2306,6 +2432,81 @@ function Guidelines({ data, saveData }) {
             <div className="field"><label>Category</label><input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Guidelines, Assets…" /></div>
           </div>
           <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addResource}>Add resource</button></div>
+        </Modal>
+      )}
+
+      {showMoodForm && (
+        <Modal title="Add to moodboard" onClose={() => setShowMoodForm(false)}>
+          <div className="field">
+            <label>Type</label>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {MOOD_TYPES.map((t) => {
+                const TIcon = t.icon;
+                return (
+                  <button key={t.id} className="btn" style={{ flex: 1, minWidth: 80, justifyContent: "center", background: moodType === t.id ? "var(--gold-soft)" : undefined, borderColor: moodType === t.id ? "var(--gold)" : undefined, color: moodType === t.id ? "var(--gold)" : undefined }} onClick={() => setMoodType(t.id)}>
+                    <TIcon size={13} /> {t.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {moodType === "image" && (
+            <div className="field">
+              <label>Picture</label>
+              <input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="Caption (optional)" style={{ marginBottom: 8 }} />
+              <button
+                type="button"
+                className="btn"
+                style={{ width: "100%", justifyContent: "center", cursor: moodUploading ? "default" : "pointer", opacity: moodUploading ? 0.7 : 1 }}
+                onClick={() => moodFileInputRef.current && moodFileInputRef.current.click()}
+                disabled={moodUploading}
+              >
+                <Upload size={14} /> {moodUploading ? `Uploading… ${moodUploadProgress}%` : "Choose a photo"}
+              </button>
+              <input ref={moodFileInputRef} type="file" accept="image/*" onChange={handleMoodFileSelect} disabled={moodUploading} style={{ display: "none" }} />
+              {moodUploading && (
+                <div className="progress-track" style={{ marginTop: 8 }}>
+                  <div className="progress-fill" style={{ width: `${moodUploadProgress}%`, background: "var(--gold)" }} />
+                </div>
+              )}
+              {moodUploadError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{moodUploadError}</div>}
+            </div>
+          )}
+
+          {moodType === "color" && (
+            <>
+              <div className="field-row">
+                <div className="field">
+                  <label>Colour</label>
+                  <input type="color" value={moodForm.hex} onChange={(e) => setMoodForm({ ...moodForm, hex: e.target.value })} style={{ height: 40, padding: 4 }} />
+                </div>
+                <div className="field">
+                  <label>Hex</label>
+                  <input value={moodForm.hex} onChange={(e) => setMoodForm({ ...moodForm, hex: e.target.value })} placeholder="#C9A24B" />
+                </div>
+              </div>
+              <div className="field"><label>Label (optional)</label><input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="e.g. Brand gold" /></div>
+              <div className="modal-actions"><button className="btn" onClick={() => setShowMoodForm(false)}>Cancel</button><button className="btn btn-gold" onClick={submitMoodForm}>Add to moodboard</button></div>
+            </>
+          )}
+
+          {moodType === "font" && (
+            <>
+              <div className="field"><label>Font name</label><input value={moodForm.font} onChange={(e) => setMoodForm({ ...moodForm, font: e.target.value })} placeholder="e.g. Fraunces, Poppins, Inter…" autoFocus /></div>
+              <div className="field"><label>Label (optional)</label><input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="e.g. Headline font" /></div>
+              {moodForm.font.trim() && <div style={{ fontFamily: `"${moodForm.font.trim()}", sans-serif`, fontSize: 26, marginBottom: 14 }}>Aa Bb Cc</div>}
+              <div className="modal-actions"><button className="btn" onClick={() => setShowMoodForm(false)}>Cancel</button><button className="btn btn-gold" onClick={submitMoodForm}>Add to moodboard</button></div>
+            </>
+          )}
+
+          {moodType === "note" && (
+            <>
+              <div className="field"><label>Thought</label><textarea value={moodForm.note} onChange={(e) => setMoodForm({ ...moodForm, note: e.target.value })} placeholder="A direction, a reference, a feeling to chase…" autoFocus /></div>
+              <div className="field"><label>Label (optional)</label><input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="e.g. Tone of voice" /></div>
+              <div className="modal-actions"><button className="btn" onClick={() => setShowMoodForm(false)}>Cancel</button><button className="btn btn-gold" onClick={submitMoodForm}>Add to moodboard</button></div>
+            </>
+          )}
         </Modal>
       )}
     </div>
@@ -2844,6 +3045,7 @@ function TeamManage({ data, saveData }) {
       content: [],
       ideas: [],
       resources: [],
+      moodboard: [],
     });
     setClearConfirm(false);
     setClearPin("");
@@ -3257,6 +3459,7 @@ export default function TeamHub() {
       if (!loadedData.messages) loadedData.messages = [];
       if (!loadedData.notifications) loadedData.notifications = [];
       if (!loadedData.projects) loadedData.projects = [];
+      if (!loadedData.moodboard) loadedData.moodboard = [];
       if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
         loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
       }
@@ -3364,7 +3567,7 @@ export default function TeamHub() {
     notes: <Notes data={data} saveData={saveData} />,
     content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
     ideas: <IdeaBank data={data} saveData={saveData} />,
-    guidelines: <Guidelines data={data} saveData={saveData} />,
+    guidelines: <Guidelines data={data} saveData={saveData} profile={profile} />,
     team: <TeamManage data={data} saveData={saveData} />,
   }[view];
 
