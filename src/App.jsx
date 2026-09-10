@@ -638,6 +638,32 @@ function Modal({ title, onClose, children }) {
   );
 }
 
+// Full-screen viewer for a photo or video attached anywhere in the app — tap a
+// thumbnail to see it properly instead of squinting at a preview.
+function MediaLightbox({ fileId, kind, name, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(8,9,13,0.94)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+    >
+      <button className="icon-btn" onClick={onClose} style={{ position: "absolute", top: 16, right: 16, color: "var(--text)" }}><X size={22} /></button>
+      {kind === "image" ? (
+        <img src={driveMediaSrc(fileId)} alt={name || ""} onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }} />
+      ) : (
+        <video src={driveMediaSrc(fileId)} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", borderRadius: 8, background: "#000" }} />
+      )}
+      {name && <div style={{ position: "absolute", bottom: 16, left: 0, right: 0, textAlign: "center", fontSize: 12, color: "var(--muted)" }}>{name}</div>}
+    </div>,
+    document.body
+  );
+}
+
 /* ---------------------------------- Dashboard ---------------------------------- */
 
 function Dashboard({ data, saveData, profile, setView, isEmployer }) {
@@ -2551,6 +2577,7 @@ function Meeting({ data, saveData, profile }) {
   const [attachRetry, setAttachRetry] = useState("");
   const [attachError, setAttachError] = useState("");
   const agendaFileInputRef = useRef(null);
+  const [lightbox, setLightbox] = useState(null); // attachment being viewed full-screen
 
   const meetingItems = data.meetingItems || [];
   const announcements = data.announcements || [];
@@ -2674,11 +2701,22 @@ function Meeting({ data, saveData, profile }) {
                 {m.attachments && m.attachments.length > 0 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
                     {m.attachments.map((a) => (
-                      a.kind === "image" ? (
-                        <img key={a.fileId} src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 120, maxHeight: 160, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)" }} />
-                      ) : (
-                        <video key={a.fileId} src={driveMediaSrc(a.fileId)} controls preload="none" style={{ width: 180, maxHeight: 160, borderRadius: 6, background: "#000" }} />
-                      )
+                      <button
+                        key={a.fileId}
+                        onClick={() => setLightbox(a)}
+                        title={`Open ${a.name}`}
+                        style={{ position: "relative", padding: 0, border: "none", background: "none", cursor: "zoom-in", lineHeight: 0 }}
+                      >
+                        {a.kind === "image" ? (
+                          <img src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                        ) : (
+                          <div style={{ width: 120, height: 120, borderRadius: 6, background: "var(--panel-raised)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <span style={{ width: 38, height: 38, borderRadius: "50%", background: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                              <Play size={16} fill="#12141B" color="#12141B" />
+                            </span>
+                          </div>
+                        )}
+                      </button>
                     ))}
                   </div>
                 )}
@@ -2711,6 +2749,8 @@ function Meeting({ data, saveData, profile }) {
           {announcements.length === 0 && <div className="empty">No announcements yet — post one for the team to see on the Dashboard.</div>}
         </div>
       </div>
+
+      {lightbox && <MediaLightbox fileId={lightbox.fileId} kind={lightbox.kind} name={lightbox.name} onClose={() => setLightbox(null)} />}
     </div>
   );
 }
@@ -3618,6 +3658,105 @@ function LoginScreen({ data, saveData, onLogin }) {
 
 /* ---------------------------------- Team (in-app profile management) ---------------------------------- */
 
+const fmtBytes = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} KB`);
+
+// Every Drive file id the app still points at. Anything in the Drive folder
+// that isn't in here is a leftover — usually from a cleanup that failed or an
+// upload that was interrupted before it was attached to anything.
+function referencedFileIds(data) {
+  const ids = new Set();
+  const add = (linkOrId) => {
+    if (!linkOrId) return;
+    const id = linkOrId.startsWith("http") ? driveFileId(linkOrId) : linkOrId;
+    if (id) ids.add(id);
+  };
+  (data.content || []).forEach((c) => { add(c.link); (c.versions || []).forEach((v) => add(v.link)); });
+  (data.moodboard || []).forEach((m) => add(m.fileId));
+  (data.meetingItems || []).forEach((m) => (m.attachments || []).forEach((a) => add(a.fileId)));
+  (data.ideas || []).forEach((i) => { add(i.link); (i.attachments || []).forEach((a) => add(a.fileId)); });
+  (data.tasks || []).forEach((t) => add(t.link));
+  return ids;
+}
+
+function StoragePanel({ data }) {
+  const [usage, setUsage] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [cleaning, setCleaning] = useState(false);
+
+  const boardBytes = new Blob([JSON.stringify(data)]).size;
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/drive-usage");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Couldn't read Drive usage.");
+      setUsage(json);
+    } catch (err) {
+      setError(err.message || "Couldn't read Drive usage.");
+    }
+    setLoading(false);
+  };
+
+  const referenced = referencedFileIds(data);
+  const orphans = usage ? usage.files.filter((f) => !referenced.has(f.id)) : [];
+  const orphanBytes = orphans.reduce((s, f) => s + f.size, 0);
+
+  const cleanOrphans = async () => {
+    setCleaning(true);
+    for (const f of orphans) {
+      await fetch("/api/drive-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileId: f.id }),
+      }).catch(() => {});
+    }
+    setCleaning(false);
+    load();
+  };
+
+  return (
+    <div className="card" style={{ maxWidth: 480, marginTop: 16 }}>
+      <div className="section-title"><Layers size={16} color="var(--gold)" /> Storage</div>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>
+        The board itself (every task, note, idea and comment) is <strong style={{ color: "var(--text)" }}>{fmtBytes(boardBytes)}</strong> — Supabase's free tier allows 500 MB, so there's a very long way to go before that's a concern.
+        Photos and videos live in Drive, not in the database.
+      </div>
+
+      {!usage && (
+        <button className="btn" onClick={load} disabled={loading}>{loading ? "Checking…" : "Check Drive usage"}</button>
+      )}
+      {error && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 8 }}>{error}</div>}
+
+      {usage && (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "8px 0", borderBottom: "1px solid var(--hair)" }}>
+            <span style={{ color: "var(--muted)" }}>Files in the team Drive folder</span>
+            <strong>{usage.fileCount}</strong>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "8px 0", borderBottom: "1px solid var(--hair)" }}>
+            <span style={{ color: "var(--muted)" }}>Space used</span>
+            <strong>{fmtBytes(usage.totalBytes)}</strong>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "8px 0" }}>
+            <span style={{ color: "var(--muted)" }}>Leftovers nothing points at</span>
+            <strong style={{ color: orphans.length ? "var(--alert)" : "var(--good)" }}>{orphans.length}{orphans.length ? ` · ${fmtBytes(orphanBytes)}` : ""}</strong>
+          </div>
+
+          {orphans.length > 0 && (
+            <button className="btn" style={{ marginTop: 12, borderColor: "var(--alert)", color: "var(--alert)" }} onClick={cleanOrphans} disabled={cleaning}>
+              <Trash2 size={13} /> {cleaning ? "Cleaning up…" : `Delete ${orphans.length} leftover file${orphans.length === 1 ? "" : "s"}`}
+            </button>
+          )}
+          <button className="btn" style={{ marginTop: 12, marginLeft: orphans.length > 0 ? 8 : 0 }} onClick={load} disabled={loading}>{loading ? "Checking…" : "Refresh"}</button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TeamManage({ data, saveData }) {
   const profiles = data.profiles || [];
   const adminCode = data.adminCode || "";
@@ -3865,6 +4004,8 @@ function TeamManage({ data, saveData }) {
           ))}
         </div>
       )}
+
+      {!editingProfile && <StoragePanel data={data} />}
 
       {!editingProfile && (
         <div className="card danger-zone" style={{ maxWidth: 480, marginTop: 16 }}>
