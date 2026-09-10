@@ -95,6 +95,45 @@ Change code in VSCode → commit → `git push`. Vercel redeploys automatically
 on every push to `main`. Nobody's saved data is affected — that all lives in
 Supabase, completely separate from the app's code.
 
+## 6. Enable push notifications (optional)
+
+Notifications only work once these are set up — without them the "Enable
+notifications" button will show "Couldn't enable — try again", and the
+`send-push` function silently finds no one to notify.
+
+1. In this project folder, run `npx web-push generate-vapid-keys`. It prints
+   a public and private key.
+2. In Vercel → **Settings → Environment Variables**, add:
+   - `VITE_VAPID_PUBLIC_KEY` — the public key (needed at build time)
+   - `VAPID_PUBLIC_KEY` — the same public key (used server-side)
+   - `VAPID_PRIVATE_KEY` — the private key (keep secret)
+   - `VAPID_SUBJECT` — `mailto:you@example.com`
+3. If your Supabase project already existed before this feature was added,
+   re-open **SQL Editor** and run the `push_subscriptions` table block from
+   `supabase-schema.sql` (a fresh project already gets it from step 2).
+4. Redeploy. On a phone, install the app to the home screen first — iOS
+   Safari only supports push for installed PWAs, not the browser tab.
+
+## 7. Enable Drive uploads for Content Review (optional)
+
+Without this, uploading a file in Content Review fails with a network/upload
+error — the browser never gets a valid upload session from Google.
+
+1. In [Google Cloud Console](https://console.cloud.google.com), create (or
+   reuse) a project, enable the **Google Drive API**, then create a
+   **Service Account** (IAM & Admin → Service Accounts).
+2. Create a JSON key for that service account and open it — you need the
+   `client_email` and `private_key` fields.
+3. In Google Drive, create a folder for uploads and **share it** with the
+   service account's email (Editor access), then copy the folder ID from its
+   URL (`https://drive.google.com/drive/folders/THIS_PART`).
+4. In Vercel → **Settings → Environment Variables**, add:
+   - `GDRIVE_CLIENT_EMAIL` — the service account's `client_email`
+   - `GDRIVE_PRIVATE_KEY` — the service account's `private_key` (paste as-is,
+     including the `\n` sequences and `BEGIN/END PRIVATE KEY` lines)
+   - `GDRIVE_FOLDER_ID` — the folder ID from step 3
+5. Redeploy.
+
 ## Worth knowing
 
 - The Supabase **anon key** ends up visible in your deployed site's JavaScript

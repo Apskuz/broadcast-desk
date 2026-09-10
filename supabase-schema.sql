@@ -34,3 +34,34 @@ create policy "anon can insert hub_state"
 
 -- Turn on Realtime for this table so every phone gets pushed live updates:
 -- Supabase dashboard → Database → Replication → toggle "hub_state" on.
+
+-- Stores each device's push subscription so /api/send-push.js knows where to
+-- deliver notifications. One row per browser/device that has enabled
+-- notifications (a person using two devices gets two rows).
+create table if not exists push_subscriptions (
+  id bigint generated always as identity primary key,
+  profile_name text not null,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table push_subscriptions enable row level security;
+
+create policy "anon can read push_subscriptions"
+  on push_subscriptions for select
+  using (true);
+
+create policy "anon can insert push_subscriptions"
+  on push_subscriptions for insert
+  with check (true);
+
+create policy "anon can update push_subscriptions"
+  on push_subscriptions for update
+  using (true)
+  with check (true);
+
+create policy "anon can delete push_subscriptions"
+  on push_subscriptions for delete
+  using (true);
