@@ -452,14 +452,6 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
 .week-head-cell.today{ background:var(--gold-soft); }
 .week-head-cell.today .dnum{ color:var(--gold); }
 .week-corner{ background:var(--panel-raised); border-bottom:1px solid var(--hair); }
-.week-time-label{ font-size:9.5px; color:var(--muted); padding:4px 6px 0 0; text-align:right; border-top:1px solid var(--hair); }
-.week-slot{ border-left:1px solid var(--hair); border-top:1px solid var(--hair); min-height:44px; padding:2px; position:relative; cursor:pointer; transition:background .12s; }
-.week-slot:hover{ background:var(--panel-raised); }
-.week-evt{ background:var(--gold); color:#171812; font-size:10px; font-weight:700; border-radius:5px; padding:3px 6px; margin-bottom:2px; line-height:1.3; overflow:hidden; cursor:pointer; display:flex; align-items:center; gap:4px; }
-.week-evt.type-meeting{ background:var(--teal); }
-.week-evt.type-deadline{ background:var(--alert); color:#fff; }
-.week-evt.type-photo{ background:var(--teal); }
-.week-evt.type-graphic{ background:var(--good); }
 
 /* ---- editable workload ---- */
 .member-add{ display:flex; gap:6px; margin-top:8px; }
@@ -1289,13 +1281,48 @@ function Duties({ data, saveData, profile }) {
 /* ---------------------------------- Calendar ---------------------------------- */
 
 const WEEK_HOURS = Array.from({ length: 15 }, (_, i) => i + 7); // 07:00 - 21:00
+const HOUR_HEIGHT = 48; // px per hour in the day/week timelines
 
-function personColor(name) {
+// Uses the same colour already assigned to that person's profile (visible on
+// their avatar everywhere else) so one person reads as one colour consistently
+// across the whole app, not just within the calendar.
+function personColor(name, profiles) {
   if (!name) return "var(--muted)";
+  const p = (profiles || []).find((pr) => pr.name === name);
+  if (p && p.color) return `var(--${p.color})`;
   const ramp = ["var(--gold)", "var(--teal)", "var(--alert)", "var(--good)"];
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) % 997;
   return ramp[hash % ramp.length];
+}
+
+// Start/end of an event in minutes-since-midnight — events without an end
+// time get a default visible block instead of a sliver.
+function eventMinutes(e) {
+  const [sh, sm] = (e.time || "09:00").split(":").map(Number);
+  const startMin = (sh || 0) * 60 + (sm || 0);
+  let endMin;
+  if (e.endTime) {
+    const [eh, em] = e.endTime.split(":").map(Number);
+    endMin = (eh || 0) * 60 + (em || 0);
+  }
+  if (!endMin || endMin <= startMin) endMin = startMin + 45;
+  return { startMin, endMin };
+}
+
+// Lays same-day events into side-by-side columns wherever their times overlap,
+// instead of stacking them awkwardly in one slot.
+function layoutDayEvents(events) {
+  const withMin = events.map((e) => ({ ...e, ...eventMinutes(e) })).sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin);
+  const colEnds = [];
+  const placed = withMin.map((e) => {
+    let col = colEnds.findIndex((end) => end <= e.startMin);
+    if (col === -1) { col = colEnds.length; colEnds.push(e.endMin); }
+    else colEnds[col] = e.endMin;
+    return { ...e, col };
+  });
+  const totalCols = Math.max(colEnds.length, 1);
+  return placed.map((e) => ({ ...e, totalCols }));
 }
 
 function startOfWeek(d) {
@@ -1314,7 +1341,7 @@ function Calendar({ data, saveData, profile }) {
   const [justMine, setJustMine] = useState(false);
   const [cursor, setCursor] = useState(new Date());
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", date: todayISO(), time: "09:00", type: "post", status: "planned", notes: "", assignee: "" });
+  const [form, setForm] = useState({ title: "", date: todayISO(), time: "09:00", endTime: "", type: "post", status: "planned", notes: "", assignee: "", remind: false, reminderMinutesBefore: 30 });
   const [editId, setEditId] = useState(null);
 
   const allAssignees = [...new Set([...(data.profiles || []).map((p) => p.name), ...data.calendarEvents.map((e) => e.assignee).filter(Boolean)])];
@@ -1341,11 +1368,11 @@ function Calendar({ data, saveData, profile }) {
   const saveEvent = () => {
     if (!form.title.trim()) return;
     if (editId) {
-      saveData({ ...data, calendarEvents: data.calendarEvents.map((e) => (e.id === editId ? { ...e, ...form } : e)) });
+      saveData({ ...data, calendarEvents: data.calendarEvents.map((e) => (e.id === editId ? { ...e, ...form, reminderSent: false } : e)) });
     } else {
       saveData({ ...data, calendarEvents: [...data.calendarEvents, { id: uid(), ...form }] });
     }
-    setForm({ title: "", date: form.date, time: form.time, type: "post", status: "planned", notes: "", assignee: "" });
+    setForm({ title: "", date: form.date, time: form.time, endTime: "", type: "post", status: "planned", notes: "", assignee: "", remind: false, reminderMinutesBefore: 30 });
     setEditId(null);
     setShowForm(false);
   };
@@ -1355,12 +1382,12 @@ function Calendar({ data, saveData, profile }) {
   };
 
   const openAdd = (iso, time) => {
-    setForm({ title: "", date: iso, time: time || "09:00", type: "post", status: "planned", notes: "", assignee: profile || "" });
+    setForm({ title: "", date: iso, time: time || "09:00", endTime: "", type: "post", status: "planned", notes: "", assignee: profile || "", remind: false, reminderMinutesBefore: 30 });
     setEditId(null);
     setShowForm(true);
   };
   const openEdit = (e) => {
-    setForm({ title: e.title, date: e.date, time: e.time || "09:00", type: e.type || "post", status: e.status || "planned", notes: e.notes || "", assignee: e.assignee || "" });
+    setForm({ title: e.title, date: e.date, time: e.time || "09:00", endTime: e.endTime || "", type: e.type || "post", status: e.status || "planned", notes: e.notes || "", assignee: e.assignee || "", remind: !!e.remind, reminderMinutesBefore: e.reminderMinutesBefore || 30 });
     setEditId(e.id);
     setShowForm(true);
   };
@@ -1408,29 +1435,42 @@ function Calendar({ data, saveData, profile }) {
           {(() => {
             const dayIso = isoOf(cursor);
             const dayEvents = eventsByDate[dayIso] || [];
+            const laidOut = layoutDayEvents(dayEvents);
+            const totalHeight = WEEK_HOURS.length * HOUR_HEIGHT;
+            const gridStartMin = WEEK_HOURS[0] * 60;
             return (
-              <div>
-                {WEEK_HOURS.map((h) => {
-                  const label = `${String(h).padStart(2, "0")}:00`;
-                  const slotEvents = dayEvents.filter((e) => parseInt((e.time || "0").split(":")[0], 10) === h).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
-                  return (
-                    <div key={h} style={{ display: "flex", borderTop: "1px solid var(--hair)", minHeight: 52 }}>
-                      <div style={{ width: 60, flexShrink: 0, fontSize: 11, color: "var(--muted)", paddingTop: 8 }}>{label}</div>
-                      <div style={{ flex: 1, padding: "8px 0", cursor: "pointer" }} onClick={() => openAdd(dayIso, label)}>
-                        {slotEvents.map((e) => {
-                          const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
-                          return (
-                            <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--panel-raised)", borderLeft: `3px solid ${personColor(e.assignee)}`, borderRadius: 6, padding: "7px 10px", marginBottom: 6, fontSize: 13 }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
-                              <span className="evt-dot" style={{ background: st.color }} />
-                              <span style={{ fontWeight: 600 }}>{e.time}</span> {e.title}
-                              {e.assignee && <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--muted)" }}>{e.assignee}</span>}
-                            </div>
-                          );
-                        })}
+              <div style={{ display: "flex" }}>
+                <div style={{ width: 52, flexShrink: 0 }}>
+                  {WEEK_HOURS.map((h) => (
+                    <div key={h} style={{ height: HOUR_HEIGHT, fontSize: 10.5, color: "var(--muted)", textAlign: "right", paddingRight: 8, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
+                  ))}
+                </div>
+                <div style={{ position: "relative", flex: 1, height: totalHeight, borderLeft: "1px solid var(--hair)" }}>
+                  {WEEK_HOURS.map((h, hi) => (
+                    <div
+                      key={h}
+                      onClick={() => openAdd(dayIso, `${String(h).padStart(2, "0")}:00`)}
+                      style={{ position: "absolute", top: hi * HOUR_HEIGHT, left: 0, right: 0, height: HOUR_HEIGHT, borderTop: "1px solid var(--hair)", cursor: "pointer" }}
+                    />
+                  ))}
+                  {laidOut.map((e) => {
+                    const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                    const top = ((e.startMin - gridStartMin) / 60) * HOUR_HEIGHT;
+                    const height = Math.max(((e.endMin - e.startMin) / 60) * HOUR_HEIGHT - 2, 20);
+                    const widthPct = 100 / e.totalCols;
+                    return (
+                      <div
+                        key={e.id}
+                        onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
+                        style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 4px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 6, padding: "5px 8px", fontSize: 11.5, fontWeight: 600, overflow: "hidden", cursor: "pointer", zIndex: 2 }}
+                      >
+                        <span className="evt-dot" style={{ background: st.color, marginRight: 4 }} />
+                        {e.time}{e.endTime ? `–${e.endTime}` : ""} {e.title}
+                        {e.assignee && <div style={{ fontSize: 10, fontWeight: 500, opacity: 0.75 }}>{e.assignee}</div>}
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
             );
           })()}
@@ -1457,9 +1497,9 @@ function Calendar({ data, saveData, profile }) {
                 {c.iso && (eventsByDate[c.iso] || []).sort((a, b) => (a.time || "").localeCompare(b.time || "")).slice(0, 3).map((e) => {
                   const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
                   return (
-                    <div className="cal-evt" key={e.id} title={e.title} style={{ borderLeftColor: personColor(e.assignee) }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
+                    <div className="cal-evt" key={e.id} title={e.title} style={{ borderLeftColor: personColor(e.assignee, data.profiles), borderLeftWidth: 3 }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
                       <span className="evt-dot" style={{ background: st.color }} />
-                      {e.time ? `${e.time} · ` : ""}{e.title}
+                      {e.time ? `${e.time}${e.endTime ? `–${e.endTime}` : ""} · ` : ""}{e.title}
                     </div>
                   );
                 })}
@@ -1488,28 +1528,45 @@ function Calendar({ data, saveData, profile }) {
                 </div>
               );
             })}
-            {WEEK_HOURS.map((h) => (
-              <React.Fragment key={h}>
-                <div className="week-time-label">{String(h).padStart(2, "0")}:00</div>
-                {weekDays.map((d) => {
-                  const iso = isoOf(d);
-                  const slotEvents = (eventsByDate[iso] || []).filter((e) => parseInt((e.time || "0").split(":")[0], 10) === h);
-                  return (
-                    <div key={iso + h} className="week-slot" onClick={() => openAdd(iso, `${String(h).padStart(2, "0")}:00`)}>
-                      {slotEvents.map((e) => {
-                        const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
-                        return (
-                          <div key={e.id} className={`week-evt type-${e.type}`} title={`${e.time} · ${e.title}`} style={{ borderLeft: `3px solid ${personColor(e.assignee)}` }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
-                            <span className="evt-dot light" style={{ background: st.color }} />
-                            {e.time} {e.title}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })}
-              </React.Fragment>
-            ))}
+            <div className="week-time-col">
+              {WEEK_HOURS.map((h) => (
+                <div key={h} style={{ height: HOUR_HEIGHT, fontSize: 9.5, color: "var(--muted)", textAlign: "right", paddingRight: 6, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
+              ))}
+            </div>
+            {weekDays.map((d) => {
+              const iso = isoOf(d);
+              const laidOut = layoutDayEvents(eventsByDate[iso] || []);
+              const totalHeight = WEEK_HOURS.length * HOUR_HEIGHT;
+              const gridStartMin = WEEK_HOURS[0] * 60;
+              return (
+                <div key={iso} style={{ position: "relative", height: totalHeight, borderLeft: "1px solid var(--hair)" }}>
+                  {WEEK_HOURS.map((h, hi) => (
+                    <div
+                      key={h}
+                      onClick={() => openAdd(iso, `${String(h).padStart(2, "0")}:00`)}
+                      style={{ position: "absolute", top: hi * HOUR_HEIGHT, left: 0, right: 0, height: HOUR_HEIGHT, borderTop: "1px solid var(--hair)", cursor: "pointer" }}
+                    />
+                  ))}
+                  {laidOut.map((e) => {
+                    const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                    const top = ((e.startMin - gridStartMin) / 60) * HOUR_HEIGHT;
+                    const height = Math.max(((e.endMin - e.startMin) / 60) * HOUR_HEIGHT - 2, 18);
+                    const widthPct = 100 / e.totalCols;
+                    return (
+                      <div
+                        key={e.id}
+                        title={`${e.time}${e.endTime ? `–${e.endTime}` : ""} · ${e.title}`}
+                        onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
+                        style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 3px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 5, padding: "2px 5px", fontSize: 9.5, fontWeight: 700, lineHeight: 1.3, overflow: "hidden", cursor: "pointer", zIndex: 2 }}
+                      >
+                        <span className="evt-dot light" style={{ background: st.color }} />
+                        {e.time} {e.title}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1519,7 +1576,8 @@ function Calendar({ data, saveData, profile }) {
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Product launch post" autoFocus /></div>
           <div className="field-row">
             <div className="field"><label>Date</label><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
-            <div className="field"><label>Time</label><input type="time" value={form.time || "09:00"} onChange={(e) => setForm({ ...form, time: e.target.value })} /></div>
+            <div className="field"><label>Start</label><input type="time" value={form.time || "09:00"} onChange={(e) => setForm({ ...form, time: e.target.value })} /></div>
+            <div className="field"><label>End (optional)</label><input type="time" value={form.endTime || ""} onChange={(e) => setForm({ ...form, endTime: e.target.value })} /></div>
           </div>
           <div className="field-row">
             <div className="field"><label>Type</label>
@@ -1538,6 +1596,20 @@ function Calendar({ data, saveData, profile }) {
             <datalist id="cal-assignee-list">{allAssignees.map((a) => <option value={a} key={a} />)}</datalist>
           </div>
           <div className="field"><label>Note (optional)</label><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Raw info, link, or anything quick to jot down" /></div>
+
+          <div className="field">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={form.remind} onChange={(e) => setForm({ ...form, remind: e.target.checked })} style={{ width: "auto" }} />
+              <Bell size={13} /> Remind {form.assignee || "the assignee"}
+            </label>
+            {form.remind && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                <input type="number" min={0} value={form.reminderMinutesBefore} onChange={(e) => setForm({ ...form, reminderMinutesBefore: Math.max(0, Number(e.target.value) || 0) })} style={{ width: 70 }} />
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>minutes before it starts (plus a heads-up the morning of, either way)</span>
+              </div>
+            )}
+          </div>
+
           {editId && (
             <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)", marginBottom: 14 }} onClick={() => removeEvent(editId)}><Trash2 size={13} /> Delete this event</button>
           )}
@@ -3659,6 +3731,34 @@ export default function TeamHub() {
     document.body.style.overflow = navOpen ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
   }, [navOpen]);
+
+  useEffect(() => {
+    // Fires precise reminders while someone has the app open somewhere — a daily
+    // digest (api/daily-reminders.js, run by Vercel Cron) is the backup for
+    // reminders due when nobody has a tab open at that exact moment.
+    const check = async () => {
+      if (!data || !loggedIn) return;
+      const me = loggedIn.name;
+      const now = new Date();
+      for (const e of data.calendarEvents || []) {
+        if (!e.remind || e.reminderSent || e.assignee !== me || !e.date) continue;
+        const [h, m] = (e.time || "09:00").split(":").map(Number);
+        const eventDt = new Date(e.date + "T00:00:00");
+        eventDt.setHours(h || 0, m || 0, 0, 0);
+        const remindAt = new Date(eventDt.getTime() - (e.reminderMinutesBefore || 30) * 60000);
+        if (now >= remindAt && now <= eventDt) {
+          sendPush(me, "Reminder", `${e.title} at ${e.time}`);
+          const updated = { ...data, calendarEvents: data.calendarEvents.map((x) => (x.id === e.id ? { ...x, reminderSent: true } : x)) };
+          try {
+            await supabase.from("hub_state").update({ data: updated, updated_at: new Date().toISOString() }).eq("id", "main");
+          } catch { /* best-effort */ }
+        }
+      }
+    };
+    check();
+    const id = setInterval(check, 60000);
+    return () => clearInterval(id);
+  }, [data, loggedIn]);
 
   useEffect(() => {
     let cancelled = false;
