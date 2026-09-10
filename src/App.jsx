@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -1602,9 +1602,13 @@ function youtubeId(url) {
   const m = (url || "").match(/(?:youtu\.be\/|v=|embed\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
 }
-function driveEmbedUrl(url) {
+function driveFileId(url) {
   const m = (url || "").match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/) || (url || "").match(/[?&]id=([a-zA-Z0-9_-]+)/);
-  return m ? `https://drive.google.com/file/d/${m[1]}/preview` : null;
+  return m ? m[1] : null;
+}
+function driveEmbedUrl(url) {
+  const id = driveFileId(url);
+  return id ? `https://drive.google.com/file/d/${id}/preview` : null;
 }
 
 // Uploads a file straight to Google Drive from the browser (never through Vercel's own
@@ -1683,6 +1687,7 @@ function uploadToDrive(file, onProgress) {
 function ContentReview({ data, saveData }) {
   const [showForm, setShowForm] = useState(false);
   const [open, setOpen] = useState(null);
+  const [loadedVideo, setLoadedVideo] = useState(null); // content id whose embed the user tapped play on
   const [commentText, setCommentText] = useState("");
   const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
   const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
@@ -1713,7 +1718,26 @@ function ContentReview({ data, saveData }) {
     setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
     setShowForm(false);
   };
-  const updateStatus = (id, status) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)) });
+  const updateStatus = (id, status) => {
+    saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)) });
+    // Once something's published there's no reason to keep the raw file taking
+    // up Drive space — clean it up in the background so the folder doesn't flood.
+    if (status === "published") {
+      const item = data.content.find((c) => c.id === id);
+      const fileId = item && driveFileId(item.link);
+      if (fileId) {
+        fetch("/api/drive-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fileId }),
+        })
+          .then(() => {
+            saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status, link: "", driveArchived: true } : c)) });
+          })
+          .catch(() => {});
+      }
+    }
+  };
   const removeItem = (id) => saveData({ ...data, content: data.content.filter((c) => c.id !== id) });
   const addComment = (id) => {
     if (!commentText.trim()) return;
@@ -1800,22 +1824,31 @@ function ContentReview({ data, saveData }) {
                     <textarea value={c.caption || ""} onChange={(e) => updateCaption(c.id, e.target.value)} placeholder="The caption or copy that shipped with this piece…" />
                   </div>
 
-                  {yt && (
-                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden" }}>
-                      <iframe
-                        src={`https://www.youtube.com/embed/${yt}`}
-                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
-                        allowFullScreen title={c.title}
-                      />
+                  {(yt || drive) && (
+                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
+                      {loadedVideo === c.id ? (
+                        <iframe
+                          src={yt ? `https://www.youtube.com/embed/${yt}` : drive}
+                          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+                          allowFullScreen title={c.title}
+                        />
+                      ) : (
+                        // Google's Drive preview player is heavy to load — only mount it once
+                        // tapped, so opening an item with a video doesn't feel sluggish on phones.
+                        <button
+                          onClick={() => setLoadedVideo(c.id)}
+                          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, color: "var(--muted)" }}
+                        >
+                          <span style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--gold)", color: "#12141B", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Play size={18} fill="#12141B" />
+                          </span>
+                        </button>
+                      )}
                     </div>
                   )}
-                  {drive && (
-                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden" }}>
-                      <iframe
-                        src={drive}
-                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
-                        allowFullScreen title={c.title}
-                      />
+                  {!yt && !drive && c.driveArchived && (
+                    <div className="empty" style={{ padding: "10px 0", marginBottom: 8 }}>
+                      Published — file removed from Drive to save space.
                     </div>
                   )}
 
