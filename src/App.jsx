@@ -1905,9 +1905,15 @@ function ContentReview({ data, saveData }) {
 
           <div className="field">
             <label>Upload video or photo</label>
-            <label className="btn" style={{ width: "100%", justifyContent: "center", cursor: uploading ? "default" : "pointer", opacity: uploading ? 0.7 : 1 }}>
+            <label className="btn" style={{ position: "relative", width: "100%", justifyContent: "center", cursor: uploading ? "default" : "pointer", opacity: uploading ? 0.7 : 1 }}>
               <Upload size={14} /> {uploading ? `Uploading… ${uploadProgress}%` : "Choose a file"}
-              <input type="file" accept="video/*,image/*" onChange={handleFileSelect} disabled={uploading} style={{ display: "none" }} />
+              <input
+                type="file"
+                accept="video/*,image/*"
+                onChange={handleFileSelect}
+                disabled={uploading}
+                style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap", border: 0 }}
+              />
             </label>
             {uploading && (
               <div className="progress-track" style={{ marginTop: 8 }}>
