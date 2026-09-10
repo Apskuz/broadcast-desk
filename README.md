@@ -119,14 +119,22 @@ notifications" button will show "Couldn't enable — try again", and the
 Without this, uploading a file in Content Review fails with a network/upload
 error — the browser never gets a valid upload session from Google.
 
+The destination folder **must live inside a Shared Drive**, not someone's
+personal "My Drive" — Google gives service accounts zero storage quota of
+their own, so writing a file to a regular folder fails with a 403 even when
+that folder is shared with the service account as an editor. Shared Drives
+require a Google Workspace (paid business) account, not a free Gmail.
+
 1. In [Google Cloud Console](https://console.cloud.google.com), create (or
    reuse) a project, enable the **Google Drive API**, then create a
    **Service Account** (IAM & Admin → Service Accounts).
 2. Create a JSON key for that service account and open it — you need the
    `client_email` and `private_key` fields.
-3. In Google Drive, create a folder for uploads and **share it** with the
-   service account's email (Editor access), then copy the folder ID from its
-   URL (`https://drive.google.com/drive/folders/THIS_PART`).
+3. In Google Drive, create a **Shared Drive** (left sidebar → Shared drives →
+   New), then create a folder inside it for uploads. Open the Shared Drive's
+   **Manage members**, add the service account's email as a **Content
+   manager** (or higher). Copy the folder ID from its URL
+   (`https://drive.google.com/drive/folders/THIS_PART`).
 4. In Vercel → **Settings → Environment Variables**, add:
    - `GDRIVE_CLIENT_EMAIL` — the service account's `client_email`
    - `GDRIVE_PRIVATE_KEY` — the service account's `private_key` (paste as-is,

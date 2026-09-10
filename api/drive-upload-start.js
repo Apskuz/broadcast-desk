@@ -23,7 +23,7 @@ export default async function handler(req, res) {
 
     const accessToken = await getAccessToken(clientEmail, privateKey);
 
-    const driveRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable", {
+    const driveRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,

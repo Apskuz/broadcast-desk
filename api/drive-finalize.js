@@ -19,7 +19,7 @@ export default async function handler(req, res) {
 
     const accessToken = await getAccessToken(clientEmail, privateKey);
 
-    const permRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
+    const permRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?supportsAllDrives=true`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
