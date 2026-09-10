@@ -2356,7 +2356,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
 
 /* ---------------------------------- Idea bank ---------------------------------- */
 
-function IdeaBank({ data, saveData }) {
+function IdeaBank({ data, saveData, profile }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ title: "", description: "", tags: "", author: "", link: "", color: IDEA_COLORS[0] });
   const [showFolderForm, setShowFolderForm] = useState(false);
@@ -2408,15 +2408,159 @@ function IdeaBank({ data, saveData }) {
     setShowForm(false);
   };
   const vote = (id) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
-  const removeIdea = (id) => { saveData({ ...data, ideas: ideas.filter((i) => i.id !== id) }); setOpenIdeaId(null); };
+  const removeIdea = (id) => {
+    const item = ideas.find((i) => i.id === id);
+    if (item) (item.attachments || []).forEach((a) => deleteDriveFile(a.fileId));
+    saveData({ ...data, ideas: ideas.filter((i) => i.id !== id) });
+    setOpenIdeaId(null);
+  };
   const moveToFolder = (id, folderId) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, folderId: folderId || null } : i)) });
   const setIdeaColor = (id, color) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, color } : i)) });
+
+  const ideaFileInputRef = useRef(null);
+  const [ideaAttaching, setIdeaAttaching] = useState(false);
+  const [ideaAttachProgress, setIdeaAttachProgress] = useState(0);
+  const [ideaAttachError, setIdeaAttachError] = useState("");
+  const [lightbox, setLightbox] = useState(null);
+
+  const handleIdeaFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    const id = openIdeaId;
+    if (!file || !id) return;
+    setIdeaAttaching(true);
+    setIdeaAttachProgress(0);
+    setIdeaAttachError("");
+    try {
+      const result = await uploadToDrive(file, setIdeaAttachProgress, profile);
+      const fileId = driveFileId(result.link);
+      const target = ideas.find((i) => i.id === id);
+      if (!target) {
+        deleteDriveFile(result.link);
+        throw new Error("That idea was removed while this was uploading.");
+      }
+      saveData({
+        ...data,
+        ideas: ideas.map((i) => (i.id === id ? { ...i, attachments: [...(i.attachments || []), { fileId, name: result.name, kind: result.kind }] } : i)),
+      });
+    } catch (err) {
+      setIdeaAttachError(err.message || "Upload failed.");
+    }
+    setIdeaAttaching(false);
+    e.target.value = "";
+  };
+  const removeIdeaAttachment = (ideaId, fileId) => {
+    deleteDriveFile(fileId);
+    saveData({ ...data, ideas: ideas.map((i) => (i.id === ideaId ? { ...i, attachments: (i.attachments || []).filter((a) => a.fileId !== fileId) } : i)) });
+  };
 
   const openIdea = openIdeaId ? positioned.find((i) => i.id === openIdeaId) : null;
   const openYt = openIdea ? youtubeId(openIdea.link) : null;
   const openDrive = openIdea && !openYt ? driveEmbedUrl(openIdea.link) : null;
 
   const BOARD_W = 1400, BOARD_H = 900;
+
+  // ---- drawing layer ----
+  const drawings = (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId === openFolderId : !d.folderId));
+  const [tool, setTool] = useState("move"); // move | pen | line | rect | circle | erase
+  const [drawColor, setDrawColor] = useState(IDEA_COLORS[0]);
+  const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
+  const boardRef = useRef(null);
+  const draftRef = useRef(null);
+  const drawingMode = tool !== "move";
+
+  const pointOn = (e) => {
+    const rect = boardRef.current.getBoundingClientRect();
+    const p = e.touches ? e.touches[0] : e;
+    return { x: Math.round(p.clientX - rect.left), y: Math.round(p.clientY - rect.top) };
+  };
+
+  const startDraw = (e) => {
+    if (!drawingMode || tool === "erase") return;
+    e.preventDefault();
+    const { x, y } = pointOn(e);
+    const shape = tool === "pen"
+      ? { tool: "pen", color: drawColor, points: [x, y] }
+      : { tool, color: drawColor, x1: x, y1: y, x2: x, y2: y };
+    draftRef.current = shape;
+    setDraft(shape);
+
+    const move = (ev) => {
+      if (!draftRef.current) return;
+      ev.preventDefault();
+      const pt = pointOn(ev);
+      let next;
+      if (draftRef.current.tool === "pen") {
+        const pts = draftRef.current.points;
+        const lastX = pts[pts.length - 2], lastY = pts[pts.length - 1];
+        // Skipping near-identical points keeps a stroke from bloating the
+        // shared board with hundreds of coordinates.
+        if (Math.abs(pt.x - lastX) < 3 && Math.abs(pt.y - lastY) < 3) return;
+        next = { ...draftRef.current, points: [...pts, pt.x, pt.y] };
+      } else {
+        next = { ...draftRef.current, x2: pt.x, y2: pt.y };
+      }
+      draftRef.current = next;
+      setDraft(next);
+    };
+    const end = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", end);
+      window.removeEventListener("touchmove", move);
+      window.removeEventListener("touchend", end);
+      const shapeToSave = draftRef.current;
+      draftRef.current = null;
+      setDraft(null);
+      if (!shapeToSave) return;
+      const isDot = shapeToSave.tool === "pen"
+        ? shapeToSave.points.length < 4
+        : Math.abs(shapeToSave.x2 - shapeToSave.x1) < 4 && Math.abs(shapeToSave.y2 - shapeToSave.y1) < 4;
+      if (isDot) return; // a stray tap shouldn't leave a speck behind
+      saveData({ ...data, ideaDrawings: [...(data.ideaDrawings || []), { id: uid(), folderId: openFolderId || null, ...shapeToSave }] });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", end);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("touchend", end);
+  };
+
+  const eraseShape = (id) => saveData({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => d.id !== id) });
+  const clearDrawings = () => saveData({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId !== openFolderId : !!d.folderId)) });
+
+  const renderShape = (s, key, isDraft) => {
+    const common = { stroke: s.color, strokeWidth: 3, fill: "none", strokeLinecap: "round", strokeLinejoin: "round" };
+    const hit = tool === "erase" && !isDraft
+      ? { stroke: "transparent", strokeWidth: 16, fill: "none", style: { cursor: "pointer" }, onClick: () => eraseShape(s.id) }
+      : null;
+    const shapes = [];
+    if (s.tool === "pen") {
+      const pts = [];
+      for (let i = 0; i < s.points.length; i += 2) pts.push(`${s.points[i]},${s.points[i + 1]}`);
+      const d = pts.join(" ");
+      if (hit) shapes.push(<polyline key={`${key}-hit`} points={d} {...hit} />);
+      shapes.push(<polyline key={key} points={d} {...common} />);
+    } else if (s.tool === "line") {
+      if (hit) shapes.push(<line key={`${key}-hit`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} {...hit} />);
+      shapes.push(<line key={key} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} {...common} />);
+    } else if (s.tool === "rect") {
+      const box = { x: Math.min(s.x1, s.x2), y: Math.min(s.y1, s.y2), width: Math.abs(s.x2 - s.x1), height: Math.abs(s.y2 - s.y1) };
+      if (hit) shapes.push(<rect key={`${key}-hit`} {...box} {...hit} />);
+      shapes.push(<rect key={key} {...box} rx={4} {...common} />);
+    } else if (s.tool === "circle") {
+      const el = { cx: (s.x1 + s.x2) / 2, cy: (s.y1 + s.y2) / 2, rx: Math.abs(s.x2 - s.x1) / 2, ry: Math.abs(s.y2 - s.y1) / 2 };
+      if (hit) shapes.push(<ellipse key={`${key}-hit`} {...el} {...hit} />);
+      shapes.push(<ellipse key={key} {...el} {...common} />);
+    }
+    return shapes;
+  };
+
+  const TOOLS = [
+    { id: "move", label: "Move", icon: Pin },
+    { id: "pen", label: "Pen", icon: Pencil },
+    { id: "line", label: "Line", icon: ChevronRight },
+    { id: "rect", label: "Box", icon: Layers },
+    { id: "circle", label: "Circle", icon: Globe },
+    { id: "erase", label: "Erase", icon: Trash2 },
+  ];
 
   return (
     <div>
@@ -2438,17 +2582,54 @@ function IdeaBank({ data, saveData }) {
         </div>
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {TOOLS.map((t) => {
+          const TIcon = t.icon;
+          return (
+            <button
+              key={t.id}
+              className="btn"
+              style={{ padding: "6px 10px", fontSize: 12, background: tool === t.id ? "var(--gold-soft)" : undefined, borderColor: tool === t.id ? "var(--gold)" : undefined, color: tool === t.id ? "var(--gold)" : undefined }}
+              onClick={() => setTool(t.id)}
+            >
+              <TIcon size={13} /> {t.label}
+            </button>
+          );
+        })}
+        <span style={{ display: "flex", gap: 5, marginLeft: 4 }}>
+          {IDEA_COLORS.map((c) => (
+            <button key={c} onClick={() => setDrawColor(c)} title="Pen colour" style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: drawColor === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+          ))}
+        </span>
+        {drawings.length > 0 && (
+          <button className="btn" style={{ padding: "6px 10px", fontSize: 12, marginLeft: "auto" }} onClick={clearDrawings}>Clear drawing</button>
+        )}
+      </div>
+
       <div style={{ position: "relative", width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}>
-        <div style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px" }}>
+        <div
+          ref={boardRef}
+          onMouseDown={startDraw}
+          onTouchStart={startDraw}
+          style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px", cursor: drawingMode && tool !== "erase" ? "crosshair" : "default", touchAction: drawingMode ? "none" : "auto" }}
+        >
+          <svg
+            width={BOARD_W}
+            height={BOARD_H}
+            style={{ position: "absolute", inset: 0, pointerEvents: tool === "erase" ? "auto" : "none", zIndex: tool === "erase" ? 5 : 1 }}
+          >
+            {drawings.map((s) => renderShape(s, s.id, false))}
+            {draft && renderShape(draft, "draft", true)}
+          </svg>
           {!currentFolder && folders.map((f) => {
             const pos = folderDrag.dragging && folderDrag.dragging.id === f.id ? folderDrag.dragging : f;
             const count = ideas.filter((i) => i.folderId === f.id).length;
             return (
               <div
                 key={f.id}
-                onMouseDown={(e) => folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0)}
-                onTouchStart={(e) => folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0)}
-                style={{ position: "absolute", left: pos.x, top: pos.y, width: 116, cursor: "grab", userSelect: "none", touchAction: "none", textAlign: "center" }}
+                onMouseDown={(e) => { if (!drawingMode) folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0); }}
+                onTouchStart={(e) => { if (!drawingMode) folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0); }}
+                style={{ position: "absolute", left: pos.x, top: pos.y, width: 116, cursor: "grab", userSelect: "none", touchAction: "none", pointerEvents: drawingMode ? "none" : "auto", textAlign: "center" }}
               >
                 <div style={{ width: 62, height: 50, margin: "0 auto 6px", borderRadius: 8, background: f.color || IDEA_COLORS[0], display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 10px rgba(0,0,0,0.35)" }}>
                   <FolderOpen size={24} color="#22232b" />
@@ -2464,14 +2645,26 @@ function IdeaBank({ data, saveData }) {
             return (
               <div
                 key={i.id}
-                onMouseDown={(e) => ideaDrag.startDrag(e, i.id, i.x, i.y)}
-                onTouchStart={(e) => ideaDrag.startDrag(e, i.id, i.x, i.y)}
-                style={{ position: "absolute", left: pos.x, top: pos.y, width: 152, minHeight: 88, background: i.color, borderRadius: 8, padding: "10px 11px", boxShadow: "0 4px 10px rgba(0,0,0,0.35)", cursor: "grab", userSelect: "none", touchAction: "none" }}
+                onMouseDown={(e) => { if (!drawingMode) ideaDrag.startDrag(e, i.id, i.x, i.y); }}
+                onTouchStart={(e) => { if (!drawingMode) ideaDrag.startDrag(e, i.id, i.x, i.y); }}
+                style={{ position: "absolute", left: pos.x, top: pos.y, width: 152, minHeight: 88, pointerEvents: drawingMode ? "none" : "auto", background: i.color, borderRadius: 8, padding: "10px 11px", boxShadow: "0 4px 10px rgba(0,0,0,0.35)", cursor: "grab", userSelect: "none", touchAction: "none" }}
               >
+                {i.attachments && i.attachments.length > 0 && (
+                  i.attachments[0].kind === "image" ? (
+                    <img src={driveMediaSrc(i.attachments[0].fileId)} alt="" draggable={false} style={{ width: "100%", height: 66, objectFit: "cover", borderRadius: 5, marginBottom: 7, display: "block" }} />
+                  ) : (
+                    <div style={{ width: "100%", height: 66, borderRadius: 5, marginBottom: 7, background: "rgba(0,0,0,0.25)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <Play size={18} fill="#22232b" color="#22232b" />
+                    </div>
+                  )
+                )}
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: "#22232b", lineHeight: 1.3, marginBottom: 10, wordBreak: "break-word" }}>{i.title}</div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", position: "absolute", left: 11, right: 11, bottom: 8 }}>
                   <span style={{ fontSize: 10, color: "#22232b", opacity: 0.7 }}>{i.author || "Anon"}</span>
-                  {i.votes > 0 && <span style={{ fontSize: 10, color: "#22232b", fontWeight: 700 }}>▲ {i.votes}</span>}
+                  <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    {i.attachments && i.attachments.length > 1 && <span style={{ fontSize: 10, color: "#22232b", opacity: 0.7 }}>{i.attachments.length} files</span>}
+                    {i.votes > 0 && <span style={{ fontSize: 10, color: "#22232b", fontWeight: 700 }}>▲ {i.votes}</span>}
+                  </span>
                 </div>
               </div>
             );
@@ -2535,6 +2728,46 @@ function IdeaBank({ data, saveData }) {
             </div>
           )}
 
+          <div className="field">
+            <label>Pictures & videos</label>
+            {openIdea.attachments && openIdea.attachments.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                {openIdea.attachments.map((a) => (
+                  <div key={a.fileId} style={{ position: "relative" }}>
+                    <button onClick={() => setLightbox(a)} title={`Open ${a.name}`} style={{ padding: 0, border: "none", background: "none", cursor: "zoom-in", lineHeight: 0 }}>
+                      {a.kind === "image" ? (
+                        <img src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 92, height: 92, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                      ) : (
+                        <div style={{ width: 92, height: 92, borderRadius: 6, background: "var(--panel-raised)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <span style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Play size={14} fill="#12141B" color="#12141B" />
+                          </span>
+                        </div>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => removeIdeaAttachment(openIdea.id, a.fileId)}
+                      style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", background: "var(--alert)", color: "#fff", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              className="btn"
+              style={{ padding: "6px 10px", fontSize: 12 }}
+              onClick={() => ideaFileInputRef.current && ideaFileInputRef.current.click()}
+              disabled={ideaAttaching}
+            >
+              <Upload size={12} /> {ideaAttaching ? `Uploading… ${ideaAttachProgress}%` : "Attach a picture or video"}
+            </button>
+            <input ref={ideaFileInputRef} type="file" accept="video/*,image/*" onChange={handleIdeaFileSelect} disabled={ideaAttaching} style={{ display: "none" }} />
+            {ideaAttachError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{ideaAttachError}</div>}
+          </div>
+
           <div className="field-row">
             <div className="field">
               <label>Folder</label>
@@ -2562,6 +2795,8 @@ function IdeaBank({ data, saveData }) {
           </div>
         </Modal>
       )}
+
+      {lightbox && <MediaLightbox fileId={lightbox.fileId} kind={lightbox.kind} name={lightbox.name} onClose={() => setLightbox(null)} />}
     </div>
   );
 }
@@ -3835,6 +4070,7 @@ function TeamManage({ data, saveData }) {
       content: [],
       ideas: [],
       ideaFolders: [],
+      ideaDrawings: [],
       resources: [],
       moodboard: [],
       approvedOrder: [],
@@ -4285,6 +4521,7 @@ export default function TeamHub() {
       if (!loadedData.moodboard) loadedData.moodboard = [];
       if (!loadedData.approvedOrder) loadedData.approvedOrder = [];
       if (!loadedData.ideaFolders) loadedData.ideaFolders = [];
+      if (!loadedData.ideaDrawings) loadedData.ideaDrawings = [];
       if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
         loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
       }
@@ -4392,7 +4629,7 @@ export default function TeamHub() {
     notes: <Notes data={data} saveData={saveData} />,
     content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
     approved: <ApprovedQueue data={data} saveData={saveData} profile={profile} />,
-    ideas: <IdeaBank data={data} saveData={saveData} />,
+    ideas: <IdeaBank data={data} saveData={saveData} profile={profile} />,
     guidelines: <Guidelines data={data} saveData={saveData} profile={profile} />,
     team: <TeamManage data={data} saveData={saveData} />,
   }[view];
