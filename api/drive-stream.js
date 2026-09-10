@@ -11,6 +11,8 @@ export const config = {
   maxDuration: 60,
 };
 
+const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB per range request
+
 export default async function handler(req, res) {
   if (req.method !== "GET" && req.method !== "HEAD") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -29,7 +31,26 @@ export default async function handler(req, res) {
     const accessToken = await getAccessToken(clientEmail, privateKey);
 
     const headers = { Authorization: `Bearer ${accessToken}` };
-    if (req.headers.range) headers.Range = req.headers.range;
+    // A <video> normally opens with "bytes=0-", i.e. "send me the whole file".
+    // Serving that in one shot means a big video has to finish streaming inside
+    // this function's time limit or playback dies partway through. Capping an
+    // open-ended range turns it into a series of quick chunked requests instead,
+    // so playback starts fast and no single request can run long enough to be
+    // cut off. Images don't send a Range header at all, so they still come back
+    // whole in one response.
+    const range = req.headers.range;
+    if (range) {
+      const match = /bytes=(\d+)-(\d*)/.exec(range);
+      if (match) {
+        const start = Number(match[1]);
+        const requestedEnd = match[2] ? Number(match[2]) : null;
+        const cappedEnd = start + CHUNK_SIZE - 1;
+        const end = requestedEnd == null ? cappedEnd : Math.min(requestedEnd, cappedEnd);
+        headers.Range = `bytes=${start}-${end}`;
+      } else {
+        headers.Range = range;
+      }
+    }
 
     const driveRes = await fetch(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
@@ -54,7 +75,12 @@ export default async function handler(req, res) {
     }
 
     const { Readable } = await import("stream");
-    Readable.fromWeb(driveRes.body).pipe(res);
+    const stream = Readable.fromWeb(driveRes.body);
+    // Closing a video mid-download aborts the response — tear the stream down
+    // rather than letting an unhandled error take the function with it.
+    stream.on("error", () => res.end());
+    res.on("close", () => stream.destroy());
+    stream.pipe(res);
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: String(err) });
     else res.end();

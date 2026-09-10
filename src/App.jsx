@@ -33,6 +33,10 @@ function useDraggable(onDragEnd, onClick) {
   const [dragging, setDragging] = useState(null); // { id, x, y }
   const posRef = useRef(null);
   const movedRef = useRef(false);
+  const cleanupRef = useRef(null);
+
+  // Navigating away mid-drag would otherwise leave window listeners attached.
+  useEffect(() => () => { if (cleanupRef.current) cleanupRef.current(); }, []);
 
   const startDrag = (e, id, origX, origY) => {
     if (e.button !== undefined && e.button !== 0) return;
@@ -53,20 +57,27 @@ function useDraggable(onDragEnd, onClick) {
       posRef.current = next;
       setDragging(next);
     };
-    const end = () => {
+    const detach = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", end);
       window.removeEventListener("touchmove", move);
       window.removeEventListener("touchend", end);
+      window.removeEventListener("touchcancel", end);
+      cleanupRef.current = null;
+    };
+    const end = () => {
+      detach();
       if (movedRef.current && posRef.current) onDragEnd(posRef.current.id, posRef.current.x, posRef.current.y);
       else if (!movedRef.current && onClick) onClick(id);
       posRef.current = null;
       setDragging(null);
     };
+    cleanupRef.current = detach;
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", end);
     window.addEventListener("touchmove", move, { passive: false });
     window.addEventListener("touchend", end);
+    window.addEventListener("touchcancel", end);
   };
 
   return { dragging, startDrag };
@@ -1746,6 +1757,33 @@ function youtubeId(url) {
   const m = (url || "").match(/(?:youtu\.be\/|v=|embed\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
 }
+const fileKind = (file) => ((file.type || "").startsWith("image/") ? "image" : "video");
+
+// What was actually uploaded wins over the format picked in the form — someone
+// can upload a photo against a piece marked "Video / Reel", and it still needs
+// to render as a photo rather than a video player that shows nothing.
+function isPhotoItem(item) {
+  if (item.mediaKind) return item.mediaKind === "image";
+  return item.format === "photo" || item.format === "graphic";
+}
+
+// Everything Drive-hosted is played/shown through our own authenticated proxy
+// rather than a public drive.google.com link — the team's Workspace restricts
+// sharing outside the domain, so public links can't be relied on to render.
+const driveMediaSrc = (fileId) => `/api/drive-stream?fileId=${fileId}`;
+
+// Fire-and-forget cleanup so an abandoned or deleted upload doesn't sit in
+// Drive forever taking up the team's space.
+function deleteDriveFile(fileIdOrLink) {
+  const fileId = fileIdOrLink && (fileIdOrLink.startsWith("http") ? driveFileId(fileIdOrLink) : fileIdOrLink);
+  if (!fileId) return;
+  fetch("/api/drive-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileId }),
+  }).catch(() => {});
+}
+
 function driveFileId(url) {
   const m = (url || "").match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/) || (url || "").match(/[?&]id=([a-zA-Z0-9_-]+)/);
   return m ? m[1] : null;
@@ -1797,7 +1835,7 @@ function uploadToDriveOnce(file, onProgress, profile) {
             reject(new Error(finalizeData.error || "Uploaded, but couldn't make it viewable."));
             return;
           }
-          resolve({ link: finalizeData.link, name: uploaded.name || file.name });
+          resolve({ link: finalizeData.link, name: uploaded.name || file.name, kind: fileKind(file) });
         } catch (err) {
           reject(err);
         }
@@ -1819,7 +1857,7 @@ function uploadToDriveOnce(file, onProgress, profile) {
             reject(new Error(finalizeData.error || "Network error during upload."));
             return;
           }
-          resolve({ link: finalizeData.link, name: file.name });
+          resolve({ link: finalizeData.link, name: file.name, kind: fileKind(file) });
         } catch {
           reject(new Error("Network error during upload."));
         }
@@ -1882,13 +1920,14 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   const [commentText, setCommentText] = useState("");
   const [localCaption, setLocalCaption] = useState("");
   const fileInputRef = useRef(null);
-  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
+  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "" });
   const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState("");
   const [uploadRetry, setUploadRetry] = useState("");
-  const [versionUploadTarget, setVersionUploadTarget] = useState(null); // content id with an active re-upload
+  const [versionUploadTarget, setVersionUploadTarget] = useState(null); // which item the picker was opened for
+  const [versionUploading, setVersionUploading] = useState(null); // which item has an upload actually in flight
   const [versionUploadProgress, setVersionUploadProgress] = useState(0);
   const [versionUploadRetry, setVersionUploadRetry] = useState("");
   const [versionUploadErrorFor, setVersionUploadErrorFor] = useState(null); // { id, message }
@@ -1897,13 +1936,23 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   const handleFileSelect = async (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
+    // Swapping the file before posting leaves the first one orphaned in Drive.
+    deleteDriveFile(form.link);
     setUploading(true);
     setUploadProgress(0);
     setUploadError("");
     setUploadRetry("");
     try {
       const result = await uploadToDrive(file, setUploadProgress, profile, (attempt, max) => setUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
-      setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, "") }));
+      setForm((f) => ({
+        ...f,
+        link: result.link,
+        mediaKind: result.kind,
+        // Uploading a photo against the default "Video / Reel" format would
+        // otherwise leave it mislabelled.
+        format: result.kind === "image" && f.format === "video" ? "photo" : f.format,
+        title: f.title || result.name.replace(/\.[^/.]+$/, ""),
+      }));
     } catch (err) {
       setUploadError(err.message || "Upload failed.");
     }
@@ -1924,7 +1973,14 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     ];
     saveData({ ...data, content: [item, ...data.content], notifications });
     leads.forEach((leadName) => sendPush(leadName, "New content uploaded", `${profile || "Someone"} uploaded: ${item.title}`, profile));
-    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "" });
+    setShowForm(false);
+  };
+  // Backing out of the form after uploading would otherwise leave the file
+  // sitting in Drive with nothing in the app pointing at it.
+  const cancelAdd = () => {
+    if (!uploading) deleteDriveFile(form.link);
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "" });
     setShowForm(false);
   };
   const makePublic = (id) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, visibility: "public" } : c)) });
@@ -1951,12 +2007,19 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     const file = e.target.files && e.target.files[0];
     const id = versionUploadTarget;
     if (!file || !id) return;
+    setVersionUploading(id);
     setVersionUploadProgress(0);
     setVersionUploadRetry("");
     try {
       const result = await uploadToDrive(file, setVersionUploadProgress, profile, (attempt, max) => setVersionUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
       const item = data.content.find((c) => c.id === id);
-      const versions = item.link ? [...(item.versions || []), { link: item.link, date: todayISO(), by: profile || "" }] : (item.versions || []);
+      if (!item) {
+        // Someone deleted the piece while this was uploading — don't strand the
+        // file in Drive with nothing pointing at it.
+        deleteDriveFile(result.link);
+        throw new Error("That piece was removed while this was uploading.");
+      }
+      const versions = item.link ? [...(item.versions || []), { link: item.link, date: todayISO(), by: profile || "", mediaKind: item.mediaKind || "video" }] : (item.versions || []);
       const leads = (data.profiles || []).filter((p) => p.isLead && p.name !== profile).map((p) => p.name);
       const notifications = [
         ...(data.notifications || []),
@@ -1964,18 +2027,25 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
       ];
       saveData({
         ...data,
-        content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, status: "review", versions, driveArchived: false } : c)),
+        content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, mediaKind: result.kind, status: "review", versions, driveArchived: false } : c)),
         notifications,
       });
       leads.forEach((leadName) => sendPush(leadName, "New version uploaded", `${profile || "Someone"} uploaded a new version: ${item.title}`, profile));
     } catch (err) {
       setVersionUploadErrorFor({ id, message: err.message || "Upload failed." });
     }
+    setVersionUploading(null);
     setVersionUploadTarget(null);
     setVersionUploadRetry("");
     e.target.value = "";
   };
-  const removeItem = (id) => saveData({ ...data, content: data.content.filter((c) => c.id !== id) });
+  // Deleting a piece takes its Drive files with it — current version and the
+  // whole history — so nothing is left orphaned in the team's folder.
+  const removeItem = (id) => {
+    const item = data.content.find((c) => c.id === id);
+    if (item) [item.link, ...(item.versions || []).map((v) => v.link)].forEach(deleteDriveFile);
+    saveData({ ...data, content: data.content.filter((c) => c.id !== id) });
+  };
   const addComment = (id) => {
     if (!commentText.trim()) return;
     const item = data.content.find((c) => c.id === id);
@@ -2028,6 +2098,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
           const FmtIcon = fmt.icon;
           const yt = youtubeId(c.link);
           const driveId = !yt ? driveFileId(c.link) : null;
+          const isPhoto = isPhotoItem(c);
           const isOpen = open === c.id;
           return (
             <div className="content-item" key={c.id}>
@@ -2036,6 +2107,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div className="content-title">{c.title}</div>
                   <div className="content-tags">
+                    {c.uploadedBy && <span className="pill" style={{ background: "var(--gold-soft)", color: "var(--gold)" }}>from {c.uploadedBy}</span>}
                     <span className="pill" style={{ background: fmt.color + "22", color: fmt.color }}>{fmt.label}</span>
                     <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.platform}</span>
                     <span className="pill" style={{ background: st.color + "22", color: st.color }}>{st.label}</span>
@@ -2110,14 +2182,16 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                     </div>
                   )}
                   {driveId && (
-                    // A native <video> streamed through our own server — not Google's Drive
-                    // preview iframe, which renders badly (looks zoomed/cropped) inside a
-                    // small mobile iframe and is heavy to load. This sizes itself to the
-                    // video's real shape automatically and only starts loading on tap.
+                    // Streamed through our own server rather than a Google preview
+                    // iframe or public link — the iframe renders badly on mobile, and
+                    // public drive.google.com links can't be relied on under this
+                    // team's Workspace sharing restrictions.
                     <div style={{ marginBottom: 16, borderRadius: 8, overflow: "hidden", background: "#000", display: "flex", justifyContent: "center" }}>
-                      {loadedVideo === c.id ? (
+                      {isPhoto ? (
+                        <img src={driveMediaSrc(driveId)} alt={c.title} style={{ width: "100%", maxHeight: "78vh", objectFit: "contain", display: "block" }} />
+                      ) : loadedVideo === c.id ? (
                         <video
-                          src={`/api/drive-stream?fileId=${driveId}`}
+                          src={driveMediaSrc(driveId)}
                           controls
                           autoPlay
                           playsInline
@@ -2146,13 +2220,13 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                       <button
                         type="button"
                         className="btn"
-                        style={{ width: "100%", justifyContent: "center", cursor: versionUploadTarget === c.id ? "default" : "pointer", opacity: versionUploadTarget === c.id ? 0.7 : 1 }}
+                        style={{ width: "100%", justifyContent: "center", cursor: versionUploading === c.id ? "default" : "pointer", opacity: versionUploading === c.id ? 0.7 : 1 }}
                         onClick={() => uploadNewVersion(c.id)}
-                        disabled={versionUploadTarget === c.id}
+                        disabled={versionUploading === c.id}
                       >
-                        <RotateCw size={13} /> {versionUploadTarget === c.id ? (versionUploadRetry || `Uploading… ${versionUploadProgress}%`) : "Upload a fixed version"}
+                        <RotateCw size={13} /> {versionUploading === c.id ? (versionUploadRetry || `Uploading… ${versionUploadProgress}%`) : "Upload a fixed version"}
                       </button>
-                      {versionUploadTarget === c.id && (
+                      {versionUploading === c.id && (
                         <div className="progress-track" style={{ marginTop: 8 }}>
                           <div className="progress-fill" style={{ width: `${versionUploadProgress}%`, background: "var(--gold)" }} />
                         </div>
@@ -2199,7 +2273,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
       <input ref={versionFileInputRef} type="file" accept="video/*,image/*" onChange={handleVersionFileSelect} style={{ display: "none" }} />
 
       {showForm && (
-        <Modal title="Add content for review" onClose={() => setShowForm(false)}>
+        <Modal title="Add content for review" onClose={cancelAdd}>
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Launch teaser — 15s cut" autoFocus /></div>
 
           <div className="field">
@@ -2247,7 +2321,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
             </div>
           </div>
           <div className="field"><label>Assignee</label><input value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Who made this" /></div>
-          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addItem} disabled={uploading}>Add</button></div>
+          <div className="modal-actions"><button className="btn" onClick={cancelAdd}>Cancel</button><button className="btn btn-gold" onClick={addItem} disabled={uploading}>Add</button></div>
         </Modal>
       )}
     </div>
@@ -2499,7 +2573,10 @@ function Meeting({ data, saveData, profile }) {
     setAttachRetry("");
     e.target.value = "";
   };
-  const removePendingAttachment = (fileId) => setPendingAttachments((list) => list.filter((a) => a.fileId !== fileId));
+  const removePendingAttachment = (fileId) => {
+    deleteDriveFile(fileId); // it was never posted, so don't leave it in Drive
+    setPendingAttachments((list) => list.filter((a) => a.fileId !== fileId));
+  };
 
   const addAgendaItem = () => {
     if (!agendaText.trim()) return;
@@ -2557,13 +2634,26 @@ function Meeting({ data, saveData, profile }) {
             <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addAgendaItem}><Plus size={14} /></button>
           </div>
           <div style={{ marginBottom: 16 }}>
-            {pendingAttachments.map((a) => (
-              <span key={a.fileId} className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)", marginRight: 6, marginBottom: 6 }}>
-                {a.kind === "image" ? <Image size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} /> : <Video size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />}
-                {a.name}
-                <button onClick={() => removePendingAttachment(a.fileId)} style={{ background: "none", border: "none", color: "var(--muted)", marginLeft: 5, cursor: "pointer", padding: 0 }}><X size={11} /></button>
-              </span>
-            ))}
+            {pendingAttachments.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                {pendingAttachments.map((a) => (
+                  <div key={a.fileId} style={{ position: "relative", width: 84 }}>
+                    {a.kind === "image" ? (
+                      <img src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                    ) : (
+                      <video src={driveMediaSrc(a.fileId)} controls preload="none" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "#000", display: "block" }} />
+                    )}
+                    <button
+                      onClick={() => removePendingAttachment(a.fileId)}
+                      style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", background: "var(--alert)", color: "#fff", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+                    >
+                      <X size={11} />
+                    </button>
+                    <div style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</div>
+                  </div>
+                ))}
+              </div>
+            )}
             <button
               type="button"
               className="btn"
@@ -2585,11 +2675,9 @@ function Meeting({ data, saveData, profile }) {
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
                     {m.attachments.map((a) => (
                       a.kind === "image" ? (
-                        <img key={a.fileId} src={`https://drive.google.com/thumbnail?id=${a.fileId}&sz=w300`} alt={a.name} style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)" }} />
+                        <img key={a.fileId} src={driveMediaSrc(a.fileId)} alt={a.name} style={{ width: 120, maxHeight: 160, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)" }} />
                       ) : (
-                        <a key={a.fileId} href={`https://drive.google.com/file/d/${a.fileId}/view`} target="_blank" rel="noopener noreferrer" className="pill" style={{ background: "var(--panel-raised)", color: "var(--gold)", textDecoration: "none" }}>
-                          <Video size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} /> {a.name}
-                        </a>
+                        <video key={a.fileId} src={driveMediaSrc(a.fileId)} controls preload="none" style={{ width: 180, maxHeight: 160, borderRadius: 6, background: "#000" }} />
                       )
                     ))}
                   </div>
@@ -2772,12 +2860,14 @@ function ApprovedQueue({ data, saveData, profile }) {
               {isOpen && (
                 <div className="content-body">
                   {c.caption && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>{c.caption}</div>}
-                  {(yt || driveId) && (
+                  {driveId && isPhotoItem(c) ? (
+                    <img src={driveMediaSrc(driveId)} alt={c.title} style={{ width: "100%", maxHeight: "60vh", objectFit: "contain", borderRadius: 8, background: "#000", display: "block" }} />
+                  ) : (yt || driveId) && (
                     <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 4, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
                       {loadedVideo === c.id ? (
                         <>
                           {yt && <iframe src={`https://www.youtube.com/embed/${yt}`} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }} allowFullScreen title={c.title} />}
-                          {!yt && driveId && <video src={`/api/drive-stream?fileId=${driveId}`} controls autoPlay playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "#000" }} />}
+                          {!yt && driveId && <video src={driveMediaSrc(driveId)} controls autoPlay playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "#000" }} />}
                         </>
                       ) : (
                         <button onClick={() => setLoadedVideo(c.id)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -2884,7 +2974,11 @@ function Guidelines({ data, saveData, profile }) {
   const addMoodItem = (fields) => {
     saveData({ ...data, moodboard: [{ id: uid(), addedBy: profile || "", date: todayISO(), ...fields }, ...moodboard] });
   };
-  const removeMoodItem = (id) => saveData({ ...data, moodboard: moodboard.filter((m) => m.id !== id) });
+  const removeMoodItem = (id) => {
+    const item = moodboard.find((m) => m.id === id);
+    if (item && item.fileId) deleteDriveFile(item.fileId);
+    saveData({ ...data, moodboard: moodboard.filter((m) => m.id !== id) });
+  };
 
   const submitMoodForm = () => {
     if (moodType === "color") {
@@ -2926,7 +3020,7 @@ function Guidelines({ data, saveData, profile }) {
             {moodboard.map((m) => (
               <div key={m.id} className="card" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {m.type === "image" && m.fileId && (
-                  <img src={`https://drive.google.com/thumbnail?id=${m.fileId}&sz=w500`} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
+                  <img src={driveMediaSrc(m.fileId)} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
                 )}
                 {m.type === "color" && (
                   <div style={{ width: "100%", aspectRatio: "1 / 1", background: m.hex }} />
