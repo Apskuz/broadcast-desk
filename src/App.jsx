@@ -2442,9 +2442,16 @@ function IdeaBank({ data, saveData, profile }) {
     if (!form.title.trim()) return;
     const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
     const count = boardIdeas.length;
-    const item = { id: uid(), votes: 0, ...form, tags, folderId: openFolderId, x: 40 + (count % 6) * 170, y: 40 + Math.floor(count / 6) * 150 };
+    const item = { id: uid(), votes: 0, ...form, tags, attachments: pendingIdeaAttachments, folderId: openFolderId, x: 40 + (count % 6) * 170, y: 40 + Math.floor(count / 6) * 150 };
     saveData({ ...data, ideas: [item, ...ideas] });
     setForm({ title: "", description: "", tags: "", author: form.author, link: "", color: IDEA_COLORS[(count + 1) % IDEA_COLORS.length] });
+    setPendingIdeaAttachments([]);
+    setShowForm(false);
+  };
+  // Backing out after attaching would strand those files in Drive.
+  const cancelAddIdea = () => {
+    pendingIdeaAttachments.forEach((a) => deleteDriveFile(a.fileId));
+    setPendingIdeaAttachments([]);
     setShowForm(false);
   };
   const vote = (id) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
@@ -2462,14 +2469,28 @@ function IdeaBank({ data, saveData, profile }) {
   const [ideaAttachProgress, setIdeaAttachProgress] = useState(0);
   const [ideaAttachError, setIdeaAttachError] = useState("");
   const [lightbox, setLightbox] = useState(null);
+  const [pendingIdeaAttachments, setPendingIdeaAttachments] = useState([]);
 
   const handleIdeaFileSelect = async (e) => {
     const file = e.target.files && e.target.files[0];
     const id = openIdeaId;
-    if (!file || !id) return;
+    if (!file) return;
     setIdeaAttaching(true);
     setIdeaAttachProgress(0);
     setIdeaAttachError("");
+    // Attaching while writing a new idea holds the file until the idea is
+    // actually created; attaching from an open idea goes straight onto it.
+    if (!id) {
+      try {
+        const result = await uploadToDrive(file, setIdeaAttachProgress, profile);
+        setPendingIdeaAttachments((list) => [...list, { fileId: driveFileId(result.link), name: result.name, kind: result.kind }]);
+      } catch (err) {
+        setIdeaAttachError(err.message || "Upload failed.");
+      }
+      setIdeaAttaching(false);
+      e.target.value = "";
+      return;
+    }
     try {
       const result = await uploadToDrive(file, setIdeaAttachProgress, profile);
       const fileId = driveFileId(result.link);
@@ -2693,8 +2714,13 @@ function IdeaBank({ data, saveData, profile }) {
                   i.attachments[0].kind === "image" ? (
                     <img src={driveThumbSrc(i.attachments[0].fileId)} alt="" draggable={false} style={{ width: "100%", height: 66, objectFit: "cover", borderRadius: 5, marginBottom: 7, display: "block" }} />
                   ) : (
-                    <div style={{ width: "100%", height: 66, borderRadius: 5, marginBottom: 7, background: "rgba(0,0,0,0.25)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <Play size={18} fill="#22232b" color="#22232b" />
+                    <div style={{ position: "relative", width: "100%", height: 66, borderRadius: 5, marginBottom: 7, overflow: "hidden", background: "rgba(0,0,0,0.35)" }}>
+                      <img src={driveThumbSrc(i.attachments[0].fileId)} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <span style={{ width: 26, height: 26, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Play size={13} fill="#fff" color="#fff" />
+                        </span>
+                      </span>
                     </div>
                   )
                 )}
@@ -2731,9 +2757,46 @@ function IdeaBank({ data, saveData, profile }) {
       )}
 
       {showForm && (
-        <Modal title="Add an idea" onClose={() => setShowForm(false)}>
+        <Modal title="Add an idea" onClose={cancelAddIdea}>
           <div className="field"><label>Idea</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Myth-busting series" autoFocus /></div>
           <div className="field"><label>Description</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What's the concept?" /></div>
+
+          <div className="field">
+            <label>Pictures & videos</label>
+            {pendingIdeaAttachments.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                {pendingIdeaAttachments.map((a) => (
+                  <div key={a.fileId} style={{ position: "relative" }}>
+                    <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                    {a.kind !== "image" && (
+                      <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                        <span style={{ width: 28, height: 28, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Play size={13} fill="#fff" color="#fff" />
+                        </span>
+                      </span>
+                    )}
+                    <button
+                      onClick={() => { deleteDriveFile(a.fileId); setPendingIdeaAttachments((list) => list.filter((x) => x.fileId !== a.fileId)); }}
+                      style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", background: "var(--alert)", color: "#fff", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              className="btn"
+              style={{ padding: "6px 10px", fontSize: 12 }}
+              onClick={() => ideaFileInputRef.current && ideaFileInputRef.current.click()}
+              disabled={ideaAttaching}
+            >
+              <Upload size={12} /> {ideaAttaching ? `Uploading… ${ideaAttachProgress}%` : "Attach a picture or video"}
+            </button>
+            {ideaAttachError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{ideaAttachError}</div>}
+          </div>
+
           <div className="field"><label>Video or reference link (optional)</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="Paste a YouTube, Drive, or inspiration link" /></div>
           <div className="field-row">
             <div className="field"><label>Tags (comma separated)</label><input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="Reels, Series" /></div>
@@ -2747,7 +2810,7 @@ function IdeaBank({ data, saveData, profile }) {
               ))}
             </div>
           </div>
-          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addIdea}>Add idea</button></div>
+          <div className="modal-actions"><button className="btn" onClick={cancelAddIdea}>Cancel</button><button className="btn btn-gold" onClick={addIdea} disabled={ideaAttaching}>Add idea</button></div>
         </Modal>
       )}
 
@@ -2778,9 +2841,12 @@ function IdeaBank({ data, saveData, profile }) {
                       {a.kind === "image" ? (
                         <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 92, height: 92, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                       ) : (
-                        <div style={{ width: 92, height: 92, borderRadius: 6, background: "var(--panel-raised)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          <span style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            <Play size={14} fill="#12141B" color="#12141B" />
+                        <div style={{ position: "relative", width: 92, height: 92, borderRadius: 6, overflow: "hidden", background: "var(--panel-raised)" }}>
+                          <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                          <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <span style={{ width: 30, height: 30, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                              <Play size={14} fill="#fff" color="#fff" />
+                            </span>
                           </span>
                         </div>
                       )}
@@ -2804,7 +2870,6 @@ function IdeaBank({ data, saveData, profile }) {
             >
               <Upload size={12} /> {ideaAttaching ? `Uploading… ${ideaAttachProgress}%` : "Attach a picture or video"}
             </button>
-            <input ref={ideaFileInputRef} type="file" accept="video/*,image/*" onChange={handleIdeaFileSelect} disabled={ideaAttaching} style={{ display: "none" }} />
             {ideaAttachError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{ideaAttachError}</div>}
           </div>
 
@@ -2835,6 +2900,9 @@ function IdeaBank({ data, saveData, profile }) {
           </div>
         </Modal>
       )}
+
+      {/* One picker serves both attaching to an open idea and attaching while writing a new one. */}
+      <input ref={ideaFileInputRef} type="file" accept="video/*,image/*" onChange={handleIdeaFileSelect} disabled={ideaAttaching} style={{ display: "none" }} />
 
       {lightbox && <MediaLightbox fileId={lightbox.fileId} kind={lightbox.kind} name={lightbox.name} onClose={() => setLightbox(null)} />}
     </div>
@@ -2985,9 +3053,12 @@ function Meeting({ data, saveData, profile }) {
                         {a.kind === "image" ? (
                           <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                         ) : (
-                          <div style={{ width: 120, height: 120, borderRadius: 6, background: "var(--panel-raised)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            <span style={{ width: 38, height: 38, borderRadius: "50%", background: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                              <Play size={16} fill="#12141B" color="#12141B" />
+                          <div style={{ position: "relative", width: 120, height: 120, borderRadius: 6, overflow: "hidden", background: "var(--panel-raised)" }}>
+                            <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                            <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                              <span style={{ width: 36, height: 36, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                <Play size={16} fill="#fff" color="#fff" />
+                              </span>
                             </span>
                           </div>
                         )}

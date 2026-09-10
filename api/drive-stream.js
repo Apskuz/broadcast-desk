@@ -42,6 +42,9 @@ export default async function handler(req, res) {
     if (thumb) {
       const served = await serveThumbnail(accessToken, fileId, size || "s400", res, CACHE);
       if (served) return;
+      // No preview available — stop here rather than falling through, or an
+      // <img> asking for a thumbnail would quietly pull down a whole video.
+      return res.status(404).json({ error: "No thumbnail for this file" });
     }
 
     const headers = { Authorization: `Bearer ${accessToken}` };
