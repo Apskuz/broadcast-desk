@@ -1639,10 +1639,12 @@ function driveEmbedUrl(url) {
 }
 
 // Uploads a file straight to Google Drive from the browser (never through Vercel's own
-// server, so large videos don't hit the ~4.5MB serverless request limit). Two small
-// backend calls bracket the real upload: one to get an authorized upload slot, one to
-// make the finished file viewable by the team.
-function uploadToDrive(file, onProgress, profile) {
+// server, so large videos don't hit the ~4.5MB serverless request limit — this is also
+// the fastest a browser upload can go with free tools: Google's upload API has no way
+// to split one file across parallel connections, so going straight there in one stream
+// is already the shortest path). Two small backend calls bracket the real upload: one
+// to get an authorized upload slot, one to make the finished file viewable by the team.
+function uploadToDriveOnce(file, onProgress, profile) {
   return new Promise(async (resolve, reject) => {
     try {
       const startRes = await fetch("/api/drive-upload-start", {
@@ -1712,6 +1714,32 @@ function uploadToDrive(file, onProgress, profile) {
   });
 }
 
+// A flaky mobile connection shouldn't mean starting a big upload over by hand —
+// this retries the whole thing a couple of times on a genuine failure (the
+// CORS-masked "error" that actually succeeded is already recovered from inside
+// uploadToDriveOnce, so a retry here means it really didn't go through).
+function uploadToDrive(file, onProgress, profile, onRetry) {
+  return new Promise(async (resolve, reject) => {
+    const maxAttempts = 3;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const result = await uploadToDriveOnce(file, onProgress, profile);
+        resolve(result);
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          if (onRetry) onRetry(attempt + 1, maxAttempts);
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+          if (onProgress) onProgress(0);
+        }
+      }
+    }
+    reject(lastErr);
+  });
+}
+
 function ContentReview({ data, saveData, profile, isEmployer }) {
   const [showForm, setShowForm] = useState(false);
   const [open, setOpen] = useState(null);
@@ -1724,6 +1752,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState("");
+  const [uploadRetry, setUploadRetry] = useState("");
 
   const handleFileSelect = async (e) => {
     const file = e.target.files && e.target.files[0];
@@ -1731,13 +1760,15 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     setUploading(true);
     setUploadProgress(0);
     setUploadError("");
+    setUploadRetry("");
     try {
-      const result = await uploadToDrive(file, setUploadProgress, profile);
+      const result = await uploadToDrive(file, setUploadProgress, profile, (attempt, max) => setUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
       setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, "") }));
     } catch (err) {
       setUploadError(err.message || "Upload failed.");
     }
     setUploading(false);
+    setUploadRetry("");
     e.target.value = "";
   };
 
@@ -1979,7 +2010,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
               onClick={() => fileInputRef.current && fileInputRef.current.click()}
               disabled={uploading}
             >
-              <Upload size={14} /> {uploading ? `Uploading… ${uploadProgress}%` : "Choose a file"}
+              <Upload size={14} /> {uploading ? (uploadRetry || `Uploading… ${uploadProgress}%`) : "Choose a file"}
             </button>
             <input
               ref={fileInputRef}
@@ -2289,6 +2320,7 @@ function Guidelines({ data, saveData, profile }) {
   const [moodUploading, setMoodUploading] = useState(false);
   const [moodUploadProgress, setMoodUploadProgress] = useState(0);
   const [moodUploadError, setMoodUploadError] = useState("");
+  const [moodUploadRetry, setMoodUploadRetry] = useState("");
   const moodFileInputRef = useRef(null);
 
   // Loads a font's real face from Google Fonts so its card previews accurately —
@@ -2312,8 +2344,9 @@ function Guidelines({ data, saveData, profile }) {
     setMoodUploading(true);
     setMoodUploadProgress(0);
     setMoodUploadError("");
+    setMoodUploadRetry("");
     try {
-      const result = await uploadToDrive(file, setMoodUploadProgress, profile);
+      const result = await uploadToDrive(file, setMoodUploadProgress, profile, (attempt, max) => setMoodUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
       addMoodItem({ type: "image", fileId: driveFileId(result.link), label: moodForm.label });
       setShowMoodForm(false);
       setMoodForm({ label: "", hex: "#C9A24B", font: "", note: "", link: "" });
@@ -2321,6 +2354,7 @@ function Guidelines({ data, saveData, profile }) {
       setMoodUploadError(err.message || "Upload failed.");
     }
     setMoodUploading(false);
+    setMoodUploadRetry("");
     e.target.value = "";
   };
 
@@ -2462,7 +2496,7 @@ function Guidelines({ data, saveData, profile }) {
                 onClick={() => moodFileInputRef.current && moodFileInputRef.current.click()}
                 disabled={moodUploading}
               >
-                <Upload size={14} /> {moodUploading ? `Uploading… ${moodUploadProgress}%` : "Choose a photo"}
+                <Upload size={14} /> {moodUploading ? (moodUploadRetry || `Uploading… ${moodUploadProgress}%`) : "Choose a photo"}
               </button>
               <input ref={moodFileInputRef} type="file" accept="image/*" onChange={handleMoodFileSelect} disabled={moodUploading} style={{ display: "none" }} />
               {moodUploading && (
