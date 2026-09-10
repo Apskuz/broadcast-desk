@@ -2291,18 +2291,60 @@ function IdeaBank({ data, saveData }) {
 function Meeting({ data, saveData, profile }) {
   const [agendaText, setAgendaText] = useState("");
   const [announceText, setAnnounceText] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState([]); // [{ fileId, name, kind }]
+  const [attaching, setAttaching] = useState(false);
+  const [attachProgress, setAttachProgress] = useState(0);
+  const [attachRetry, setAttachRetry] = useState("");
+  const [attachError, setAttachError] = useState("");
+  const agendaFileInputRef = useRef(null);
 
   const meetingItems = data.meetingItems || [];
   const announcements = data.announcements || [];
 
+  const handleAgendaFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setAttaching(true);
+    setAttachProgress(0);
+    setAttachRetry("");
+    setAttachError("");
+    try {
+      const result = await uploadToDrive(file, setAttachProgress, profile, (attempt, max) => setAttachRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
+      const fileId = driveFileId(result.link);
+      setPendingAttachments((list) => [...list, { fileId, name: result.name, kind: file.type.startsWith("image/") ? "image" : "video" }]);
+    } catch (err) {
+      setAttachError(err.message || "Attach failed.");
+    }
+    setAttaching(false);
+    setAttachRetry("");
+    e.target.value = "";
+  };
+  const removePendingAttachment = (fileId) => setPendingAttachments((list) => list.filter((a) => a.fileId !== fileId));
+
   const addAgendaItem = () => {
     if (!agendaText.trim()) return;
-    saveData({ ...data, meetingItems: [{ id: uid(), text: agendaText.trim(), author: profile || "Team", date: todayISO(), done: false }, ...meetingItems] });
+    saveData({ ...data, meetingItems: [{ id: uid(), text: agendaText.trim(), author: profile || "Team", date: todayISO(), done: false, attachments: pendingAttachments }, ...meetingItems] });
     setAgendaText("");
+    setPendingAttachments([]);
+  };
+  // Deleting a topic (one-off, or the whole "clear discussed" sweep at the end
+  // of a meeting) also deletes whatever it had attached, so Drive doesn't fill
+  // up with meeting screenshots and clips nobody needs after the fact.
+  const deleteAttachments = (items) => {
+    items.forEach((m) => (m.attachments || []).forEach((a) => {
+      if (a.fileId) fetch("/api/drive-delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId: a.fileId }) }).catch(() => {});
+    }));
   };
   const toggleAgendaDone = (id) => saveData({ ...data, meetingItems: meetingItems.map((m) => (m.id === id ? { ...m, done: !m.done } : m)) });
-  const removeAgendaItem = (id) => saveData({ ...data, meetingItems: meetingItems.filter((m) => m.id !== id) });
-  const clearDiscussed = () => saveData({ ...data, meetingItems: meetingItems.filter((m) => !m.done) });
+  const removeAgendaItem = (id) => {
+    const item = meetingItems.find((m) => m.id === id);
+    if (item) deleteAttachments([item]);
+    saveData({ ...data, meetingItems: meetingItems.filter((m) => m.id !== id) });
+  };
+  const clearDiscussed = () => {
+    deleteAttachments(meetingItems.filter((m) => m.done));
+    saveData({ ...data, meetingItems: meetingItems.filter((m) => !m.done) });
+  };
 
   const addAnnouncement = () => {
     if (!announceText.trim()) return;
@@ -2324,14 +2366,55 @@ function Meeting({ data, saveData, profile }) {
       <div className="grid two-col">
         <div className="card">
           <div className="section-title"><ListChecks size={16} color="var(--gold)" /> Agenda for next meeting</div>
-          <div className="comment-form" style={{ marginBottom: 16 }}>
-            <textarea placeholder="Something to bring up next meeting…" value={agendaText} onChange={(e) => setAgendaText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addAgendaItem(); } }} />
+          <div className="comment-form" style={{ marginBottom: 10 }}>
+            <textarea
+              placeholder="Something to bring up next meeting… (Enter for a new line, Ctrl+Enter to post)"
+              value={agendaText}
+              onChange={(e) => setAgendaText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addAgendaItem(); } }}
+              style={{ minHeight: 70 }}
+            />
             <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={addAgendaItem}><Plus size={14} /></button>
           </div>
+          <div style={{ marginBottom: 16 }}>
+            {pendingAttachments.map((a) => (
+              <span key={a.fileId} className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)", marginRight: 6, marginBottom: 6 }}>
+                {a.kind === "image" ? <Image size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} /> : <Video size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />}
+                {a.name}
+                <button onClick={() => removePendingAttachment(a.fileId)} style={{ background: "none", border: "none", color: "var(--muted)", marginLeft: 5, cursor: "pointer", padding: 0 }}><X size={11} /></button>
+              </span>
+            ))}
+            <button
+              type="button"
+              className="btn"
+              style={{ padding: "6px 10px", fontSize: 12, cursor: attaching ? "default" : "pointer", opacity: attaching ? 0.7 : 1 }}
+              onClick={() => agendaFileInputRef.current && agendaFileInputRef.current.click()}
+              disabled={attaching}
+            >
+              <Upload size={12} /> {attaching ? (attachRetry || `Uploading… ${attachProgress}%`) : "Attach a photo or video"}
+            </button>
+            <input ref={agendaFileInputRef} type="file" accept="video/*,image/*" onChange={handleAgendaFileSelect} disabled={attaching} style={{ display: "none" }} />
+            {attachError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{attachError}</div>}
+          </div>
           {sortedAgenda.map((m) => (
-            <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
-              <button className={`check-btn ${m.done ? "done" : ""}`} onClick={() => toggleAgendaDone(m.id)}><CheckCircle2 size={12} /></button>
-              <div style={{ flex: 1, fontSize: 13, textDecoration: m.done ? "line-through" : "none", opacity: m.done ? 0.55 : 1 }}>{m.text}</div>
+            <div key={m.id} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+              <button className={`check-btn ${m.done ? "done" : ""}`} style={{ marginTop: 2 }} onClick={() => toggleAgendaDone(m.id)}><CheckCircle2 size={12} /></button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, whiteSpace: "pre-wrap", textDecoration: m.done ? "line-through" : "none", opacity: m.done ? 0.55 : 1 }}>{m.text}</div>
+                {m.attachments && m.attachments.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                    {m.attachments.map((a) => (
+                      a.kind === "image" ? (
+                        <img key={a.fileId} src={`https://drive.google.com/thumbnail?id=${a.fileId}&sz=w300`} alt={a.name} style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)" }} />
+                      ) : (
+                        <a key={a.fileId} href={`https://drive.google.com/file/d/${a.fileId}/view`} target="_blank" rel="noopener noreferrer" className="pill" style={{ background: "var(--panel-raised)", color: "var(--gold)", textDecoration: "none" }}>
+                          <Video size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} /> {a.name}
+                        </a>
+                      )
+                    ))}
+                  </div>
+                )}
+              </div>
               <span style={{ fontSize: 10.5, color: "var(--muted)" }}>{m.author}</span>
               <button className="icon-btn" onClick={() => removeAgendaItem(m.id)}><Trash2 size={13} /></button>
             </div>
