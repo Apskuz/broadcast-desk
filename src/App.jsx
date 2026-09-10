@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
@@ -3016,6 +3017,8 @@ function TeamManage({ data, saveData }) {
 
 function NotificationBell({ data, saveData, profile, setView }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
+  const btnRef = useRef(null);
   const all = data.notifications || [];
   const mine = all.filter((n) => n.toProfile === profile || n.toProfile === null).sort((a, b) => b.id.localeCompare(a.id));
   const unread = mine.filter((n) => !(n.readBy || []).includes(profile));
@@ -3032,38 +3035,56 @@ function NotificationBell({ data, saveData, profile, setView }) {
     setOpen(false);
   };
 
+  // The dropdown used to live inside the sidebar, but the sidebar's slide-in
+  // CSS transform turns it into the positioning/clipping boundary for anything
+  // absolutely positioned inside it — so the panel was getting trapped there
+  // instead of floating over the page. Portal it to <body> and position it from
+  // the button's real on-screen location instead.
+  const toggle = () => {
+    if (!open && btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      const width = Math.min(300, window.innerWidth - 32);
+      setPos({ top: r.bottom + 6, left: Math.min(r.left, window.innerWidth - width - 16), width });
+    }
+    setOpen((o) => !o);
+  };
+
   const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send };
 
   return (
-    <div style={{ position: "relative" }}>
-      <button className="btn-ghost btn" style={{ position: "relative", width: "100%", justifyContent: "flex-start", gap: 10 }} onClick={() => setOpen(!open)}>
+    <div>
+      <button ref={btnRef} className="btn-ghost btn" style={{ position: "relative", width: "100%", justifyContent: "flex-start", gap: 10 }} onClick={toggle}>
         <Bell size={16} />
         Notifications
         {unread.length > 0 && (
           <span style={{ marginLeft: "auto", background: "var(--alert)", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 6px" }}>{unread.length}</span>
         )}
       </button>
-      {open && (
-        <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 6, width: "min(300px, calc(100vw - 48px))", maxHeight: 360, overflowY: "auto", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)", zIndex: 50, padding: 8 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 6px 8px" }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Notifications</span>
-            {unread.length > 0 && <button onClick={markAllRead} style={{ fontSize: 10.5, color: "var(--gold)", background: "none", border: "none" }}>Mark all read</button>}
+      {open && pos && createPortal(
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 99 }} onClick={() => setOpen(false)} />
+          <div style={{ position: "fixed", top: pos.top, left: pos.left, width: pos.width, maxHeight: "min(360px, 70vh)", overflowY: "auto", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)", zIndex: 100, padding: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 6px 8px" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Notifications</span>
+              {unread.length > 0 && <button onClick={markAllRead} style={{ fontSize: 10.5, color: "var(--gold)", background: "none", border: "none" }}>Mark all read</button>}
+            </div>
+            {unread.length === 0 && <div className="empty" style={{ padding: "16px 6px" }}>Nothing new.</div>}
+            {unread.slice(0, 25).map((n) => {
+              const Icon = ICONS[n.type] || Bell;
+              return (
+                <button key={n.id} onClick={() => openNotif(n)} style={{ display: "flex", gap: 9, width: "100%", textAlign: "left", padding: "8px 6px", borderRadius: 7, background: "var(--gold-soft)", border: "none", marginBottom: 3 }}>
+                  <span style={{ width: 26, height: 26, borderRadius: 7, background: "var(--panel)", color: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon size={13} /></span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.35 }}>{n.text}</div>
+                    <div style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2 }}>{fmtDate(n.date)}</div>
+                  </div>
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)", flexShrink: 0, marginTop: 5 }} />
+                </button>
+              );
+            })}
           </div>
-          {unread.length === 0 && <div className="empty" style={{ padding: "16px 6px" }}>Nothing new.</div>}
-          {unread.slice(0, 25).map((n) => {
-            const Icon = ICONS[n.type] || Bell;
-            return (
-              <button key={n.id} onClick={() => openNotif(n)} style={{ display: "flex", gap: 9, width: "100%", textAlign: "left", padding: "8px 6px", borderRadius: 7, background: "var(--gold-soft)", border: "none", marginBottom: 3 }}>
-                <span style={{ width: 26, height: 26, borderRadius: 7, background: "var(--panel)", color: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon size={13} /></span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.35 }}>{n.text}</div>
-                  <div style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2 }}>{fmtDate(n.date)}</div>
-                </div>
-                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)", flexShrink: 0, marginTop: 5 }} />
-              </button>
-            );
-          })}
-        </div>
+        </>,
+        document.body
       )}
     </div>
   );
