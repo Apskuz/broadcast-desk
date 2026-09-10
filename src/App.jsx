@@ -1611,25 +1611,6 @@ function driveEmbedUrl(url) {
   return id ? `https://drive.google.com/file/d/${id}/preview` : null;
 }
 
-// Reads a video file's real width/height before upload, so the preview player
-// can be shown at its actual shape instead of a hard-coded 16:9 box — most of
-// this team's content is vertical (Reels/Stories), which looked zoomed/cropped
-// when forced into a landscape frame.
-function readVideoAspect(file) {
-  return new Promise((resolve) => {
-    if (!file.type || !file.type.startsWith("video/")) { resolve(null); return; }
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.onloadedmetadata = () => {
-      const ratio = video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : null;
-      URL.revokeObjectURL(video.src);
-      resolve(ratio);
-    };
-    video.onerror = () => resolve(null);
-    video.src = URL.createObjectURL(file);
-  });
-}
-
 // Uploads a file straight to Google Drive from the browser (never through Vercel's own
 // server, so large videos don't hit the ~4.5MB serverless request limit). Two small
 // backend calls bracket the real upload: one to get an authorized upload slot, one to
@@ -1708,7 +1689,7 @@ function ContentReview({ data, saveData }) {
   const [open, setOpen] = useState(null);
   const [loadedVideo, setLoadedVideo] = useState(null); // content id whose embed the user tapped play on
   const [commentText, setCommentText] = useState("");
-  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", aspect: null });
+  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
   const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -1721,8 +1702,8 @@ function ContentReview({ data, saveData }) {
     setUploadProgress(0);
     setUploadError("");
     try {
-      const [result, aspect] = await Promise.all([uploadToDrive(file, setUploadProgress), readVideoAspect(file)]);
-      setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, ""), aspect }));
+      const result = await uploadToDrive(file, setUploadProgress);
+      setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, "") }));
     } catch (err) {
       setUploadError(err.message || "Upload failed.");
     }
@@ -1734,7 +1715,7 @@ function ContentReview({ data, saveData }) {
     if (!form.title.trim()) return;
     const item = { id: uid(), status: "review", comments: [], caption: "", ...form };
     saveData({ ...data, content: [item, ...data.content] });
-    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", aspect: null });
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
     setShowForm(false);
   };
   const updateStatus = (id, status) => {
@@ -1789,7 +1770,7 @@ function ContentReview({ data, saveData }) {
           const fmt = CONTENT_FORMATS.find((f) => f.id === c.format) || CONTENT_FORMATS[0];
           const FmtIcon = fmt.icon;
           const yt = youtubeId(c.link);
-          const drive = !yt ? driveEmbedUrl(c.link) : null;
+          const driveId = !yt ? driveFileId(c.link) : null;
           const isOpen = open === c.id;
           return (
             <div className="content-item" key={c.id}>
@@ -1843,20 +1824,18 @@ function ContentReview({ data, saveData }) {
                     <textarea value={c.caption || ""} onChange={(e) => updateCaption(c.id, e.target.value)} placeholder="The caption or copy that shipped with this piece…" />
                   </div>
 
-                  {(yt || drive) && (
-                    <div style={{ position: "relative", width: "100%", maxWidth: c.aspect && c.aspect < 1 ? 340 : "100%", margin: "0 auto 16px", aspectRatio: c.aspect ? String(c.aspect) : "16 / 9", maxHeight: "78vh", borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
+                  {yt && (
+                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
                       {loadedVideo === c.id ? (
                         <iframe
-                          src={yt ? `https://www.youtube.com/embed/${yt}` : drive}
+                          src={`https://www.youtube.com/embed/${yt}`}
                           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
                           allowFullScreen title={c.title}
                         />
                       ) : (
-                        // Google's Drive preview player is heavy to load — only mount it once
-                        // tapped, so opening an item with a video doesn't feel sluggish on phones.
                         <button
                           onClick={() => setLoadedVideo(c.id)}
-                          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, color: "var(--muted)" }}
+                          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
                         >
                           <span style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--gold)", color: "#12141B", display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <Play size={18} fill="#12141B" />
@@ -1865,7 +1844,33 @@ function ContentReview({ data, saveData }) {
                       )}
                     </div>
                   )}
-                  {!yt && !drive && c.driveArchived && (
+                  {driveId && (
+                    // A native <video> streamed through our own server — not Google's Drive
+                    // preview iframe, which renders badly (looks zoomed/cropped) inside a
+                    // small mobile iframe and is heavy to load. This sizes itself to the
+                    // video's real shape automatically and only starts loading on tap.
+                    <div style={{ marginBottom: 16, borderRadius: 8, overflow: "hidden", background: "#000", display: "flex", justifyContent: "center" }}>
+                      {loadedVideo === c.id ? (
+                        <video
+                          src={`/api/drive-stream?fileId=${driveId}`}
+                          controls
+                          autoPlay
+                          playsInline
+                          style={{ width: "100%", maxHeight: "78vh", display: "block" }}
+                        />
+                      ) : (
+                        <button
+                          onClick={() => setLoadedVideo(c.id)}
+                          style={{ width: "100%", aspectRatio: "16 / 9", border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+                        >
+                          <span style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--gold)", color: "#12141B", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Play size={18} fill="#12141B" />
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {!yt && !driveId && c.driveArchived && (
                     <div className="empty" style={{ padding: "10px 0", marginBottom: 8 }}>
                       Published — file removed from Drive to save space.
                     </div>
