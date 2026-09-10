@@ -654,7 +654,7 @@ function MediaLightbox({ fileId, kind, name, onClose }) {
     >
       <button className="icon-btn" onClick={onClose} style={{ position: "absolute", top: 16, right: 16, color: "var(--text)" }}><X size={22} /></button>
       {kind === "image" ? (
-        <img src={driveMediaSrc(fileId)} alt={name || ""} onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }} />
+        <img src={driveThumbSrc(fileId, "s1600")} alt={name || ""} onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }} />
       ) : (
         <video src={driveMediaSrc(fileId)} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", borderRadius: 8, background: "#000" }} />
       )}
@@ -1903,8 +1903,35 @@ function uploadToDriveOnce(file, onProgress, profile) {
 // this retries the whole thing a couple of times on a genuine failure (the
 // CORS-masked "error" that actually succeeded is already recovered from inside
 // uploadToDriveOnce, so a retry here means it really didn't go through).
-function uploadToDrive(file, onProgress, profile, onRetry) {
+// A photo straight off a phone is often 4-8MB at a resolution far beyond what
+// anyone views it at. Shrinking it before upload cuts the storage it takes and
+// the data every single future view costs, which is what actually adds up.
+// Never blocks an upload: if anything here fails, the original goes as-is.
+async function shrinkImage(file, maxDim = 1920, quality = 0.85) {
+  if (!file.type || !file.type.startsWith("image/")) return file;
+  if (file.type === "image/gif") return file; // resizing would drop the animation
+  if (file.size < 400 * 1024) return file; // already small, leave it alone
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const w = Math.round(bitmap.width * scale);
+    const h = Math.round(bitmap.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+    if (bitmap.close) bitmap.close();
+    const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", quality));
+    if (!blob || blob.size >= file.size) return file; // no gain, keep the original
+    return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+  } catch {
+    return file;
+  }
+}
+
+function uploadToDrive(originalFile, onProgress, profile, onRetry) {
   return new Promise(async (resolve, reject) => {
+    const file = await shrinkImage(originalFile);
     const maxAttempts = 3;
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1956,6 +1983,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState("");
   const [uploadRetry, setUploadRetry] = useState("");
+  const [sizeNotice, setSizeNotice] = useState("");
   const [versionUploadTarget, setVersionUploadTarget] = useState(null); // which item the picker was opened for
   const [versionUploading, setVersionUploading] = useState(null); // which item has an upload actually in flight
   const [versionUploadProgress, setVersionUploadProgress] = useState(0);
@@ -1968,6 +1996,13 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     if (!file) return;
     // Swapping the file before posting leaves the first one orphaned in Drive.
     deleteDriveFile(form.link);
+    // Not a blocker, just worth knowing: a huge clip costs that much again
+    // every time someone watches it.
+    setSizeNotice(
+      file.size > 150 * 1024 * 1024
+        ? `That's a ${Math.round(file.size / 1e6)}MB file. It'll upload fine, but exporting at 1080p instead of 4K makes it far quicker to load for everyone reviewing it.`
+        : ""
+    );
     setUploading(true);
     setUploadProgress(0);
     setUploadError("");
@@ -2218,7 +2253,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                     // team's Workspace sharing restrictions.
                     <div style={{ marginBottom: 16, borderRadius: 8, overflow: "hidden", background: "#000", display: "flex", justifyContent: "center" }}>
                       {isPhoto ? (
-                        <img src={driveMediaSrc(driveId)} alt={c.title} style={{ width: "100%", maxHeight: "78vh", objectFit: "contain", display: "block" }} />
+                        <img src={driveThumbSrc(driveId, "s1600")} alt={c.title} style={{ width: "100%", maxHeight: "78vh", objectFit: "contain", display: "block" }} />
                       ) : loadedVideo === c.id ? (
                         <video
                           src={driveMediaSrc(driveId)}
@@ -2331,6 +2366,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
               </div>
             )}
             {uploadError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{uploadError}</div>}
+            {sizeNotice && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>{sizeNotice}</div>}
             {!uploading && form.link && driveEmbedUrl(form.link) && (
               <div style={{ fontSize: 11.5, color: "var(--good)", marginTop: 6, display: "flex", alignItems: "center", gap: 5 }}><Check size={12} /> Uploaded — ready to add.</div>
             )}
@@ -3140,7 +3176,7 @@ function ApprovedQueue({ data, saveData, profile }) {
                 <div className="content-body">
                   {c.caption && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>{c.caption}</div>}
                   {driveId && isPhotoItem(c) ? (
-                    <img src={driveMediaSrc(driveId)} alt={c.title} style={{ width: "100%", maxHeight: "60vh", objectFit: "contain", borderRadius: 8, background: "#000", display: "block" }} />
+                    <img src={driveThumbSrc(driveId, "s1600")} alt={c.title} style={{ width: "100%", maxHeight: "60vh", objectFit: "contain", borderRadius: 8, background: "#000", display: "block" }} />
                   ) : (yt || driveId) && (
                     <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 4, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
                       {loadedVideo === c.id ? (
