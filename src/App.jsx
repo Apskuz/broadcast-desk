@@ -9,6 +9,20 @@ import {
 
 /* ---------------------------------- helpers ---------------------------------- */
 
+// Saving on every keystroke was pushing the whole shared board to Supabase per
+// character, and the realtime echo racing back mid-typing could overwrite what
+// was just typed — text would visibly flicker/revert. This buffers the value
+// locally (so typing itself is instant) and only writes after a short pause.
+function useDebouncedCallback(callback, delay) {
+  const timer = useRef(null);
+  const cbRef = useRef(callback);
+  cbRef.current = callback;
+  return (...args) => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => cbRef.current(...args), delay);
+  };
+}
+
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const fmtDate = (iso) => {
@@ -230,10 +244,11 @@ const CSS = `
   --teal:#4FB8A6; --teal-soft:rgba(79,184,166,0.14); --alert:#D9564B; --alert-soft:rgba(217,86,75,0.15);
   --good:#6FBE7A; --good-soft:rgba(111,190,122,0.14);
 }
+html, body{ overflow-x:hidden; max-width:100%; }
 body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); margin:0; }
 .hub{
   font-family:'Inter',sans-serif; color:var(--text); background:var(--ink);
-  min-height:100vh; display:flex; position:relative; isolation:isolate;
+  min-height:100vh; display:flex; position:relative; isolation:isolate; overflow-x:hidden;
 }
 .hub *{ box-sizing:border-box; }
 .hub .display{ font-family:'Fraunces',serif; }
@@ -879,13 +894,22 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
   const [editingStepId, setEditingStepId] = useState(null);
   const [editingStepText, setEditingStepText] = useState("");
   const [noteText, setNoteText] = useState("");
+  const [localTitle, setLocalTitle] = useState(task ? task.title : "");
+  const [localDescription, setLocalDescription] = useState(task ? task.description || "" : "");
   const [newProjectName, setNewProjectName] = useState("");
 
-  if (!task) return null;
+  useEffect(() => {
+    setLocalTitle(task ? task.title : "");
+    setLocalDescription(task ? task.description || "" : "");
+  }, [taskId]);
 
   const updateTask = (patch) => {
     saveData({ ...data, tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, ...patch } : t)) });
   };
+  const debouncedUpdateTask = useDebouncedCallback(updateTask, 500);
+
+  if (!task) return null;
+
   const addStep = () => {
     if (!newStep.trim()) return;
     updateTask({ steps: [...(task.steps || []), { id: uid(), text: newStep.trim(), done: false }] });
@@ -933,8 +957,8 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
 
   return (
     <Modal title="Duty details" onClose={onClose}>
-      <div className="field"><label>Title</label><input value={task.title} onChange={(e) => updateTask({ title: e.target.value })} /></div>
-      <div className="field"><label>Details</label><textarea value={task.description || ""} onChange={(e) => updateTask({ description: e.target.value })} placeholder="Any brief, links, or notes" /></div>
+      <div className="field"><label>Title</label><input value={localTitle} onChange={(e) => { setLocalTitle(e.target.value); debouncedUpdateTask({ title: e.target.value }); }} /></div>
+      <div className="field"><label>Details</label><textarea value={localDescription} onChange={(e) => { setLocalDescription(e.target.value); debouncedUpdateTask({ description: e.target.value }); }} placeholder="Any brief, links, or notes" /></div>
       <div className="field-row">
         <div className="field"><label>Action</label>
           <select value={task.type} onChange={(e) => updateTask({ type: e.target.value })}>
@@ -1689,6 +1713,7 @@ function ContentReview({ data, saveData }) {
   const [open, setOpen] = useState(null);
   const [loadedVideo, setLoadedVideo] = useState(null); // content id whose embed the user tapped play on
   const [commentText, setCommentText] = useState("");
+  const [localCaption, setLocalCaption] = useState("");
   const fileInputRef = useRef(null);
   const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
   const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
@@ -1751,6 +1776,14 @@ function ContentReview({ data, saveData }) {
     setCommentText("");
   };
   const updateCaption = (id, caption) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, caption } : c)) });
+  const debouncedUpdateCaption = useDebouncedCallback(updateCaption, 500);
+  const openItem = (id) => {
+    setOpen(open === id ? null : id);
+    if (open !== id) {
+      const item = data.content.find((c) => c.id === id);
+      setLocalCaption(item ? item.caption || "" : "");
+    }
+  };
   const addToCalendar = (c) => {
     const type = c.format === "photo" ? "photo" : c.format === "graphic" ? "graphic" : "post";
     const event = { id: uid(), title: c.title, date: todayISO(), time: "09:00", type, assignee: c.assignee || "", status: "planned", notes: "Scheduled from Content Review" };
@@ -1775,7 +1808,7 @@ function ContentReview({ data, saveData }) {
           const isOpen = open === c.id;
           return (
             <div className="content-item" key={c.id}>
-              <div className="content-head" onClick={() => setOpen(isOpen ? null : c.id)}>
+              <div className="content-head" onClick={() => openItem(c.id)}>
                 <div className="content-thumb" style={{ color: fmt.color }}><FmtIcon size={19} /></div>
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div className="content-title">{c.title}</div>
@@ -1822,7 +1855,7 @@ function ContentReview({ data, saveData }) {
 
                   <div className="field">
                     <label>Caption</label>
-                    <textarea value={c.caption || ""} onChange={(e) => updateCaption(c.id, e.target.value)} placeholder="The caption or copy that shipped with this piece…" />
+                    <textarea value={localCaption} onChange={(e) => { setLocalCaption(e.target.value); debouncedUpdateCaption(c.id, e.target.value); }} placeholder="The caption or copy that shipped with this piece…" />
                   </div>
 
                   {yt && (
@@ -3009,23 +3042,22 @@ function NotificationBell({ data, saveData, profile, setView }) {
         )}
       </button>
       {open && (
-        <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 6, width: 300, maxHeight: 360, overflowY: "auto", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)", zIndex: 50, padding: 8 }}>
+        <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 6, width: "min(300px, calc(100vw - 48px))", maxHeight: 360, overflowY: "auto", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)", zIndex: 50, padding: 8 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 6px 8px" }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Notifications</span>
             {unread.length > 0 && <button onClick={markAllRead} style={{ fontSize: 10.5, color: "var(--gold)", background: "none", border: "none" }}>Mark all read</button>}
           </div>
-          {mine.length === 0 && <div className="empty" style={{ padding: "16px 6px" }}>Nothing yet.</div>}
-          {mine.slice(0, 25).map((n) => {
+          {unread.length === 0 && <div className="empty" style={{ padding: "16px 6px" }}>Nothing new.</div>}
+          {unread.slice(0, 25).map((n) => {
             const Icon = ICONS[n.type] || Bell;
-            const isUnread = !(n.readBy || []).includes(profile);
             return (
-              <button key={n.id} onClick={() => openNotif(n)} style={{ display: "flex", gap: 9, width: "100%", textAlign: "left", padding: "8px 6px", borderRadius: 7, background: isUnread ? "var(--gold-soft)" : "transparent", border: "none", marginBottom: 3 }}>
+              <button key={n.id} onClick={() => openNotif(n)} style={{ display: "flex", gap: 9, width: "100%", textAlign: "left", padding: "8px 6px", borderRadius: 7, background: "var(--gold-soft)", border: "none", marginBottom: 3 }}>
                 <span style={{ width: 26, height: 26, borderRadius: 7, background: "var(--panel)", color: "var(--gold)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon size={13} /></span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.35 }}>{n.text}</div>
                   <div style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2 }}>{fmtDate(n.date)}</div>
                 </div>
-                {isUnread && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)", flexShrink: 0, marginTop: 5 }} />}
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)", flexShrink: 0, marginTop: 5 }} />
               </button>
             );
           })}
@@ -3142,6 +3174,12 @@ export default function TeamHub() {
   const [saveError, setSaveError] = useState(false);
   const [loggedIn, setLoggedIn] = useState(null); // { id, name, color, pin }
   const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    // Stop the page behind the mobile menu from scrolling/panning while it's open.
+    document.body.style.overflow = navOpen ? "hidden" : "";
+    return () => { document.body.style.overflow = ""; };
+  }, [navOpen]);
 
   useEffect(() => {
     let cancelled = false;
