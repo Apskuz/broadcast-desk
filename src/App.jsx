@@ -1740,6 +1740,24 @@ function uploadToDrive(file, onProgress, profile, onRetry) {
   });
 }
 
+// Marks a piece of content as posted and cleans up every Drive file it ever
+// used (current version + full history) — shared by Content Review and the
+// Approved admin page so "posted" always means the same thing everywhere.
+function publishContentItem(data, saveData, id) {
+  const item = data.content.find((c) => c.id === id);
+  saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status: "published" } : c)) });
+  if (item) {
+    const fileIds = [item.link, ...(item.versions || []).map((v) => v.link)].map(driveFileId).filter(Boolean);
+    Promise.all(
+      fileIds.map((fileId) =>
+        fetch("/api/drive-delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId }) }).catch(() => {})
+      )
+    ).finally(() => {
+      saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status: "published", link: "", versions: [], driveArchived: true } : c)) });
+    });
+  }
+}
+
 function ContentReview({ data, saveData, profile, isEmployer }) {
   const [showForm, setShowForm] = useState(false);
   const [open, setOpen] = useState(null);
@@ -1753,6 +1771,11 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState("");
   const [uploadRetry, setUploadRetry] = useState("");
+  const [versionUploadTarget, setVersionUploadTarget] = useState(null); // content id with an active re-upload
+  const [versionUploadProgress, setVersionUploadProgress] = useState(0);
+  const [versionUploadRetry, setVersionUploadRetry] = useState("");
+  const [versionUploadErrorFor, setVersionUploadErrorFor] = useState(null); // { id, message }
+  const versionFileInputRef = useRef(null);
 
   const handleFileSelect = async (e) => {
     const file = e.target.files && e.target.files[0];
@@ -1789,24 +1812,51 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   };
   const makePublic = (id) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, visibility: "public" } : c)) });
   const updateStatus = (id, status) => {
-    saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)) });
-    // Once something's published there's no reason to keep the raw file taking
-    // up Drive space — clean it up in the background so the folder doesn't flood.
     if (status === "published") {
-      const item = data.content.find((c) => c.id === id);
-      const fileId = item && driveFileId(item.link);
-      if (fileId) {
-        fetch("/api/drive-delete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fileId }),
-        })
-          .then(() => {
-            saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status, link: "", driveArchived: true } : c)) });
-          })
-          .catch(() => {});
-      }
+      publishContentItem(data, saveData, id);
+      return;
     }
+    const item = data.content.find((c) => c.id === id);
+    let notifications = data.notifications || [];
+    const congratsWorthy = status === "approved" && item && item.uploadedBy && item.uploadedBy !== profile;
+    if (congratsWorthy) {
+      notifications = [...notifications, makeNotification({ toProfile: item.uploadedBy, type: "approved", text: `Your content was approved: ${item.title}`, link: "content", fromProfile: profile })];
+    }
+    saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)), notifications });
+    if (congratsWorthy) sendPush(item.uploadedBy, "Content approved! 🎉", `"${item.title}" is ready to post.`, profile);
+  };
+  const uploadNewVersion = (id) => {
+    setVersionUploadTarget(id);
+    setVersionUploadErrorFor(null);
+    setTimeout(() => versionFileInputRef.current && versionFileInputRef.current.click(), 0);
+  };
+  const handleVersionFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    const id = versionUploadTarget;
+    if (!file || !id) return;
+    setVersionUploadProgress(0);
+    setVersionUploadRetry("");
+    try {
+      const result = await uploadToDrive(file, setVersionUploadProgress, profile, (attempt, max) => setVersionUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
+      const item = data.content.find((c) => c.id === id);
+      const versions = item.link ? [...(item.versions || []), { link: item.link, date: todayISO(), by: profile || "" }] : (item.versions || []);
+      const leads = (data.profiles || []).filter((p) => p.isLead && p.name !== profile).map((p) => p.name);
+      const notifications = [
+        ...(data.notifications || []),
+        ...leads.map((leadName) => makeNotification({ toProfile: leadName, type: "upload", text: `${profile || "Someone"} uploaded a new version: ${item.title}`, link: "content", fromProfile: profile })),
+      ];
+      saveData({
+        ...data,
+        content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, status: "review", versions, driveArchived: false } : c)),
+        notifications,
+      });
+      leads.forEach((leadName) => sendPush(leadName, "New version uploaded", `${profile || "Someone"} uploaded a new version: ${item.title}`, profile));
+    } catch (err) {
+      setVersionUploadErrorFor({ id, message: err.message || "Upload failed." });
+    }
+    setVersionUploadTarget(null);
+    setVersionUploadRetry("");
+    e.target.value = "";
   };
   const removeItem = (id) => saveData({ ...data, content: data.content.filter((c) => c.id !== id) });
   const addComment = (id) => {
@@ -1845,7 +1895,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
 
   // Uploads default to private — visible to whoever uploaded them and to leads,
   // until the uploader (or a lead) makes it public for the whole team to see.
-  const visibleContent = data.content.filter((c) => isEmployer || !c.uploadedBy || c.uploadedBy === profile || c.visibility === "public");
+  const visibleContent = data.content.filter((c) => c.status !== "published" && (isEmployer || !c.uploadedBy || c.uploadedBy === profile || c.visibility === "public"));
 
   return (
     <div>
@@ -1974,6 +2024,38 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                     </div>
                   )}
 
+                  {c.status !== "published" && (
+                    <div style={{ marginBottom: 14 }}>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ width: "100%", justifyContent: "center", cursor: versionUploadTarget === c.id ? "default" : "pointer", opacity: versionUploadTarget === c.id ? 0.7 : 1 }}
+                        onClick={() => uploadNewVersion(c.id)}
+                        disabled={versionUploadTarget === c.id}
+                      >
+                        <RotateCw size={13} /> {versionUploadTarget === c.id ? (versionUploadRetry || `Uploading… ${versionUploadProgress}%`) : "Upload a fixed version"}
+                      </button>
+                      {versionUploadTarget === c.id && (
+                        <div className="progress-track" style={{ marginTop: 8 }}>
+                          <div className="progress-fill" style={{ width: `${versionUploadProgress}%`, background: "var(--gold)" }} />
+                        </div>
+                      )}
+                      {versionUploadErrorFor && versionUploadErrorFor.id === c.id && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{versionUploadErrorFor.message}</div>}
+                    </div>
+                  )}
+
+                  {c.versions && c.versions.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div className="section-title" style={{ fontSize: 13 }}><RotateCw size={14} color="var(--gold)" /> Version history</div>
+                      {[...c.versions].reverse().map((v, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 2px", fontSize: 12, color: "var(--muted)" }}>
+                          <span style={{ flex: 1 }}>Version {c.versions.length - i} — {v.by || "someone"} · {fmtDate(v.date)}</span>
+                          {v.link && <a href={v.link} target="_blank" rel="noopener noreferrer" style={{ color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 4, textDecoration: "none" }}><ExternalLink size={11} /> View</a>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="section-title" style={{ fontSize: 13 }}><MessageSquare size={14} color="var(--gold)" /> Feedback</div>
                   {c.comments.map((cm) => (
                     <div className="comment" key={cm.id}>
@@ -1996,6 +2078,8 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
         })}
         {visibleContent.length === 0 && <div className="empty">Nothing submitted yet.</div>}
       </div>
+
+      <input ref={versionFileInputRef} type="file" accept="video/*,image/*" onChange={handleVersionFileSelect} style={{ display: "none" }} />
 
       {showForm && (
         <Modal title="Add content for review" onClose={() => setShowForm(false)}>
@@ -2282,6 +2366,110 @@ function Chat({ data, saveData, profile }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- Approved queue (admin) ---------------------------------- */
+
+function ApprovedQueue({ data, saveData, profile }) {
+  const [open, setOpen] = useState(null);
+  const [loadedVideo, setLoadedVideo] = useState(null);
+
+  const order = data.approvedOrder || [];
+  const approved = data.content.filter((c) => c.status === "approved");
+  // Anything not yet in the saved order goes to the end, newest last.
+  const ordered = [
+    ...order.map((id) => approved.find((c) => c.id === id)).filter(Boolean),
+    ...approved.filter((c) => !order.includes(c.id)),
+  ];
+
+  const move = (id, dir) => {
+    const ids = ordered.map((c) => c.id);
+    const i = ids.indexOf(id);
+    const j = i + dir;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    saveData({ ...data, approvedOrder: ids });
+  };
+
+  const markPosted = (id) => publishContentItem(data, saveData, id);
+
+  // A quick look at when these pieces are already scheduled to go out, pulled
+  // from the same calendar events "Add to Calendar" creates.
+  const scheduled = (data.calendarEvents || [])
+    .filter((e) => e.notes === "Scheduled from Content Review" && approved.some((c) => c.title === e.title))
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(0, 8);
+
+  return (
+    <div>
+      <div className="topbar">
+        <div><div className="page-title">Approved Content</div><div className="page-sub">Everything cleared and ready to post — reorder it into the lineup you want.</div></div>
+      </div>
+
+      <div className="content-list" style={{ marginBottom: 28 }}>
+        {ordered.map((c, i) => {
+          const fmt = CONTENT_FORMATS.find((f) => f.id === c.format) || CONTENT_FORMATS[0];
+          const FmtIcon = fmt.icon;
+          const yt = youtubeId(c.link);
+          const driveId = !yt ? driveFileId(c.link) : null;
+          const isOpen = open === c.id;
+          return (
+            <div className="content-item" key={c.id}>
+              <div className="content-head" onClick={() => setOpen(isOpen ? null : c.id)}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }} onClick={(e) => e.stopPropagation()}>
+                  <button className="icon-btn" disabled={i === 0} onClick={() => move(c.id, -1)} style={{ opacity: i === 0 ? 0.3 : 1 }}><ChevronLeft size={13} style={{ transform: "rotate(90deg)" }} /></button>
+                  <button className="icon-btn" disabled={i === ordered.length - 1} onClick={() => move(c.id, 1)} style={{ opacity: i === ordered.length - 1 ? 0.3 : 1 }}><ChevronLeft size={13} style={{ transform: "rotate(-90deg)" }} /></button>
+                </div>
+                <div className="content-thumb" style={{ color: fmt.color }}><FmtIcon size={19} /></div>
+                <div style={{ flex: 1, minWidth: 180 }}>
+                  <div className="content-title">#{i + 1} — {c.title}</div>
+                  <div className="content-tags">
+                    <span className="pill" style={{ background: fmt.color + "22", color: fmt.color }}>{fmt.label}</span>
+                    <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.platform}</span>
+                    {c.uploadedBy && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.uploadedBy}</span>}
+                  </div>
+                </div>
+                <button className="btn btn-gold" style={{ padding: "9px 12px" }} onClick={(e) => { e.stopPropagation(); markPosted(c.id); }}><CheckCircle2 size={13} /> Mark posted</button>
+              </div>
+
+              {isOpen && (
+                <div className="content-body">
+                  {c.caption && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>{c.caption}</div>}
+                  {(yt || driveId) && (
+                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 4, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
+                      {loadedVideo === c.id ? (
+                        <>
+                          {yt && <iframe src={`https://www.youtube.com/embed/${yt}`} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }} allowFullScreen title={c.title} />}
+                          {!yt && driveId && <video src={`/api/drive-stream?fileId=${driveId}`} controls autoPlay playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "#000" }} />}
+                        </>
+                      ) : (
+                        <button onClick={() => setLoadedVideo(c.id)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <span style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--gold)", color: "#12141B", display: "flex", alignItems: "center", justifyContent: "center" }}><Play size={18} fill="#12141B" /></span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {ordered.length === 0 && <div className="empty">Nothing approved yet — clear something in Content Review first.</div>}
+      </div>
+
+      {scheduled.length > 0 && (
+        <div>
+          <div className="section-title" style={{ fontSize: 13 }}><CalendarDays size={14} color="var(--gold)" /> Coming up on the posting calendar</div>
+          {scheduled.map((e) => (
+            <div key={e.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 2px", borderBottom: "1px solid var(--hair)", fontSize: 12.5 }}>
+              <span>{e.title}</span>
+              <span style={{ color: "var(--muted)" }}>{fmtDate(e.date)}{e.time ? ` · ${e.time}` : ""}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -3080,6 +3268,7 @@ function TeamManage({ data, saveData }) {
       ideas: [],
       resources: [],
       moodboard: [],
+      approvedOrder: [],
     });
     setClearConfirm(false);
     setClearPin("");
@@ -3315,7 +3504,7 @@ function NotificationBell({ data, saveData, profile, setView }) {
     setOpen((o) => !o);
   };
 
-  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video };
+  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video, approved: CheckCircle2 };
 
   return (
     <div>
@@ -3451,6 +3640,7 @@ const NAV = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "notes", label: "Notes", icon: StickyNote },
   { id: "content", label: "Content Review", icon: Video },
+  { id: "approved", label: "Approved", icon: CheckCircle2 },
   { id: "ideas", label: "Idea Bank", icon: Lightbulb },
   { id: "guidelines", label: "Guidelines", icon: BookOpen },
   { id: "team", label: "Team", icon: Shield },
@@ -3494,6 +3684,7 @@ export default function TeamHub() {
       if (!loadedData.notifications) loadedData.notifications = [];
       if (!loadedData.projects) loadedData.projects = [];
       if (!loadedData.moodboard) loadedData.moodboard = [];
+      if (!loadedData.approvedOrder) loadedData.approvedOrder = [];
       if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
         loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
       }
@@ -3600,6 +3791,7 @@ export default function TeamHub() {
     chat: <Chat data={data} saveData={saveData} profile={profile} />,
     notes: <Notes data={data} saveData={saveData} />,
     content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
+    approved: <ApprovedQueue data={data} saveData={saveData} profile={profile} />,
     ideas: <IdeaBank data={data} saveData={saveData} />,
     guidelines: <Guidelines data={data} saveData={saveData} profile={profile} />,
     team: <TeamManage data={data} saveData={saveData} />,
@@ -3636,7 +3828,7 @@ export default function TeamHub() {
           <PushEnableButton profile={profile} />
         </div>
 
-        {NAV.filter((n) => n.id !== "team" || isEmployer).map((n) => {
+        {NAV.filter((n) => (n.id !== "team" && n.id !== "approved") || isEmployer).map((n) => {
           const Icon = n.icon;
           const count = navBadgeCount(n.id);
           return (
