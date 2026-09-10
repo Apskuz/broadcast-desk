@@ -5,7 +5,7 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -23,6 +23,56 @@ function useDebouncedCallback(callback, delay) {
     timer.current = setTimeout(() => cbRef.current(...args), delay);
   };
 }
+
+// Drag-to-reposition for the Idea Bank board — tracks a live position while
+// the pointer moves, but only persists once (on release), so dragging never
+// hammers the shared board with saves the way typing-per-keystroke did.
+// Also tells clicks (no real movement) apart from drags, so a tap can open
+// something instead of "moving" it by a pixel.
+function useDraggable(onDragEnd, onClick) {
+  const [dragging, setDragging] = useState(null); // { id, x, y }
+  const posRef = useRef(null);
+  const movedRef = useRef(false);
+
+  const startDrag = (e, id, origX, origY) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const point = e.touches ? e.touches[0] : e;
+    const startX = point.clientX;
+    const startY = point.clientY;
+    movedRef.current = false;
+    posRef.current = { id, x: origX, y: origY };
+
+    const move = (ev) => {
+      const p = ev.touches ? ev.touches[0] : ev;
+      const dx = p.clientX - startX;
+      const dy = p.clientY - startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) movedRef.current = true;
+      const next = { id, x: Math.max(0, origX + dx), y: Math.max(0, origY + dy) };
+      posRef.current = next;
+      setDragging(next);
+    };
+    const end = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", end);
+      window.removeEventListener("touchmove", move);
+      window.removeEventListener("touchend", end);
+      if (movedRef.current && posRef.current) onDragEnd(posRef.current.id, posRef.current.x, posRef.current.y);
+      else if (!movedRef.current && onClick) onClick(id);
+      posRef.current = null;
+      setDragging(null);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", end);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("touchend", end);
+  };
+
+  return { dragging, startDrag };
+}
+
+const IDEA_COLORS = ["#F5D76E", "#F2A65A", "#F2789F", "#B79CED", "#7EC8E3", "#8FD9A8"];
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -398,11 +448,6 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
 .comment-form textarea{ flex:1; resize:none; background:var(--panel-raised); border:1px solid var(--hair); border-radius:8px; padding:9px 11px; color:var(--text); font-size:12.5px; min-height:38px; }
 
 /* ---- idea bank ---- */
-.idea-grid{ grid-template-columns:repeat(auto-fill, minmax(250px,1fr)); }
-.idea-card{ display:flex; flex-direction:column; gap:10px; }
-.idea-title{ font-size:14px; font-weight:600; }
-.idea-desc{ font-size:12px; color:var(--muted); line-height:1.5; }
-.idea-foot{ display:flex; align-items:center; justify-content:space-between; margin-top:auto; }
 .vote-btn{ display:flex; align-items:center; gap:6px; padding:6px 11px; border-radius:20px; background:var(--panel-raised); border:1px solid var(--hair); font-size:12px; font-weight:700; color:var(--gold); }
 .vote-btn:hover{ border-color:var(--gold); }
 
@@ -2213,62 +2258,144 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
 
 function IdeaBank({ data, saveData }) {
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", tags: "", author: "", link: "" });
+  const [form, setForm] = useState({ title: "", description: "", tags: "", author: "", link: "", color: IDEA_COLORS[0] });
+  const [showFolderForm, setShowFolderForm] = useState(false);
+  const [folderName, setFolderName] = useState("");
+  const [openFolderId, setOpenFolderId] = useState(null);
+  const [openIdeaId, setOpenIdeaId] = useState(null);
+
+  const folders = data.ideaFolders || [];
+  const ideas = data.ideas || [];
+
+  // Backward compat: an idea saved before this feature existed has no
+  // position/colour yet — give it one, cascading so old ideas don't pile up
+  // on top of each other at the same spot.
+  const positioned = ideas.map((idea, i) => ({
+    ...idea,
+    x: idea.x != null ? idea.x : 40 + (i % 6) * 170,
+    y: idea.y != null ? idea.y : 40 + Math.floor(i / 6) * 150,
+    color: idea.color || IDEA_COLORS[i % IDEA_COLORS.length],
+  }));
+
+  const boardIdeas = positioned.filter((i) => (openFolderId ? i.folderId === openFolderId : !i.folderId));
+  const currentFolder = openFolderId ? folders.find((f) => f.id === openFolderId) : null;
+
+  const saveFolderPos = (id, x, y) => saveData({ ...data, ideaFolders: folders.map((f) => (f.id === id ? { ...f, x, y } : f)) });
+  const saveIdeaPos = (id, x, y) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, x, y } : i)) });
+  const folderDrag = useDraggable(saveFolderPos, (id) => setOpenFolderId(id));
+  const ideaDrag = useDraggable(saveIdeaPos, (id) => setOpenIdeaId(id));
+
+  const addFolder = () => {
+    if (!folderName.trim()) return;
+    const count = folders.length;
+    saveData({ ...data, ideaFolders: [...folders, { id: uid(), name: folderName.trim(), x: 40 + (count % 5) * 140, y: 40 + Math.floor(count / 5) * 130, color: IDEA_COLORS[count % IDEA_COLORS.length] }] });
+    setFolderName("");
+    setShowFolderForm(false);
+  };
+  const removeFolder = (id) => {
+    // Ideas inside go back to the board instead of vanishing with the folder.
+    saveData({ ...data, ideaFolders: folders.filter((f) => f.id !== id), ideas: ideas.map((i) => (i.folderId === id ? { ...i, folderId: null } : i)) });
+    if (openFolderId === id) setOpenFolderId(null);
+  };
 
   const addIdea = () => {
     if (!form.title.trim()) return;
     const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
-    saveData({ ...data, ideas: [{ id: uid(), votes: 0, ...form, tags }, ...data.ideas] });
-    setForm({ title: "", description: "", tags: "", author: form.author, link: "" });
+    const count = boardIdeas.length;
+    const item = { id: uid(), votes: 0, ...form, tags, folderId: openFolderId, x: 40 + (count % 6) * 170, y: 40 + Math.floor(count / 6) * 150 };
+    saveData({ ...data, ideas: [item, ...ideas] });
+    setForm({ title: "", description: "", tags: "", author: form.author, link: "", color: IDEA_COLORS[(count + 1) % IDEA_COLORS.length] });
     setShowForm(false);
   };
-  const vote = (id) => saveData({ ...data, ideas: data.ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
-  const removeIdea = (id) => saveData({ ...data, ideas: data.ideas.filter((i) => i.id !== id) });
+  const vote = (id) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
+  const removeIdea = (id) => { saveData({ ...data, ideas: ideas.filter((i) => i.id !== id) }); setOpenIdeaId(null); };
+  const moveToFolder = (id, folderId) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, folderId: folderId || null } : i)) });
+  const setIdeaColor = (id, color) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, color } : i)) });
 
-  const sorted = [...data.ideas].sort((a, b) => b.votes - a.votes);
+  const openIdea = openIdeaId ? positioned.find((i) => i.id === openIdeaId) : null;
+  const openYt = openIdea ? youtubeId(openIdea.link) : null;
+  const openDrive = openIdea && !openYt ? driveEmbedUrl(openIdea.link) : null;
+
+  const BOARD_W = 1400, BOARD_H = 900;
 
   return (
     <div>
       <div className="topbar">
-        <div><div className="page-title">Idea Bank</div><div className="page-sub">Drop content ideas here — the team votes on what's next.</div></div>
-        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add idea</button>
+        <div>
+          <div className="page-title">Idea Bank</div>
+          <div className="page-sub">{currentFolder ? `Inside "${currentFolder.name}" — drag ideas around, or head back to the board.` : "A space to spark ideas — drag things wherever they feel right."}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {currentFolder ? (
+            <>
+              <button className="btn" onClick={() => setOpenFolderId(null)}><ChevronLeft size={15} /> Back to board</button>
+              <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)" }} onClick={() => removeFolder(currentFolder.id)}><Trash2 size={14} /> Delete folder</button>
+            </>
+          ) : (
+            <button className="btn" onClick={() => setShowFolderForm(true)}><Folder size={15} /> New folder</button>
+          )}
+          <button className="btn btn-gold" onClick={() => { setForm((f) => ({ ...f, color: IDEA_COLORS[boardIdeas.length % IDEA_COLORS.length] })); setShowForm(true); }}><Plus size={15} /> Add idea</button>
+        </div>
       </div>
-      <div className="grid idea-grid">
-        {sorted.map((i) => {
-          const yt = youtubeId(i.link);
-          const drive = !yt ? driveEmbedUrl(i.link) : null;
-          return (
-          <div className="card idea-card" key={i.id}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-              <div className="idea-title">{i.title}</div>
-              <button className="icon-btn" onClick={() => removeIdea(i.id)}><Trash2 size={13} /></button>
-            </div>
-            {i.description && <div className="idea-desc">{i.description}</div>}
-            {(yt || drive) && (
-              <div style={{ position: "relative", paddingTop: "56.25%", borderRadius: 8, overflow: "hidden" }}>
-                <iframe
-                  src={yt ? `https://www.youtube.com/embed/${yt}` : drive}
-                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
-                  allowFullScreen title={i.title}
-                />
+
+      <div style={{ position: "relative", width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}>
+        <div style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px" }}>
+          {!currentFolder && folders.map((f) => {
+            const pos = folderDrag.dragging && folderDrag.dragging.id === f.id ? folderDrag.dragging : f;
+            const count = ideas.filter((i) => i.folderId === f.id).length;
+            return (
+              <div
+                key={f.id}
+                onMouseDown={(e) => folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0)}
+                onTouchStart={(e) => folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0)}
+                style={{ position: "absolute", left: pos.x, top: pos.y, width: 116, cursor: "grab", userSelect: "none", touchAction: "none", textAlign: "center" }}
+              >
+                <div style={{ width: 62, height: 50, margin: "0 auto 6px", borderRadius: 8, background: f.color || IDEA_COLORS[0], display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 10px rgba(0,0,0,0.35)" }}>
+                  <FolderOpen size={24} color="#22232b" />
+                </div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text)" }}>{f.name}</div>
+                <div style={{ fontSize: 9.5, color: "var(--muted)" }}>{count} idea{count === 1 ? "" : "s"}</div>
               </div>
-            )}
-            {i.link && !yt && !drive && (
-              <a href={i.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11.5, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Link2 size={11} /> View reference</a>
-            )}
-            {i.tags && i.tags.length > 0 && (
-              <div className="content-tags">
-                {i.tags.map((t) => <span className="pill" key={t} style={{ background: "var(--teal-soft)", color: "var(--teal)" }}>{t}</span>)}
+            );
+          })}
+
+          {boardIdeas.map((i) => {
+            const pos = ideaDrag.dragging && ideaDrag.dragging.id === i.id ? ideaDrag.dragging : i;
+            return (
+              <div
+                key={i.id}
+                onMouseDown={(e) => ideaDrag.startDrag(e, i.id, i.x, i.y)}
+                onTouchStart={(e) => ideaDrag.startDrag(e, i.id, i.x, i.y)}
+                style={{ position: "absolute", left: pos.x, top: pos.y, width: 152, minHeight: 88, background: i.color, borderRadius: 8, padding: "10px 11px", boxShadow: "0 4px 10px rgba(0,0,0,0.35)", cursor: "grab", userSelect: "none", touchAction: "none" }}
+              >
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: "#22232b", lineHeight: 1.3, marginBottom: 10, wordBreak: "break-word" }}>{i.title}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", position: "absolute", left: 11, right: 11, bottom: 8 }}>
+                  <span style={{ fontSize: 10, color: "#22232b", opacity: 0.7 }}>{i.author || "Anon"}</span>
+                  {i.votes > 0 && <span style={{ fontSize: 10, color: "#22232b", fontWeight: 700 }}>▲ {i.votes}</span>}
+                </div>
               </div>
-            )}
-            <div className="idea-foot">
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>{i.author || "Anonymous"}</span>
-              <button className="vote-btn" onClick={() => vote(i.id)}><ThumbsUp size={13} /> {i.votes}</button>
+            );
+          })}
+
+          {!currentFolder && folders.length === 0 && boardIdeas.length === 0 && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 13, padding: 20, textAlign: "center" }}>
+              Nothing here yet — add an idea or a folder to get started.
             </div>
-          </div>
-        );})}
-        {sorted.length === 0 && <div className="empty">No ideas yet — be the first to add one.</div>}
+          )}
+          {currentFolder && boardIdeas.length === 0 && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 13 }}>
+              Nothing in this folder yet.
+            </div>
+          )}
+        </div>
       </div>
+
+      {showFolderForm && (
+        <Modal title="New folder" onClose={() => setShowFolderForm(false)}>
+          <div className="field"><label>Name</label><input value={folderName} onChange={(e) => setFolderName(e.target.value)} placeholder="e.g. Reels concepts" autoFocus /></div>
+          <div className="modal-actions"><button className="btn" onClick={() => setShowFolderForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addFolder}>Create folder</button></div>
+        </Modal>
+      )}
 
       {showForm && (
         <Modal title="Add an idea" onClose={() => setShowForm(false)}>
@@ -2279,7 +2406,60 @@ function IdeaBank({ data, saveData }) {
             <div className="field"><label>Tags (comma separated)</label><input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="Reels, Series" /></div>
             <div className="field"><label>Your name</label><input value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} placeholder="e.g. Alex" /></div>
           </div>
+          <div className="field">
+            <label>Colour</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              {IDEA_COLORS.map((c) => (
+                <button key={c} onClick={() => setForm({ ...form, color: c })} style={{ width: 26, height: 26, borderRadius: "50%", background: c, border: form.color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+              ))}
+            </div>
+          </div>
           <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addIdea}>Add idea</button></div>
+        </Modal>
+      )}
+
+      {openIdea && (
+        <Modal title={openIdea.title} onClose={() => setOpenIdeaId(null)}>
+          {openIdea.description && <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5, marginBottom: 14 }}>{openIdea.description}</div>}
+          {(openYt || openDrive) && (
+            <div style={{ position: "relative", paddingTop: "56.25%", borderRadius: 8, overflow: "hidden", marginBottom: 14 }}>
+              <iframe src={openYt ? `https://www.youtube.com/embed/${openYt}` : openDrive} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }} allowFullScreen title={openIdea.title} />
+            </div>
+          )}
+          {openIdea.link && !openYt && !openDrive && (
+            <a href={openIdea.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none", marginBottom: 14 }}><Link2 size={12} /> View reference</a>
+          )}
+          {openIdea.tags && openIdea.tags.length > 0 && (
+            <div className="content-tags" style={{ marginBottom: 14 }}>
+              {openIdea.tags.map((t) => <span className="pill" key={t} style={{ background: "var(--teal-soft)", color: "var(--teal)" }}>{t}</span>)}
+            </div>
+          )}
+
+          <div className="field-row">
+            <div className="field">
+              <label>Folder</label>
+              <select value={openIdea.folderId || ""} onChange={(e) => moveToFolder(openIdea.id, e.target.value || null)}>
+                <option value="">On the board</option>
+                {folders.map((f) => <option value={f.id} key={f.id}>{f.name}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Colour</label>
+              <div style={{ display: "flex", gap: 6, paddingTop: 4 }}>
+                {IDEA_COLORS.map((c) => (
+                  <button key={c} onClick={() => setIdeaColor(openIdea.id, c)} style={{ width: 22, height: 22, borderRadius: "50%", background: c, border: openIdea.color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="modal-actions" style={{ justifyContent: "space-between" }}>
+            <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)" }} onClick={() => removeIdea(openIdea.id)}><Trash2 size={13} /> Delete</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>{openIdea.author || "Anonymous"}</span>
+              <button className="vote-btn" onClick={() => vote(openIdea.id)}><ThumbsUp size={13} /> {openIdea.votes}</button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>
@@ -3421,6 +3601,7 @@ function TeamManage({ data, saveData }) {
       notes: [],
       content: [],
       ideas: [],
+      ideaFolders: [],
       resources: [],
       moodboard: [],
       approvedOrder: [],
@@ -3868,6 +4049,7 @@ export default function TeamHub() {
       if (!loadedData.projects) loadedData.projects = [];
       if (!loadedData.moodboard) loadedData.moodboard = [];
       if (!loadedData.approvedOrder) loadedData.approvedOrder = [];
+      if (!loadedData.ideaFolders) loadedData.ideaFolders = [];
       if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
         loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
       }
