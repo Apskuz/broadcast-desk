@@ -1611,6 +1611,25 @@ function driveEmbedUrl(url) {
   return id ? `https://drive.google.com/file/d/${id}/preview` : null;
 }
 
+// Reads a video file's real width/height before upload, so the preview player
+// can be shown at its actual shape instead of a hard-coded 16:9 box — most of
+// this team's content is vertical (Reels/Stories), which looked zoomed/cropped
+// when forced into a landscape frame.
+function readVideoAspect(file) {
+  return new Promise((resolve) => {
+    if (!file.type || !file.type.startsWith("video/")) { resolve(null); return; }
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      const ratio = video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : null;
+      URL.revokeObjectURL(video.src);
+      resolve(ratio);
+    };
+    video.onerror = () => resolve(null);
+    video.src = URL.createObjectURL(file);
+  });
+}
+
 // Uploads a file straight to Google Drive from the browser (never through Vercel's own
 // server, so large videos don't hit the ~4.5MB serverless request limit). Two small
 // backend calls bracket the real upload: one to get an authorized upload slot, one to
@@ -1689,7 +1708,7 @@ function ContentReview({ data, saveData }) {
   const [open, setOpen] = useState(null);
   const [loadedVideo, setLoadedVideo] = useState(null); // content id whose embed the user tapped play on
   const [commentText, setCommentText] = useState("");
-  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
+  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", aspect: null });
   const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -1702,8 +1721,8 @@ function ContentReview({ data, saveData }) {
     setUploadProgress(0);
     setUploadError("");
     try {
-      const result = await uploadToDrive(file, setUploadProgress);
-      setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, "") }));
+      const [result, aspect] = await Promise.all([uploadToDrive(file, setUploadProgress), readVideoAspect(file)]);
+      setForm((f) => ({ ...f, link: result.link, title: f.title || result.name.replace(/\.[^/.]+$/, ""), aspect }));
     } catch (err) {
       setUploadError(err.message || "Upload failed.");
     }
@@ -1715,7 +1734,7 @@ function ContentReview({ data, saveData }) {
     if (!form.title.trim()) return;
     const item = { id: uid(), status: "review", comments: [], caption: "", ...form };
     saveData({ ...data, content: [item, ...data.content] });
-    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video" });
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", aspect: null });
     setShowForm(false);
   };
   const updateStatus = (id, status) => {
@@ -1825,7 +1844,7 @@ function ContentReview({ data, saveData }) {
                   </div>
 
                   {(yt || drive) && (
-                    <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 16, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
+                    <div style={{ position: "relative", width: "100%", maxWidth: c.aspect && c.aspect < 1 ? 340 : "100%", margin: "0 auto 16px", aspectRatio: c.aspect ? String(c.aspect) : "16 / 9", maxHeight: "78vh", borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
                       {loadedVideo === c.id ? (
                         <iframe
                           src={yt ? `https://www.youtube.com/embed/${yt}` : drive}
