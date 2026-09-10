@@ -1651,7 +1651,28 @@ function uploadToDrive(file, onProgress) {
           reject(err);
         }
       };
-      xhr.onerror = () => reject(new Error("Network error during upload."));
+      xhr.onerror = async () => {
+        // Google's resumable-upload endpoint often omits the CORS header on its
+        // final response — the file can finish uploading successfully even though
+        // the browser reports this as an error and hides the real response from us.
+        // Ask our own server (not subject to that CORS restriction) to look the
+        // file up by name instead of assuming the upload actually failed.
+        try {
+          const finalizeRes = await fetch("/api/drive-finalize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename: file.name }),
+          });
+          const finalizeData = await finalizeRes.json().catch(() => ({}));
+          if (!finalizeRes.ok || !finalizeData.link) {
+            reject(new Error(finalizeData.error || "Network error during upload."));
+            return;
+          }
+          resolve({ link: finalizeData.link, name: file.name });
+        } catch {
+          reject(new Error("Network error during upload."));
+        }
+      };
       xhr.send(file);
     } catch (err) {
       reject(err);

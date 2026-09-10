@@ -1,6 +1,12 @@
 // Runs after the browser finishes uploading a file directly to Drive. Sets the file
 // to "anyone with the link can view" so the in-app preview works for every teammate
 // without each of them needing individual Drive access, then returns the link.
+//
+// Google's resumable-upload PUT often omits the CORS header on its final response,
+// so the browser can't read it even when the upload succeeded — the browser only
+// knows an error happened, not a real fileId. When that happens we're called with
+// a filename instead, and look the file up ourselves (server-to-server calls aren't
+// subject to that CORS restriction).
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -8,16 +14,25 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { fileId } = req.body || {};
-    if (!fileId) return res.status(400).json({ error: "Missing fileId" });
+    const { fileId: providedFileId, filename } = req.body || {};
+    if (!providedFileId && !filename) return res.status(400).json({ error: "Missing fileId or filename" });
 
     const clientEmail = process.env.GDRIVE_CLIENT_EMAIL;
     const privateKey = (process.env.GDRIVE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+    const folderId = process.env.GDRIVE_FOLDER_ID;
     if (!clientEmail || !privateKey) {
       return res.status(500).json({ error: "Google Drive isn't connected yet — missing server configuration." });
     }
 
     const accessToken = await getAccessToken(clientEmail, privateKey);
+
+    let fileId = providedFileId;
+    if (!fileId) {
+      fileId = await findRecentFile(accessToken, folderId, filename);
+      if (!fileId) {
+        return res.status(404).json({ error: "Couldn't find the uploaded file in Drive — it may not have finished uploading." });
+      }
+    }
 
     const permRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?supportsAllDrives=true`, {
       method: "POST",
@@ -37,6 +52,17 @@ export default async function handler(req, res) {
   } catch (err) {
     return res.status(500).json({ error: String(err) });
   }
+}
+
+// Finds the newest file with this name in the upload folder — used when we can't
+// read the real fileId back from the browser (see comment at the top of the file).
+async function findRecentFile(accessToken, folderId, filename) {
+  const q = `name = '${filename.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&orderBy=createdTime desc&pageSize=1&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const data = await res.json();
+  if (!res.ok) throw new Error("Couldn't search Drive for the uploaded file: " + JSON.stringify(data));
+  return data.files && data.files[0] ? data.files[0].id : null;
 }
 
 async function getAccessToken(clientEmail, privateKey) {
