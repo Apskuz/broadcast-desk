@@ -99,6 +99,36 @@ const IDEA_COLORS = ["#F5D76E", "#F2A65A", "#F2789F", "#B79CED", "#7EC8E3", "#8F
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+// Links people paste into a message should be tappable rather than something
+// you have to select and copy by hand on a phone.
+//
+// The match is deliberately narrow — http://, https://, or a bare www. — and
+// the trailing character class drops the full stop or bracket that ends a
+// sentence rather than swallowing it into the URL. Nothing else can become an
+// href, so a "javascript:" someone types stays plain text.
+const LINK_RE = new RegExp("((?:https?://|www\\.)[^\\s<>()]*[^\\s<>().,;:!?'\"])", "gi");
+
+function Linkify({ text }) {
+  // split() on a regex with one capture group alternates plain, match, plain…
+  const parts = String(text == null ? "" : text).split(LINK_RE);
+  return parts.map((part, i) => {
+    if (i % 2 === 0) return part;
+    const href = part.toLowerCase().startsWith("www.") ? `https://${part}` : part;
+    return (
+      <a
+        key={i}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(ev) => ev.stopPropagation()}
+        style={{ color: "inherit", textDecoration: "underline", wordBreak: "break-word" }}
+      >
+        {part}
+      </a>
+    );
+  });
+}
+
 // Votes are a list of who voted, not a tally. A bare number meant one person
 // could tap the button ten times, and — because two screens both read "4" and
 // both wrote "5" — two people voting at once counted as one. A list of names
@@ -3637,7 +3667,7 @@ function Chat({ data, saveData, profile }) {
             {visible.map((m) => (
               <div key={m.id} style={{ marginBottom: 12, textAlign: m.from === profile ? "right" : "left" }}>
                 {thread === "team" && m.from !== profile && <div style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 3 }}>{m.from}</div>}
-                <div style={{ display: "inline-block", background: m.from === profile ? "var(--gold)" : "var(--panel-raised)", color: m.from === profile ? "#171812" : "var(--text)", padding: "8px 12px", borderRadius: 10, fontSize: 13, maxWidth: "75%", textAlign: "left" }}>{m.text}</div>
+                <div style={{ display: "inline-block", background: m.from === profile ? "var(--gold)" : "var(--panel-raised)", color: m.from === profile ? "#171812" : "var(--text)", padding: "8px 12px", borderRadius: 10, fontSize: 13, maxWidth: "75%", textAlign: "left", whiteSpace: "pre-wrap", wordBreak: "break-word" }}><Linkify text={m.text} /></div>
                 <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>{m.time}</div>
               </div>
             ))}
