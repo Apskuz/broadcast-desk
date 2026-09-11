@@ -7,12 +7,16 @@ import Analytics, { AnalyticsIcon } from "./Analytics";
 // Only pulled in when someone actually exports, so the 200KB doesn't sit in
 // the bundle everyone downloads just to look at the board.
 const loadHtml2Canvas = () => import("html2canvas").then((m) => m.default || m);
+// Several megabytes of model, so it is fetched the first time somebody asks
+// for it and never as part of opening the app. It runs on the phone or laptop
+// itself: nothing is uploaded anywhere, and there is no per-image cost.
+const loadBackgroundRemover = () => import("@imgly/background-removal").then((m) => m.removeBackground || m.default);
 import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
   Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
-  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette
+  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette, Search, Play as PlayIcon, Maximize2, Scissors, PenTool
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -226,6 +230,25 @@ const MASK_SHAPES = [
   { id: "arch", label: "Arch", css: "inset(0 round 50% 50% 6px 6px)" },
 ];
 const maskCss = (id) => (MASK_SHAPES.find((m) => m.id === id) || MASK_SHAPES[0]).css;
+
+// A curve through a run of points. Catmull-Rom converted to cubic Béziers, so
+// every point the person placed is actually on the line — which is what they
+// expect, and is not true of a plain Bézier where the middle points only pull
+// at it. It also means each point can be dragged afterwards and the curve
+// simply re-forms, with no separate handles to understand.
+const curveThrough = (pts) => {
+  if (!pts || pts.length < 2) return "";
+  if (pts.length === 2) return `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+  const at = (i) => pts[Math.max(0, Math.min(pts.length - 1, i))];
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+    const c1x = p1.x + (p2.x - p0.x) / 6, c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6, c2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`;
+  }
+  return d;
+};
 const SHADOWS = [
   { id: "none", label: "None", css: "none" },
   { id: "soft", label: "Soft", css: "drop-shadow(0 6px 14px rgba(0,0,0,0.45))" },
@@ -3220,6 +3243,17 @@ function IdeaBank({ data, saveData, profile }) {
     e.preventDefault();
     const { x, y } = pointOn(e);
     if (tool === "pin") { addPin(x, y); return; }
+    if (tool === "curve") {
+      // Click to drop points, and finish by clicking the last one again or
+      // pressing Enter. Deliberately not a drag: placing a considered curve
+      // point by point is the one thing a mouse does better than a finger,
+      // which is why the tool isn't offered on a phone at all.
+      const pts = penPoints || [];
+      const last = pts[pts.length - 1];
+      if (last && Math.abs(last.x - x) < 9 && Math.abs(last.y - y) < 9) return finishCurve(pts);
+      setPenPoints([...pts, { x, y }]);
+      return;
+    }
     if (tool === "text" || tool === "note") {
       // A sticky note is a text box with a background — same dragging, same
       // editing, same everything, so it doesn't need a type of its own.
@@ -3283,6 +3317,28 @@ function IdeaBank({ data, saveData, profile }) {
     window.addEventListener("touchend", end);
   };
 
+  const finishCurve = (pts) => {
+    setPenPoints(null);
+    if (!pts || pts.length < 2) return;
+    edit({
+      ...data,
+      ideaDrawings: [...(data.ideaDrawings || []), {
+        id: uid(), folderId: openFolderId || null, tool: "curve", curve: pts,
+        color: drawColor, width: drawWidth, opacity: drawOpacity, fill: drawFill,
+      }],
+    });
+  };
+  // Dragging one of a finished curve's points reshapes it, which is the whole
+  // reason for this tool rather than the freehand pen.
+  const moveCurvePoint = (shapeId, index, x, y) => {
+    edit({
+      ...data,
+      ideaDrawings: (data.ideaDrawings || []).map((sh) => (sh.id === shapeId
+        ? { ...sh, curve: sh.curve.map((pt, i) => (i === index ? { x: Math.round(x), y: Math.round(y) } : pt)) }
+        : sh)),
+    });
+  };
+
   const eraseShape = (id) => edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => d.id !== id) });
   const clearDrawings = () => edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId !== openFolderId : !!d.folderId)) });
 
@@ -3332,6 +3388,8 @@ function IdeaBank({ data, saveData, profile }) {
       layer("ellipse", { cx: (s.x1 + s.x2) / 2, cy: (s.y1 + s.y2) / 2, rx: Math.abs(s.x2 - s.x1) / 2, ry: Math.abs(s.y2 - s.y1) / 2 });
     } else if (s.tool === "bubble") {
       layer("path", { d: bubblePath(s) });
+    } else if (s.tool === "curve") {
+      layer("path", { d: curveThrough(s.curve || []) });
     }
     return shapes;
   };
@@ -3341,6 +3399,7 @@ function IdeaBank({ data, saveData, profile }) {
     { id: "text", label: "Text", icon: TypeIcon },
     { id: "note", label: "Note", icon: StickyNote },
     { id: "pen", label: "Pen", icon: Pencil },
+    ...(isNarrow ? [] : [{ id: "curve", label: "Curve", icon: PenTool }]),
     { id: "line", label: "Line", icon: Minus },
     { id: "arrow", label: "Arrow", icon: ArrowRight },
     { id: "rect", label: "Box", icon: Square },
@@ -3351,7 +3410,7 @@ function IdeaBank({ data, saveData, profile }) {
   ];
   // Which tools draw a shape that can be filled — a pen line and an arrow have
   // no inside to fill.
-  const FILLABLE = ["rect", "circle", "bubble"];
+  const FILLABLE = ["rect", "circle", "bubble", "curve"];
 
   // ---- loose pictures and text placed straight on the board ----
   // Separate from idea cards: these are for laying out a case — a wall of
@@ -3650,6 +3709,24 @@ function IdeaBank({ data, saveData, profile }) {
 
   snapRef.current = snapTo;
 
+  // A layout the team worked out themselves is worth more than any of mine.
+  // Saving one takes what's on this board and stores it as plain items and
+  // shapes, positions and all — the same shape a built-in template produces,
+  // so it lands through exactly the same code and behaves identically.
+  const saveAsTemplate = () => {
+    const name = (window.prompt("Name this layout, so it's recognisable in the list:") || "").trim();
+    if (!name) return;
+    const strip = (el) => { const { id, folderId, groupId, ...rest } = el; return rest; };
+    edit({
+      ...data,
+      savedTemplates: [
+        { id: uid(), name, by: profile || "Someone", date: todayISO(), items: boardItems.map(strip), shapes: drawings.map(strip) },
+        ...(data.savedTemplates || []),
+      ].slice(0, 20),
+    });
+  };
+  const forgetTemplate = (id) => edit({ ...data, savedTemplates: (data.savedTemplates || []).filter((t) => t.id !== id) });
+
   const openHistory = async () => {
     setHistory("loading");
     const { data: rows, error } = await supabase
@@ -3683,6 +3760,110 @@ function IdeaBank({ data, saveData, profile }) {
     setSelected(null);
   };
 
+  // A join between two things rather than a line at two coordinates. It holds
+  // the ids, works out where to draw itself from wherever they are now, and so
+  // follows them when either is dragged — which is the whole difference between
+  // drawing an arrow and actually connecting something.
+  const links = (data.boardLinks || []).filter((l) => (l.folderId || null) === (openFolderId || null));
+  const linkableAt = (kind, id) => listFor(kind).find((el) => el.id === id);
+  const joinSelection = () => {
+    if (selection.length !== 2) return;
+    const [a, b] = selection;
+    edit({
+      ...data,
+      boardLinks: [...(data.boardLinks || []), { id: uid(), folderId: openFolderId || null, from: { kind: a.kind, id: a.id }, to: { kind: b.kind, id: b.id }, color: drawColor, width: drawWidth }],
+    });
+  };
+  const unjoin = (id) => edit({ ...data, boardLinks: (data.boardLinks || []).filter((l) => l.id !== id) });
+  // Any join whose either end has gone is dropped on sight rather than drawn
+  // pointing at nothing.
+  const liveLinks = links
+    .map((l) => ({ l, a: linkableAt(l.from.kind, l.from.id), b: linkableAt(l.to.kind, l.to.id) }))
+    .filter((r) => r.a && r.b);
+  // Meets each box at its edge instead of burying the head under the middle.
+  const edgePoint = (from, to) => {
+    const cx = from.x + from.w / 2, cy = from.y + from.h / 2;
+    const dx = to.x + to.w / 2 - cx, dy = to.y + to.h / 2 - cy;
+    if (!dx && !dy) return { x: cx, y: cy };
+    const scale = Math.min(
+      Math.abs(dx) > 0.01 ? (from.w / 2) / Math.abs(dx) : Infinity,
+      Math.abs(dy) > 0.01 ? (from.h / 2) / Math.abs(dy) : Infinity
+    );
+    return { x: cx + dx * scale, y: cy + dy * scale };
+  };
+
+  const [findText, setFindText] = useState(null);   // null when the box is closed
+  // Looks everywhere, not just the board you happen to be standing on — the
+  // whole point is finding the thing when you've forgotten which folder it's in.
+  const findHits = () => {
+    const needle = (findText || "").trim().toLowerCase();
+    if (needle.length < 2) return [];
+    const where = (fid) => (fid ? (folders.find((f) => f.id === fid) || {}).name || "a folder" : "the main board");
+    const hits = [];
+    for (const i of ideas) {
+      const hay = `${i.title || ""} ${i.description || ""} ${(i.tags || []).join(" ")}`.toLowerCase();
+      if (hay.includes(needle)) hits.push({ kind: "idea", id: i.id, folderId: i.folderId || null, label: i.title || "Untitled idea", where: where(i.folderId) });
+    }
+    for (const b of data.boardItems || []) {
+      if (b.type === "text" && (b.text || "").toLowerCase().includes(needle)) {
+        hits.push({ kind: "item", id: b.id, folderId: b.folderId || null, label: (b.text || "").slice(0, 44), where: where(b.folderId) });
+      }
+      if (b.type === "image" && (b.name || "").toLowerCase().includes(needle)) {
+        hits.push({ kind: "item", id: b.id, folderId: b.folderId || null, label: b.name, where: where(b.folderId) });
+      }
+    }
+    for (const c of data.boardComments || []) {
+      if ((c.text || "").toLowerCase().includes(needle)) hits.push({ kind: "pin", id: c.id, folderId: c.folderId || null, label: c.text.slice(0, 44), where: where(c.folderId) });
+    }
+    for (const f of folders) {
+      if ((f.name || "").toLowerCase().includes(needle)) hits.push({ kind: "folder", id: f.id, folderId: null, label: f.name, where: "the main board" });
+    }
+    return hits.slice(0, 40);
+  };
+  // Takes you to it and picks it up, so it's obvious which one was meant even
+  // on a busy board.
+  const goToHit = (hit) => {
+    setOpenFolderId(hit.folderId || null);
+    setFindText(null);
+    if (hit.kind === "pin") { setOpenPinId(hit.id); setSelected(null); return; }
+    setSelected({ kind: hit.kind, id: hit.id });
+  };
+
+  // Walking a board in front of people. Each folder is a slide and the main
+  // board is the first one, because that's the structure the team already made
+  // rather than a second one they'd have to maintain.
+  const [presenting, setPresenting] = useState(null); // index into the slide list
+  const slides = [{ id: null, name: "Main board" }, ...folders.map((f) => ({ id: f.id, name: f.name }))];
+  const startPresenting = () => {
+    setSelected(null);
+    setPresenting(0);
+    setOpenFolderId(null);
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+  };
+  const stopPresenting = () => {
+    setPresenting(null);
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  };
+  const goSlide = (dir) => {
+    setPresenting((now) => {
+      if (now === null) return now;
+      const next = Math.max(0, Math.min(slides.length - 1, now + dir));
+      setOpenFolderId(slides[next].id);
+      return next;
+    });
+  };
+  useEffect(() => {
+    if (presenting === null) return undefined;
+    const onKey = (ev) => {
+      if (ev.key === "ArrowRight" || ev.key === " " || ev.key === "PageDown") { ev.preventDefault(); goSlide(1); }
+      if (ev.key === "ArrowLeft" || ev.key === "PageUp") { ev.preventDefault(); goSlide(-1); }
+      if (ev.key === "Escape") stopPresenting();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   const ZOOM_STEPS = [0.25, 0.4, 0.55, 0.75, 1, 1.25, 1.5, 2, 3];
   // Keeps whatever is in the middle of the view in the middle afterwards,
   // rather than throwing you to the top-left corner every time.
@@ -3707,6 +3888,45 @@ function IdeaBank({ data, saveData, profile }) {
     const box = scrollRef.current;
     if (!box) return;
     zoomTo(Math.min(1, (box.clientWidth - 8) / BOARD_W));
+  };
+
+  const [cutting, setCutting] = useState("");
+  const [penPoints, setPenPoints] = useState(null);  // the curve being placed
+  // The original file is left exactly where it is and a second, transparent one
+  // is put beside it. That matters: the model is good but not perfect, and
+  // having replaced the only copy of a photo with a bad cut-out would be a
+  // thing you could not undo.
+  const removeBackgroundFrom = async (item) => {
+    if (!item || !item.fileId) return;
+    setCutting("Fetching the picture…");
+    try {
+      const res = await fetch(driveThumbSrc(item.fileId, "s1600"));
+      const blob = await res.blob();
+      setCutting("Loading the model — this is the slow bit, once per device…");
+      const removeBg = await loadBackgroundRemover();
+      const cut = await removeBg(blob, {
+        // Progress arrives in stages; the numbers are less useful than knowing
+        // it hasn't died.
+        progress: (key, current, total) => {
+          if (key && key.startsWith("fetch")) setCutting(`Loading the model… ${Math.round((current / (total || 1)) * 100)}%`);
+          else setCutting("Working out the edges…");
+        },
+      });
+      setCutting("Saving the cut-out…");
+      const file = new File([cut], `${(item.name || "picture").replace(/\.[^.]+$/, "")}-cutout.png`, { type: "image/png" });
+      const result = await uploadToDrive(file, () => {}, profile);
+      const box = boundsOf(item);
+      addBoardItem({
+        type: "image", fileId: driveFileId(result.link), kind: "image", name: result.name,
+        x: Math.round(box.x + 26), y: Math.round(box.y + 26), w: item.w || 260,
+        crop: item.crop || null, imgAspect: item.imgAspect || null, z: topStack() + 1,
+      });
+    } catch {
+      setCutting("That didn't work — the picture may be too big, or the model couldn't load.");
+      setTimeout(() => setCutting(""), 4000);
+      return;
+    }
+    setCutting("");
   };
 
   const saveCrop = (crop, imgAspect) => {
@@ -3970,6 +4190,43 @@ function IdeaBank({ data, saveData, profile }) {
   // Export renders the board element itself rather than redrawing it from the
   // saved data, so what lands in the picture is exactly what's on screen —
   // fonts, photos, strokes and all — with nothing to keep in sync.
+  // Cuts the picked things out of the finished picture rather than rendering
+  // them separately: whatever overlaps them — a drawn arrow, a colour wash —
+  // is part of how they look, and rendering them alone would lose it.
+  const exportSelection = async () => {
+    const rows = pickedElements();
+    if (!rows.length || !boardRef.current) return;
+    const boxes = rows.map((r) => boundsOf(r.el));
+    const pad = 24;
+    const left = Math.max(0, Math.min(...boxes.map((b) => b.x)) - pad);
+    const top = Math.max(0, Math.min(...boxes.map((b) => b.y)) - pad);
+    const right = Math.min(BOARD_W, Math.max(...boxes.map((b) => b.x + b.w)) + pad);
+    const bottom = Math.min(BOARD_H, Math.max(...boxes.map((b) => b.y + b.h)) + pad);
+    if (right - left < 8 || bottom - top < 8) return;
+
+    setSelected(null);
+    setExporting("selection");
+    try {
+      const html2canvas = await loadHtml2Canvas();
+      await new Promise((r) => setTimeout(r, 60));
+      const scale = 2;
+      const full = await html2canvas(boardRef.current, {
+        backgroundColor: surface.paper === "var(--panel)" ? "#12141B" : surface.paper,
+        scale, useCORS: true, logging: false,
+        width: BOARD_W, height: BOARD_H, windowWidth: BOARD_W, windowHeight: BOARD_H,
+      });
+      const cut = document.createElement("canvas");
+      cut.width = (right - left) * scale;
+      cut.height = (bottom - top) * scale;
+      cut.getContext("2d").drawImage(full, left * scale, top * scale, cut.width, cut.height, 0, 0, cut.width, cut.height);
+      const link = document.createElement("a");
+      link.download = `${currentFolder ? currentFolder.name : "idea-board"}-piece-${todayISO()}.png`;
+      link.href = cut.toDataURL("image/png");
+      link.click();
+    } catch { /* nothing partial is left behind */ }
+    setExporting("");
+  };
+
   const exportBoard = async (mode) => {
     if (!boardRef.current) return;
     setSelected(null);            // no gold ring in the exported picture
@@ -4156,6 +4413,10 @@ function IdeaBank({ data, saveData, profile }) {
         const by = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[ev.key];
         if (by) { ev.preventDefault(); return nudgeSelection(by[0], by[1]); }
       }
+      if (penPoints && (ev.key === "Enter" || ev.key === "Escape")) {
+        ev.preventDefault();
+        return ev.key === "Enter" ? finishCurve(penPoints) : setPenPoints(null);
+      }
       if (ev.key === "Escape") setSelected(null);
     };
     window.addEventListener("keydown", onKey);
@@ -4272,12 +4533,19 @@ function IdeaBank({ data, saveData, profile }) {
           ) : (
             <button className="btn" onClick={() => setShowFolderForm(true)}><Folder size={15} /> New folder</button>
           )}
+          <button className="btn" onClick={startPresenting}><PlayIcon size={15} /> Present</button>
+          <button className="btn" onClick={() => setFindText("")}><Search size={15} /> Find</button>
           <button className="btn" onClick={openHistory}><Clock size={15} /> History</button>
           <button className="btn" onClick={() => setShowStickers(true)}><Smile size={15} /> Stickers</button>
           <button className="btn" onClick={() => setShowTemplates(true)}><Layers size={15} /> Templates</button>
           <button className="btn" onClick={() => exportBoard("png")} disabled={!!exporting}>
             <Upload size={15} /> {exporting === "png" ? "Saving…" : "PNG"}
           </button>
+          {selection.length > 0 && (
+            <button className="btn" onClick={exportSelection} disabled={!!exporting}>
+              <Upload size={15} /> {exporting === "selection" ? "Saving…" : "Export picked"}
+            </button>
+          )}
           <button className="btn" onClick={() => exportBoard("print")} disabled={!!exporting}>
             <BookOpen size={15} /> {exporting === "print" ? "Preparing…" : "PDF"}
           </button>
@@ -4407,8 +4675,51 @@ function IdeaBank({ data, saveData, profile }) {
             // so restacking a picture must never bury someone's notes.
             style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 900 }}
           >
+            {liveLinks.map(({ l, a, b }) => {
+              const from = edgePoint(boundsOf(a), boundsOf(b));
+              const to = edgePoint(boundsOf(b), boundsOf(a));
+              const w = l.width || 3;
+              const head = arrowHeadPoints({ x1: from.x, y1: from.y, x2: to.x, y2: to.y }, w);
+              return (
+                <g key={l.id}>
+                  <line
+                    x1={from.x} y1={from.y} x2={to.x} y2={to.y}
+                    stroke="transparent" strokeWidth={Math.max(18, w + 14)}
+                    style={{ cursor: tool === "erase" ? "pointer" : "default", pointerEvents: tool === "erase" ? "stroke" : "none" }}
+                    onClick={() => { if (tool === "erase") unjoin(l.id); }}
+                  />
+                  <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke={l.color} strokeWidth={w} strokeLinecap="round" />
+                  <polygon points={head} fill={l.color} stroke={l.color} strokeWidth={1} strokeLinejoin="round" />
+                </g>
+              );
+            })}
             {[...drawings].sort((a, b) => stackOf(a) - stackOf(b)).map((sh) => renderShape(sh, sh.id, false))}
             {draft && renderShape(draft, "draft", true)}
+            {/* The curve being placed, plus the points of a finished one that's
+                picked, so it can be reshaped afterwards. */}
+            {penPoints && penPoints.length > 0 && (
+              <g>
+                <path d={curveThrough(penPoints)} stroke={drawColor} strokeWidth={drawWidth} fill="none" opacity={0.75} strokeDasharray="6 5" />
+                {penPoints.map((pt, i) => <circle key={i} cx={pt.x} cy={pt.y} r={4} fill="var(--gold)" />)}
+              </g>
+            )}
+            {pickedShape && pickedShape.tool === "curve" && (pickedShape.curve || []).map((pt, i) => (
+              <circle
+                key={i} cx={pt.x} cy={pt.y} r={6}
+                fill="var(--gold)" stroke="#171812" strokeWidth={1.5}
+                style={{ cursor: "grab", pointerEvents: "all" }}
+                onMouseDown={(ev) => {
+                  ev.stopPropagation();
+                  const move = (m) => {
+                    const rect = boardRef.current.getBoundingClientRect();
+                    moveCurvePoint(pickedShape.id, i, (m.clientX - rect.left) / zoomRef.current, (m.clientY - rect.top) / zoomRef.current);
+                  };
+                  const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+                  window.addEventListener("mousemove", move);
+                  window.addEventListener("mouseup", up);
+                }}
+              />
+            ))}
             {strokesHere.map((a) => renderShape(a.shape, `live-${a.id}`, true))}
           </svg>
 
@@ -4735,6 +5046,9 @@ function IdeaBank({ data, saveData, profile }) {
                 {selection.length > 1 && (
                   <button className="btn" style={PANEL_BTN} onClick={groupSelection}><Layers size={11} /> Group</button>
                 )}
+                {selection.length === 2 && (
+                  <button className="btn" style={PANEL_BTN} onClick={joinSelection} title="An arrow that follows both of them"><ArrowRight size={11} /> Join</button>
+                )}
                 {selection.some((sel) => (listFor(sel.kind).find((el) => el.id === sel.id) || {}).groupId) && (
                   <button className="btn" style={PANEL_BTN} onClick={ungroupSelection}>Ungroup</button>
                 )}
@@ -4817,7 +5131,14 @@ function IdeaBank({ data, saveData, profile }) {
                   disabled={!hasLook(pickedPhoto)}
                 >Before</button>
                 <button className="btn" style={PANEL_BTN} onClick={copyLook} disabled={!hasLook(pickedPhoto)} title="Copy this look">Copy look</button>
+                <button
+                  className="btn" style={PANEL_BTN} onClick={() => removeBackgroundFrom(pickedPhoto)} disabled={!!cutting}
+                  title="Cuts the subject out and puts the result beside the original"
+                ><Scissors size={11} /> Cut out</button>
               </div>
+              {cutting && (
+                <div style={{ fontSize: 10.5, color: "var(--gold)", marginTop: 7, lineHeight: 1.4 }}>{cutting}</div>
+              )}
               {lookClip && (
                 <button
                   className="btn" style={{ ...PANEL_BTN, marginTop: 6, width: "100%", justifyContent: "center", borderColor: "var(--teal)", color: "var(--teal)" }}
@@ -5075,6 +5396,23 @@ function IdeaBank({ data, saveData, profile }) {
         <CropModal item={cropping} onCancel={() => setCropping(null)} onSave={saveCrop} />
       )}
 
+      {presenting !== null && (
+        // Sits over everything and drives the board underneath rather than
+        // rendering a second copy of it — so what's on screen is the real
+        // board, still live, still updating if someone edits during the talk.
+        <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "12px 16px", background: "linear-gradient(transparent, rgba(0,0,0,0.75) 40%)", pointerEvents: "none" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 999, padding: "7px 10px", pointerEvents: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.5)" }}>
+            <button className="btn" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => goSlide(-1)} disabled={presenting === 0}><ChevronLeft size={14} /></button>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", minWidth: 150, textAlign: "center" }}>
+              {slides[presenting] ? slides[presenting].name : ""} <span style={{ color: "var(--muted)", fontWeight: 400 }}>· {presenting + 1}/{slides.length}</span>
+            </span>
+            <button className="btn" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => goSlide(1)} disabled={presenting >= slides.length - 1}><ChevronRight size={14} /></button>
+            <button className="btn" style={{ padding: "5px 10px", fontSize: 12 }} onClick={zoomToFit} title="Fit the board"><Maximize2 size={13} /></button>
+            <button className="btn" style={{ padding: "5px 10px", fontSize: 12 }} onClick={stopPresenting}>Done</button>
+          </div>
+        </div>
+      )}
+
       {history !== null && (
         <Modal title="Board history" onClose={() => setHistory(null)}>
           {history === "loading" && <div className="empty">Looking…</div>}
@@ -5151,6 +5489,26 @@ function IdeaBank({ data, saveData, profile }) {
             Adds a starting layout to {currentFolder ? `"${currentFolder.name}"` : "this board"} — it only ever adds, so
             nothing already here is touched, and Undo takes the whole thing back in one go.
           </div>
+          {(data.savedTemplates || []).length > 0 && (
+            <>
+              <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", fontWeight: 700, marginBottom: 7 }}>Yours</div>
+              {(data.savedTemplates || []).map((t) => (
+                <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+                  <button
+                    onClick={() => applyTemplate({ build: () => ({ items: t.items || [], shapes: t.shapes || [] }) })}
+                    style={{ flex: 1, textAlign: "left", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 9, padding: "11px 13px", cursor: "pointer" }}
+                  >
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", marginBottom: 3 }}>{t.name}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                      {(t.items || []).length} things · {(t.shapes || []).length} drawn · saved by {t.by}
+                    </div>
+                  </button>
+                  <button className="btn" style={{ padding: "5px 9px", fontSize: 11 }} onClick={() => forgetTemplate(t.id)}>Forget</button>
+                </div>
+              ))}
+              <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", fontWeight: 700, margin: "14px 0 7px" }}>Ready-made</div>
+            </>
+          )}
           {BOARD_TEMPLATES.map((t) => (
             <button
               key={t.id} onClick={() => applyTemplate(t)}
@@ -5160,7 +5518,41 @@ function IdeaBank({ data, saveData, profile }) {
               <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45 }}>{t.blurb}</div>
             </button>
           ))}
-          <div className="modal-actions"><button className="btn" onClick={() => setShowTemplates(false)}>Cancel</button></div>
+          <div className="modal-actions">
+            <button className="btn" onClick={saveAsTemplate} disabled={boardItems.length === 0 && drawings.length === 0}>
+              Save this board as a template
+            </button>
+            <button className="btn" onClick={() => setShowTemplates(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+
+      {findText !== null && (
+        <Modal title="Find on the boards" onClose={() => setFindText(null)}>
+          <input
+            autoFocus value={findText} onChange={(e) => setFindText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") setFindText(null); }}
+            placeholder="Type at least two letters…"
+            style={{ width: "100%", boxSizing: "border-box", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 6, color: "var(--text)", fontSize: 13, padding: "9px 11px", outline: "none", marginBottom: 12 }}
+          />
+          {findText.trim().length < 2 ? (
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>Searches idea cards, text and notes, pictures by name, comments and folder names — across every folder, not just this board.</div>
+          ) : findHits().length === 0 ? (
+            <div className="empty">Nothing matches that.</div>
+          ) : (
+            findHits().map((hit) => (
+              <button
+                key={hit.kind + hit.id} onClick={() => goToHit(hit)}
+                style={{ display: "block", width: "100%", textAlign: "left", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 8, padding: "9px 11px", marginBottom: 7, cursor: "pointer" }}
+              >
+                <div style={{ fontSize: 12.5, color: "var(--text)", marginBottom: 2 }}>{hit.label}</div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)" }}>
+                  {hit.kind === "idea" ? "Idea" : hit.kind === "pin" ? "Comment" : hit.kind === "folder" ? "Folder" : "On the board"} · in {hit.where}
+                </div>
+              </button>
+            ))
+          )}
+          <div className="modal-actions"><button className="btn" onClick={() => setFindText(null)}>Close</button></div>
         </Modal>
       )}
 
@@ -7145,6 +7537,8 @@ function normalizeBoard(raw) {
   for (const key of BOARD_LISTS) if (!Array.isArray(board[key])) board[key] = [];
   board.ideas = board.ideas.map(withVoteList);
   if (!Array.isArray(board.boardPalette)) board.boardPalette = [];
+  if (!Array.isArray(board.savedTemplates)) board.savedTemplates = [];
+  if (!Array.isArray(board.boardLinks)) board.boardLinks = [];
   if (!board.boardSurfaces || typeof board.boardSurfaces !== "object" || Array.isArray(board.boardSurfaces)) board.boardSurfaces = {};
   if (typeof board.adminCode !== "string") board.adminCode = "";
   if (!board.goals || typeof board.goals !== "object" || Array.isArray(board.goals)) board.goals = {};
