@@ -3650,6 +3650,43 @@ function IdeaBank({ data, saveData, profile }) {
 
   const cutSelection = () => { copySelection(); deleteSelected(); };
 
+  // Ctrl+V does one of two things depending on what's on the system clipboard:
+  // a screenshot becomes a new picture on the board, anything else falls
+  // through to the board's own clipboard. Handled on the paste event rather
+  // than on the keydown, because only the paste event carries the image.
+  //
+  // The handler lives in a ref so the listener can be attached exactly once.
+  // The first version re-attached on every render — correct, since it cleaned
+  // up after itself, but it meant a listener being torn down and rebuilt on
+  // every keystroke anywhere in the board. Holding it still is both cheaper
+  // and one less thing that has to keep being right.
+  const pasteHandlerRef = useRef(null);
+  const pasteBusyRef = useRef(false);
+  pasteHandlerRef.current = async (ev) => {
+    const item = [...((ev.clipboardData && ev.clipboardData.items) || [])].find((it) => it.type && it.type.startsWith("image/"));
+    if (item) {
+      ev.preventDefault();
+      // An upload takes seconds, and a second Ctrl+V in that window would put
+      // the same screenshot on the board twice.
+      if (pasteBusyRef.current) return;
+      const file = item.getAsFile();
+      if (!file) return;
+      pasteBusyRef.current = true;
+      try { await addPictureFromFile(file, pointerRef.current); }
+      finally { pasteBusyRef.current = false; }
+      return;
+    }
+    const el = ev.target;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+    ev.preventDefault();
+    pasteClipboard();
+  };
+  useEffect(() => {
+    const onPaste = (ev) => pasteHandlerRef.current && pasteHandlerRef.current(ev);
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
+
   const pasteClipboard = () => {
     const clip = readClipboard();
     if (!clip || !clip.groups) return;
@@ -3942,7 +3979,8 @@ function IdeaBank({ data, saveData, profile }) {
       if (meta && ev.key.toLowerCase() === "d") { ev.preventDefault(); return duplicateSelected(); }
       if (meta && ev.key.toLowerCase() === "c") { ev.preventDefault(); return copySelection(); }
       if (meta && ev.key.toLowerCase() === "x") { ev.preventDefault(); return cutSelection(); }
-      if (meta && ev.key.toLowerCase() === "v") { ev.preventDefault(); return pasteClipboard(); }
+      // V is deliberately absent: the paste event above handles it, and it's
+      // the only one of the two that can see a screenshot on the clipboard.
       if (ev.key === "Delete" || ev.key === "Backspace") { if (selected) { ev.preventDefault(); deleteSelected(); } return; }
       if (meta && ev.key.toLowerCase() === "a") {
         ev.preventDefault();
@@ -3975,9 +4013,12 @@ function IdeaBank({ data, saveData, profile }) {
     edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, text } : b)) });
   };
 
-  const handleBoardFileSelect = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
+  // Pictures arrive three ways now — the picker, a file dragged in, or a
+  // screenshot pasted — and all three want the same thing to happen, so they
+  // all come through here. `at` is where to put it; without one they cascade
+  // from the corner the way the picker always did.
+  const addPictureFromFile = async (file, at) => {
+    if (!file || !file.type || !file.type.startsWith("image/")) return false;
     setBoardUploading(true);
     setBoardUploadProgress(0);
     try {
@@ -3988,15 +4029,44 @@ function IdeaBank({ data, saveData, profile }) {
         fileId: driveFileId(result.link),
         kind: result.kind,
         name: result.name,
-        x: 60 + (count % 5) * 60,
-        y: 60 + (count % 5) * 40,
+        x: at ? Math.max(0, Math.round(at.x)) : 60 + (count % 5) * 60,
+        y: at ? Math.max(0, Math.round(at.y)) : 60 + (count % 5) * 40,
         w: 260,
       });
+      return true;
     } catch {
-      // the picker can just be used again — nothing half-created is left behind
+      // nothing half-created is left behind; the picker can just be used again
+      return false;
+    } finally {
+      setBoardUploading(false);
     }
-    setBoardUploading(false);
+  };
+
+  const handleBoardFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    await addPictureFromFile(file);
     e.target.value = "";
+  };
+
+  // Dropping files on the board. Several at once fan out from where they landed
+  // rather than piling up in one spot.
+  const [dropTarget, setDropTarget] = useState(false);
+  const handleBoardDrop = async (e) => {
+    const files = [...((e.dataTransfer && e.dataTransfer.files) || [])].filter((fl) => fl.type.startsWith("image/"));
+    if (!files.length) return;
+    e.preventDefault();
+    setDropTarget(false);
+    const rect = boardRef.current && boardRef.current.getBoundingClientRect();
+    const at = rect
+      ? { x: (e.clientX - rect.left) / zoomRef.current, y: (e.clientY - rect.top) / zoomRef.current }
+      : null;
+    // One at a time: each upload needs the board as it stands after the last,
+    // and firing them together would have them all read the same board and
+    // only the last one stick.
+    for (let i = 0; i < files.length; i++) {
+      await addPictureFromFile(files[i], at ? { x: at.x + i * 26, y: at.y + i * 22 } : null);
+    }
   };
 
   // Dragging the corner of a picture to size it, saved once on release.
@@ -4141,6 +4211,9 @@ function IdeaBank({ data, saveData, profile }) {
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexDirection: isNarrow ? "column" : "row" }}>
         <div
           ref={scrollRef}
+          onDragOver={(e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); setDropTarget(true); } }}
+          onDragLeave={(e) => { if (e.currentTarget === e.target) setDropTarget(false); }}
+          onDrop={handleBoardDrop}
           onWheel={(e) => {
             // Ctrl+wheel is the zoom gesture everywhere else, and it's what a
             // trackpad pinch arrives as. Plain wheel still scrolls.
@@ -4148,7 +4221,7 @@ function IdeaBank({ data, saveData, profile }) {
             e.preventDefault();
             zoomTo(zoomRef.current * (e.deltaY < 0 ? 1.12 : 0.89));
           }}
-          style={{ position: "relative", flex: "1 1 auto", minWidth: 0, width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}
+          style={{ position: "relative", flex: "1 1 auto", minWidth: 0, width: "100%", overflow: "auto", border: `1px solid ${dropTarget ? "var(--gold)" : "var(--hair)"}`, borderRadius: 12, background: "var(--panel)", outline: dropTarget ? "2px dashed var(--gold)" : "none", outlineOffset: -5 }}
         >
         {/* A shim at the zoomed size, because a transform doesn't change how
             much room something takes up — without it the scrollbars would still
@@ -4468,6 +4541,7 @@ function IdeaBank({ data, saveData, profile }) {
             {!picked && (
               <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 }}>
                 Click something to pick it up, double-click to open it, Shift-click for several.
+                Drag pictures straight onto the board, or paste a screenshot with Ctrl+V.
                 The settings below apply to whatever you draw next.
               </div>
             )}
