@@ -1,50 +1,77 @@
 /* --------------------------------------------------------------------------
- * Remove something from a picture.
+ * Content-aware fill.
  *
  * Adobe's version sends the photo to Firefly and gets back pixels a model
  * invented. We cannot do that here — there is no model to call, and calling one
  * would cost money per picture. So this is the other thing, the one that ran
- * inside Photoshop for a decade before Firefly existed: PatchMatch (Barnes et
- * al., 2009), the algorithm behind content-aware fill.
+ * inside Photoshop for a decade before Firefly existed, and it is assembled
+ * here out of four papers that each fix what the one before it got wrong.
  *
- * It invents nothing. Working inward from the edge of the hole, it hunts the
- * rest of the same photograph for the patch that best fits what is already
- * settled around each pixel, and copies it. Remove a tree and the gap fills
- * with the sky, hedge and grass the tree was standing in front of, taken from
- * wherever that material actually occurs in the frame.
+ *   PatchMatch (Barnes et al., 2009) is the engine: a randomised way of
+ *   finding, for every patch of the hole, the patch of the rest of the
+ *   photograph that fits it best. Guesses propagate to their neighbours, and a
+ *   random search at exponentially shrinking radius shakes them out of local
+ *   minima. Four or five passes and it has essentially converged.
  *
- * ---- why this used to blur, and what changed -------------------------------
+ *   Image completion (Wexler/Simakov, as used in PatchMatch §4) wraps that in
+ *   expectation-maximisation over a pyramid: find the matches, let every patch
+ *   covering a pixel vote on its colour, average the votes, repeat. That is
+ *   what makes a fill coherent rather than a mosaic of unrelated scraps.
  *
- * The first version solved the fill on a 512px thumbnail and then scaled the
- * invented pixels back up to the photo's real size. For a speck of dust that is
- * a 1x scale and looks perfect. For a tree it is an 8x bilinear enlargement of
- * the answer — and an 8x bilinear enlargement is, precisely, a blur. The patch
- * matching was never the problem; its output was being destroyed on the way
- * home.
+ *   But averaging votes is precisely what blurs. Image Melding (Darabi et al.,
+ *   2012) is the answer: vote on the *gradients* as well as the colours, and
+ *   rebuild the pixels by solving a screened Poisson equation over the two.
+ *   Averaged colours lose texture; averaged gradients keep it, because a
+ *   gradient says "there is an edge here this strong" and that survives being
+ *   averaged with its neighbours in a way that a colour does not. Coherence and
+ *   sharpness at the same time, instead of one bought with the other.
  *
- * So the small solve no longer produces the pixels. It produces the map: for
- * every pixel of the hole, where in the photograph its material comes from.
- * A map is smooth and survives being scaled up. The pixels are then copied at
- * full resolution, straight out of the camera data, through that map. Grass
- * keeps the grain of grass because it is the same grass, at the same
- * resolution, from forty pixels to the left.
+ *   Generalized PatchMatch (Barnes et al., 2010) widens the search from
+ *   translations to scales, rotations and reflections, so a patch of hedge can
+ *   be reused slightly larger, turned, or mirrored. It multiplies the amount of
+ *   the photograph that can be brought to bear on the hole.
+ *
+ *   And Guided PatchMatch (2022) is how this runs on a 4000px photograph at
+ *   all: complete it small, then carry the answer up and *refine it again* at
+ *   the real resolution rather than merely enlarging it. The last stage copies
+ *   camera pixels, so the fill ends up made of photograph rather than of an
+ *   enlargement of a thumbnail.
+ *
+ * It invents nothing: everything in the hole was somewhere else in the same
+ * frame. That makes it very good at a bin, a sign, a wire, a passer-by, and
+ * bad at anything needing an object that is not in the picture at all.
  *
  * It runs on the machine looking at it, costs nothing, and needs no network.
  * ------------------------------------------------------------------------ */
 
-const PATCH = 7;                 // odd; the window matched against the rest of the photo
+const PATCH = 7;
 const HALF = (PATCH - 1) / 2;
-const WORK = 640;                // longest edge of the window the map is solved in
-const HOLE_BUDGET = 26000;       // most pixels the map will ever cover at once
-const COARSEST = 32;             // stop making the pyramid smaller than this
-const REFINE_PASSES = 4;         // coherence passes after the first sweep
-const FINE_BUDGET = 12e6;        // most full-resolution pixels held at once
+
+const WORK = 640;            // longest edge the pyramid is solved on
+const HOLE_BUDGET = 26000;   // most pixels the pyramid will ever synthesise
+const COARSEST = 32;
+const MID_BUDGET = 2e6;      // pixels for the high-resolution refinement pass
+const FINE_BUDGET = 12e6;    // pixels held for the final copy
+
+const REFINE_MIN = 2, REFINE_MAX = 4;  // look-again passes per pyramid level
+const MID_ITERS = 1;               // look-again passes at the refinement size
+const MID_RADIUS = 24;             // how far the close-up search may roam
+
+
+// How far the search may stray from a plain copy. Rotation is kept modest on
+// purpose: a little helps organic texture find a fit, a lot tilts horizons.
+const MIRROR = true;
+const SCALE_LO = 0.85, SCALE_HI = 1.18;
+const ROT_MAX = 0.22;              // radians, about 12 degrees
+
+const W_REAL = 1;                  // a pixel that came out of the camera
+const W_GUESS = 0.5;               // one this run is still deciding
+const GRAD_W = 0.5;                // slope against colour, in the match cost
 
 /* ------------------------------- small helpers ---------------------------- */
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-// A level of the pyramid: colours as floats, plus which pixels are still hole.
 function makeLevel(w, h) {
   return { w, h, rgb: new Float32Array(w * h * 3), hole: new Uint8Array(w * h) };
 }
@@ -87,31 +114,6 @@ function shrink(level) {
   return out;
 }
 
-// Push a solved coarse level up into the next finer one, but only inside the
-// hole: everything outside is real photograph and must not be touched. The map
-// goes up with it, doubled, so the finer level starts from an answer that is
-// already roughly right instead of from nothing.
-function upsampleInto(coarse, fine) {
-  fine.hintX = new Int32Array(fine.w * fine.h).fill(-1);
-  fine.hintY = new Int32Array(fine.w * fine.h);
-  for (let y = 0; y < fine.h; y++) {
-    const cy = Math.min(coarse.h - 1, y >> 1);
-    for (let x = 0; x < fine.w; x++) {
-      const fi = y * fine.w + x;
-      if (!fine.hole[fi]) continue;
-      const cx = Math.min(coarse.w - 1, x >> 1);
-      const ci = cy * coarse.w + cx;
-      fine.rgb[fi * 3] = coarse.rgb[ci * 3];
-      fine.rgb[fi * 3 + 1] = coarse.rgb[ci * 3 + 1];
-      fine.rgb[fi * 3 + 2] = coarse.rgb[ci * 3 + 2];
-      if (coarse.nnx && coarse.hole[ci] && coarse.nnx[ci] >= 0) {
-        fine.hintX[fi] = coarse.nnx[ci] * 2 + (x & 1);
-        fine.hintY[fi] = coarse.nny[ci] * 2 + (y & 1);
-      }
-    }
-  }
-}
-
 // Something has to be in the hole before the first search, or every patch is
 // matching against black.
 //
@@ -120,12 +122,9 @@ function upsampleInto(coarse, fine) {
 // very first thing the search is asked to match is a grey smudge — and it
 // dutifully goes and finds the road. The hole then fills with beautifully
 // sharp, completely wrong material, which is worse than a blur because it looks
-// deliberate.
-//
-// So the seed is grown inward from the hole's own edge instead: every pixel
-// starts as the nearest real pixel to it. A gap in a cliff starts out looking
-// like cliff, and the search is pointed at the right part of the photograph
-// from the first pass.
+// deliberate. So the seed grows inward from the hole's own edge instead: every
+// pixel starts as the nearest real pixel to it, and a gap in a cliff starts out
+// looking like cliff.
 function seedHole(level) {
   const { w, h, hole, rgb } = level;
   const n = w * h;
@@ -141,7 +140,6 @@ function seedHole(level) {
       if (touches) { from[i] = i; queue.push(i); }
     }
   }
-
   for (let k = 0; k < queue.length; k++) {
     const i = queue[k], x = i % w, y = (i / w) | 0;
     const push = (j) => { if (hole[j] && from[j] < 0) { from[j] = from[i]; queue.push(j); } };
@@ -151,8 +149,6 @@ function seedHole(level) {
     if (y < h - 1) push(i + w);
   }
 
-  // A hole touching no real photograph at all has nothing to grow from; the
-  // average is the only thing left to say about it.
   let ar = 0, ag = 0, ab = 0, known = 0;
   for (let i = 0; i < n; i++) {
     if (hole[i]) continue;
@@ -172,63 +168,264 @@ function seedHole(level) {
   }
 }
 
-// Luma slope, recomputed whenever the hole contents change. Matching on colour
-// alone lets a patch sit happily across an edge so long as the average is
-// right, which is how a horizon behind a removed tree ends up stepped. Matching
-// the slope as well makes the edge carry on through the gap.
-function computeGrad(level) {
+// How far every pixel is from the nearest hole pixel. A patch may only be taken
+// from far enough out that nothing it covers is hole — otherwise the fill feeds
+// on itself and smears. With rotation and scale in play the footprint is no
+// longer axis-aligned, so a distance is the honest way to ask the question.
+function holeDistance(level) {
+  const { w, h, hole } = level;
+  const n = w * h;
+  const dist = new Int32Array(n).fill(-1);
+  const queue = [];
+  for (let i = 0; i < n; i++) if (hole[i]) { dist[i] = 0; queue.push(i); }
+  for (let k = 0; k < queue.length; k++) {
+    const i = queue[k], x = i % w, y = (i / w) | 0;
+    const push = (j) => { if (dist[j] < 0) { dist[j] = dist[i] + 1; queue.push(j); } };
+    if (x > 0) push(i - 1);
+    if (x < w - 1) push(i + 1);
+    if (y > 0) push(i - w);
+    if (y < h - 1) push(i + w);
+  }
+  for (let i = 0; i < n; i++) if (dist[i] < 0) dist[i] = 1 << 20;
+  return dist;
+}
+
+// Forward differences of luma, for the match cost. Matching on colour alone
+// lets a patch sit happily across an edge so long as the average is right,
+// which is how a horizon behind a removed tree ends up stepped.
+function computeLuma(level) {
   const { w, h, rgb } = level;
-  if (!level.gx) { level.gx = new Float32Array(w * h); level.gy = new Float32Array(w * h); }
-  const { gx, gy } = level;
-  const lum = (j) => 0.299 * rgb[j * 3] + 0.587 * rgb[j * 3 + 1] + 0.114 * rgb[j * 3 + 2];
+  const n = w * h;
+  if (!level.lum) { level.lum = new Float32Array(n); level.lgx = new Float32Array(n); level.lgy = new Float32Array(n); }
+  const { lum, lgx, lgy } = level;
+  for (let i = 0; i < n; i++) lum[i] = 0.299 * rgb[i * 3] + 0.587 * rgb[i * 3 + 1] + 0.114 * rgb[i * 3 + 2];
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
-      const xm = y * w + (x > 0 ? x - 1 : x), xp = y * w + (x < w - 1 ? x + 1 : x);
-      const ym = (y > 0 ? y - 1 : y) * w + x, yp = (y < h - 1 ? y + 1 : y) * w + x;
-      gx[i] = lum(xp) - lum(xm);
-      gy[i] = lum(yp) - lum(ym);
+      lgx[i] = lum[x < w - 1 ? i + 1 : i] - lum[i];
+      lgy[i] = lum[y < h - 1 ? i + w : i] - lum[i];
     }
   }
 }
 
+// Bilinear read, clamped at the edges.
+function sample3(rgb, w, h, x, y, out) {
+  const fx = clamp(x, 0, w - 1.001), fy = clamp(y, 0, h - 1.001);
+  const x0 = fx | 0, y0 = fy | 0;
+  const x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0;
+  const ax = fx - x0, ay = fy - y0;
+  const i00 = (y0 * w + x0) * 3, i10 = (y0 * w + x1) * 3;
+  const i01 = (y1 * w + x0) * 3, i11 = (y1 * w + x1) * 3;
+  const w00 = (1 - ax) * (1 - ay), w10 = ax * (1 - ay), w01 = (1 - ax) * ay, w11 = ax * ay;
+  out[0] = rgb[i00] * w00 + rgb[i10] * w10 + rgb[i01] * w01 + rgb[i11] * w11;
+  out[1] = rgb[i00 + 1] * w00 + rgb[i10 + 1] * w10 + rgb[i01 + 1] * w01 + rgb[i11 + 1] * w11;
+  out[2] = rgb[i00 + 2] * w00 + rgb[i10 + 2] * w10 + rgb[i01 + 2] * w01 + rgb[i11 + 2] * w11;
+}
+
+function sample1(a, w, h, x, y) {
+  const fx = clamp(x, 0, w - 1.001), fy = clamp(y, 0, h - 1.001);
+  const x0 = fx | 0, y0 = fy | 0;
+  const x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0;
+  const ax = fx - x0, ay = fy - y0;
+  return a[y0 * w + x0] * (1 - ax) * (1 - ay) + a[y0 * w + x1] * ax * (1 - ay)
+    + a[y1 * w + x0] * (1 - ax) * ay + a[y1 * w + x1] * ax * ay;
+}
+
 /* ------------------------------- PatchMatch ------------------------------- */
 
-// How badly a patch centred on the hole side matches one centred on the source
-// side. Sum of squared differences, abandoned early once it cannot win.
-//
-// Real photograph inside the window counts for far more than the guess
-// currently sitting in the hole. Without this the search compares its own
-// invention against the world, finds that smooth matches smooth, and settles
-// on a flat patch — the fill converges to the average of everything and the
-// texture never comes back. Weighting the known pixels up means the boundary
-// decides, and propagation carries that decision inward.
-const W_REAL = 1;          // pixels that came out of the camera
-const W_SETTLED = 0.35;    // pixels this run has already chosen and committed
-const W_UNSET = 0.08;      // pixels still holding the seed colour
-const GRAD_W = 0.6;        // how much the slope counts next to the colour
+// The transform a match carries: mirror, then rotate, then scale. Stored per
+// pixel as the four numbers that make it up rather than as a matrix, because
+// the random search has to contract each of them independently.
+function transformOf(level, i) {
+  const m = level.nnM[i] ? -1 : 1;
+  const a = level.nnA[i], s = level.nnS[i];
+  const c = Math.cos(a) * s, sn = Math.sin(a) * s;
+  // [ c -sn ] [ m 0 ]
+  // [ sn  c ] [ 0 1 ]
+  return { xx: c * m, xy: -sn, yx: sn * m, yy: c };
+}
 
-function patchCost(level, ax, ay, bx, by, best) {
-  const { w, h, rgb, wt, gx, gy } = level;
+// Distance between the patch of the current estimate centred at (ax, ay) and
+// the transformed patch of real photograph centred at (bx, by).
+//
+// Real photograph inside the window counts for more than the estimate. Without
+// that the search compares its own guess against the world, finds that smooth
+// matches smooth, and settles on a flat patch.
+const PX = [0, 0, 0];
+
+function patchDist(level, ax, ay, bx, by, t, cutoff) {
+  const { w, h, rgb, hole, lgx, lgy } = level;
+  const px = PX;
   let sum = 0;
+
+  // Most matches are a plain copy, and a plain copy lands exactly on pixels.
+  // Taking that path without the interpolation is worth about four times the
+  // speed, which is the difference between this being usable and not.
+  if (t.xy === 0 && t.yx === 0 && t.xx === 1 && t.yy === 1) {
+    for (let dy = -HALF; dy <= HALF; dy++) {
+      const ay2 = clamp(ay + dy, 0, h - 1), by2 = clamp(by + dy, 0, h - 1);
+      for (let dx = -HALF; dx <= HALF; dx++) {
+        const ax2 = clamp(ax + dx, 0, w - 1), bx2 = clamp(bx + dx, 0, w - 1);
+        const ai = ay2 * w + ax2, bi = by2 * w + bx2;
+        const dr = rgb[ai * 3] - rgb[bi * 3];
+        const dg = rgb[ai * 3 + 1] - rgb[bi * 3 + 1];
+        const db = rgb[ai * 3 + 2] - rgb[bi * 3 + 2];
+        const ex = lgx[ai] - lgx[bi], ey = lgy[ai] - lgy[bi];
+        const wt = level.wt ? level.wt[ai] : (hole[ai] ? W_GUESS : W_REAL);
+        sum += wt * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
+        if (sum >= cutoff) return sum;
+      }
+    }
+    return sum;
+  }
+
   for (let dy = -HALF; dy <= HALF; dy++) {
-    const ay2 = clamp(ay + dy, 0, h - 1), by2 = clamp(by + dy, 0, h - 1);
     for (let dx = -HALF; dx <= HALF; dx++) {
-      const ax2 = clamp(ax + dx, 0, w - 1), bx2 = clamp(bx + dx, 0, w - 1);
-      const ap = ay2 * w + ax2, bp = by2 * w + bx2;
-      const ai = ap * 3, bi = bp * 3;
-      const dr = rgb[ai] - rgb[bi], dg = rgb[ai + 1] - rgb[bi + 1], db = rgb[ai + 2] - rgb[bi + 2];
-      const ex = gx[ap] - gx[bp], ey = gy[ap] - gy[bp];
-      sum += wt[ap] * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
-      if (sum >= best) return sum;
+      const ax2 = clamp(ax + dx, 0, w - 1), ay2 = clamp(ay + dy, 0, h - 1);
+      const ai = ay2 * w + ax2;
+
+      const ux = bx + t.xx * dx + t.xy * dy;
+      const uy = by + t.yx * dx + t.yy * dy;
+
+      sample3(rgb, w, h, ux, uy, px);
+      const dr = rgb[ai * 3] - px[0], dg = rgb[ai * 3 + 1] - px[1], db = rgb[ai * 3 + 2] - px[2];
+
+      // The slope has to be compared in the same frame, so the source slope is
+      // brought back through the transform before it is subtracted.
+      const sgx = sample1(lgx, w, h, ux, uy), sgy = sample1(lgy, w, h, ux, uy);
+      const tgx = t.xx * sgx + t.yx * sgy;
+      const tgy = t.xy * sgx + t.yy * sgy;
+      const ex = lgx[ai] - tgx, ey = lgy[ai] - tgy;
+
+      const wt = level.wt ? level.wt[ai] : (hole[ai] ? W_GUESS : W_REAL);
+      sum += wt * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
+      if (sum >= cutoff) return sum;
     }
   }
   return sum;
 }
 
-// The order to fill in: every pixel touching real photograph first, then every
-// pixel touching those, and so on inward. Filling the middle first would mean
-// choosing it with nothing real to go on.
+/* ------------------------- the pass that keeps texture --------------------- */
+
+// Voting and averaging is what makes a fill coherent, and it is also what makes
+// it soft: an average of a hundred patches of grass is the colour of grass, not
+// grass. Measured against the previous version it cost more than half the
+// detail. So the pyramid uses it to decide the structure, and then the last and
+// finest pass throws averaging away entirely.
+//
+// This is the other classic: onion-peel. Work inward from the edge of the hole,
+// choose each pixel when its neighbours are already settled, and copy it
+// outright from the single best-fitting patch — never a blend of several. What
+// is already settled counts for something in the cost, but much less than real
+// photograph, and what has not been reached yet counts for almost nothing, so
+// the decision is driven by the picture rather than by the fill's own guesses.
+const W_SETTLED = 0.35;
+const W_UNSET = 0.08;
+
+async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldToPage, refinePasses) {
+  const { w, h, hole, rgb, nnx, nny, nnD, lum, lgx, lgy } = level;
+  const n = w * h;
+
+  // Whatever the coarse solve worked out is kept as a suggestion, not as
+  // evidence — it tells the search where to look without dragging the answer
+  // towards its own smoothness.
+  const hintX = Int32Array.from(nnx), hintY = Int32Array.from(nny);
+  const hintA = Float32Array.from(level.nnA), hintS = Float32Array.from(level.nnS);
+  const hintM = Uint8Array.from(level.nnM);
+  const hasHint = new Uint8Array(n);
+  for (let i = 0; i < n; i++) hasHint[i] = nnD[i] < Infinity ? 1 : 0;
+
+  level.wt = new Float32Array(n);
+  for (let i = 0; i < n; i++) level.wt[i] = hole[i] ? W_UNSET : W_REAL;
+  for (let i = 0; i < n; i++) if (hole[i]) nnD[i] = Infinity;
+
+  // Keep the slope arrays honest as pixels land, or every decision after the
+  // first is matched against a picture that no longer exists.
+  const touch = (i) => {
+    const x = i % w, y = (i / w) | 0;
+    lum[i] = 0.299 * rgb[i * 3] + 0.587 * rgb[i * 3 + 1] + 0.114 * rgb[i * 3 + 2];
+    const fix = (j) => {
+      const jx = j % w, jy = (j / w) | 0;
+      lgx[j] = lum[jx < w - 1 ? j + 1 : j] - lum[j];
+      lgy[j] = lum[jy < h - 1 ? j + w : j] - lum[j];
+    };
+    fix(i);
+    if (x > 0) fix(i - 1);
+    if (y > 0) fix(i - w);
+  };
+
+  const run = (forward, first) => {
+    for (let k = 0; k < order.length; k++) {
+      const i = order[forward ? k : order.length - 1 - k];
+      const x = i % w, y = (i / w) | 0;
+      let bD = nnD[i], bx = nnx[i], by = nny[i], bA = level.nnA[i], bS = level.nnS[i], bM = level.nnM[i];
+
+      const consider = (cx, cy, ca, cs, cm) => {
+        const s = clamp(cs, SCALE_LO, SCALE_HI);
+        const a = clamp(ca, -ROT_MAX, ROT_MAX);
+        if (cx < 0 || cy < 0 || cx > w - 1 || cy > h - 1) return;
+        const reach = Math.ceil(HALF * Math.max(1, s) * 1.45) + 1;
+        if (minDist[(cy | 0) * w + (cx | 0)] <= reach) return;
+        const m = cm ? -1 : 1;
+        const c = Math.cos(a) * s, sn = Math.sin(a) * s;
+        const t = { xx: c * m, xy: -sn, yx: sn * m, yy: c };
+        const d = patchDist(level, x, y, cx, cy, t, bD);
+        if (d < bD) { bD = d; bx = cx; by = cy; bA = a; bS = s; bM = cm; }
+      };
+
+      const step = forward ? -1 : 1;
+      if (x + step >= 0 && x + step < w && nnD[i + step] < Infinity) {
+        const j = i + step;
+        consider(nnx[j] - step, nny[j], level.nnA[j], level.nnS[j], level.nnM[j]);
+      }
+      if (y + step >= 0 && y + step < h && nnD[i + step * w] < Infinity) {
+        const j = i + step * w;
+        consider(nnx[j], nny[j] - step, level.nnA[j], level.nnS[j], level.nnM[j]);
+      }
+      if (first && hasHint[i]) consider(hintX[i], hintY[i], hintA[i], hintS[i], hintM[i]);
+
+      if (bD === Infinity && sources.length) {
+        const pick = sources[(rng() * sources.length) | 0];
+        consider(pick % w, (pick / w) | 0, 0, 1, 0);
+      }
+      let radius = Math.min(maxRadius || Math.max(w, h), Math.max(w, h)), frac = 1;
+      while (radius >= 1) {
+        const ox = ((rng() * 2 - 1) * radius) | 0, oy = ((rng() * 2 - 1) * radius) | 0;
+        const oa = (rng() * 2 - 1) * ROT_MAX * frac;
+        const os = 1 + (rng() * 2 - 1) * (SCALE_HI - 1) * frac;
+        const om = MIRROR && rng() < 0.12 ? (bM ? 0 : 1) : bM;
+        consider((bD === Infinity ? x : bx) + ox, (bD === Infinity ? y : by) + oy, bA + oa, bS * os, om);
+        radius >>= 1; frac *= 0.5;
+      }
+
+      if (bD === Infinity) continue;
+      const s = by * w + bx;
+      rgb[i * 3] = rgb[s * 3]; rgb[i * 3 + 1] = rgb[s * 3 + 1]; rgb[i * 3 + 2] = rgb[s * 3 + 2];
+      nnx[i] = bx; nny[i] = by; level.nnA[i] = bA; level.nnS[i] = bS; level.nnM[i] = bM; nnD[i] = bD;
+      level.wt[i] = W_SETTLED;
+      touch(i);
+    }
+  };
+
+  run(true, true);
+  if (yieldToPage) await yieldToPage();
+  for (let p = 0; p < refinePasses; p++) {
+    // Everything has something in it now, so every pixel may look again with
+    // its neighbours' answers to go on. Costs are restated first: a stale one
+    // blocks every improvement.
+    for (let k = 0; k < order.length; k++) {
+      const i = order[k];
+      if (nnD[i] < Infinity) {
+        nnD[i] = patchDist(level, i % w, (i / w) | 0, nnx[i], nny[i], transformOf(level, i), Infinity);
+      }
+    }
+    run(p % 2 === 0, false);
+    if (yieldToPage) await yieldToPage();
+  }
+}
+
+// The order to work in: every pixel touching real photograph first, then every
+// pixel touching those, and so on inward.
 function bandOrder(level) {
   const { w, h, hole } = level;
   const dist = new Int32Array(w * h).fill(-1);
@@ -250,387 +447,78 @@ function bandOrder(level) {
     if (y > 0) push(i - w);
     if (y < h - 1) push(i + w);
   }
-  // Anything the flood never reached (a hole touching nothing real) goes last.
   for (let i = 0, n = w * h; i < n; i++) if (hole[i] && dist[i] < 0) queue.push(i);
   return queue;
 }
 
-// A source patch is only usable if nothing inside it is still hole — otherwise
-// the fill feeds on itself and smears.
-function buildValid(level) {
-  const { w, h, hole } = level;
-  const valid = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let ok = 1;
-      for (let dy = -HALF; dy <= HALF && ok; dy++) {
-        for (let dx = -HALF; dx <= HALF; dx++) {
-          const sx = clamp(x + dx, 0, w - 1), sy = clamp(y + dy, 0, h - 1);
-          if (hole[sy * w + sx]) { ok = 0; break; }
-        }
-      }
-      valid[y * w + x] = ok;
-    }
-  }
-  return valid;
+function initNNF(level) {
+  const n = level.w * level.h;
+  level.nnx = new Int32Array(n);
+  level.nny = new Int32Array(n);
+  level.nnA = new Float32Array(n);
+  level.nnS = new Float32Array(n).fill(1);
+  level.nnM = new Uint8Array(n);
+  level.nnD = new Float32Array(n).fill(Infinity);
 }
 
-// Work out the map for one level, boundary inward, then go back over it a few
-// times for coherence.
-//
-// The first version of this iterated over the whole hole at once and averaged
-// every patch that covered a pixel. That converges beautifully to the wrong
-// thing: an average of a hundred patches of grass is the colour of grass, not
-// grass. Texture is exactly the detail averaging destroys.
-//
-// So nothing is ever averaged. The first sweep goes outside in, each pixel
-// chosen when its neighbours are already settled and taken outright from the
-// single best-fitting patch. The refinement passes then let every pixel look
-// again now that the whole hole has something in it — which is what turns a run
-// of independently plausible choices into one continuous piece of hedge.
-async function solveLevel(level, rng, yieldToPage) {
-  const { w, h, hole } = level;
-  const valid = buildValid(level);
+// Expectation-maximisation on one level: match, vote, rebuild, repeat.
+async function solveLevel(level, rng, yieldToPage, rounds) {
   const order = bandOrder(level);
   if (!order.length) return;
 
+  const minDist = holeDistance(level);
   const sources = [];
-  for (let i = 0, n = w * h; i < n; i++) if (valid[i]) sources.push(i);
-  if (!sources.length) return;                 // the brush covered the whole frame
-
-  // How much each pixel's opinion counts: real photograph, something this run
-  // has settled, or the seed colour nobody has looked at yet.
-  level.wt = new Float32Array(w * h);
-  for (let i = 0, n = w * h; i < n; i++) level.wt[i] = hole[i] ? W_UNSET : W_REAL;
-
-  const nnx = new Int32Array(w * h).fill(-1), nny = new Int32Array(w * h).fill(-1);
-  level.nnx = nnx; level.nny = nny;
-  const maxSearch = Math.max(w, h);
-  computeGrad(level);
-
-  let bestCost = Infinity, bx = -1, by = -1, tx = 0, ty = 0;
-
-  const consider = (cx, cy) => {
-    const sx = clamp(cx, HALF, w - 1 - HALF), sy = clamp(cy, HALF, h - 1 - HALF);
-    if (!valid[sy * w + sx]) return;
-    const c = patchCost(level, tx, ty, sx, sy, bestCost);
-    if (c < bestCost) { bestCost = c; bx = sx; by = sy; }
-  };
-
-  const commit = (t) => {
-    const si = (by * w + bx) * 3;
-    level.rgb[t * 3] = level.rgb[si];
-    level.rgb[t * 3 + 1] = level.rgb[si + 1];
-    level.rgb[t * 3 + 2] = level.rgb[si + 2];
-    nnx[t] = bx; nny[t] = by;
-  };
-
-  const neighbours = (t) => {
-    if (tx > 0 && nnx[t - 1] >= 0) consider(nnx[t - 1] + 1, nny[t - 1]);
-    if (tx < w - 1 && nnx[t + 1] >= 0) consider(nnx[t + 1] - 1, nny[t + 1]);
-    if (ty > 0 && nnx[t - w] >= 0) consider(nnx[t - w], nny[t - w] + 1);
-    if (ty < h - 1 && nnx[t + w] >= 0) consider(nnx[t + w], nny[t + w] - 1);
-  };
-
-  // ---- first sweep: outside in --------------------------------------------
-  for (let k = 0; k < order.length; k++) {
-    if (yieldToPage && (k & 1023) === 1023) await yieldToPage();
-    const t = order[k];
-    tx = t % w; ty = (t / w) | 0;
-    bestCost = Infinity; bx = -1; by = -1;
-
-    // Whatever the settled neighbours chose, shifted by one. This is the
-    // propagation step, and it is what keeps a filled region coherent instead
-    // of a mosaic of unrelated scraps.
-    neighbours(t);
-
-    // What the level below this one decided for the same spot.
-    if (level.hintX && level.hintX[t] >= 0) consider(level.hintX[t], level.hintY[t]);
-
-    // A handful of random guesses, coarse to fine, to find something better
-    // than the neighbours knew about.
-    if (bx < 0) {
-      const pick = sources[(rng() * sources.length) | 0];
-      consider(pick % w, (pick / w) | 0);
-    }
-    for (let radius = maxSearch; radius >= 1; radius >>= 1) {
-      const ox = ((rng() * 2 - 1) * radius) | 0, oy = ((rng() * 2 - 1) * radius) | 0;
-      consider((bx < 0 ? tx : bx) + ox, (by < 0 ? ty : by) + oy);
-    }
-
-    if (bx < 0) continue;
-    commit(t);
-    level.wt[t] = W_SETTLED;
+  for (let i = 0, n = level.w * level.h; i < n; i++) {
+    if (minDist[i] > HALF * SCALE_HI * 1.45 + 1) sources.push(i);
   }
+  if (!sources.length) return;             // the brush covered the whole frame
 
-  // ---- refinement: look again, now that everything has something in it -----
-  const passes = w * h > 4096 ? REFINE_PASSES : 2;
-  for (let pass = 0; pass < passes; pass++) {
-    computeGrad(level);
-    const forward = (pass & 1) === 0;
-    for (let k = 0; k < order.length; k++) {
-      if (yieldToPage && (k & 1023) === 1023) await yieldToPage();
-      const t = order[forward ? k : order.length - 1 - k];
-      if (nnx[t] < 0) continue;
-      tx = t % w; ty = (t / w) | 0;
-      bx = nnx[t]; by = nny[t];
-      bestCost = patchCost(level, tx, ty, bx, by, Infinity);
-
-      neighbours(t);
-      for (let radius = maxSearch; radius >= 1; radius >>= 1) {
-        const ox = ((rng() * 2 - 1) * radius) | 0, oy = ((rng() * 2 - 1) * radius) | 0;
-        consider(bx + ox, by + oy);
-      }
-      commit(t);
-    }
-  }
+  if (!level.nnD) initNNF(level);
+  computeLuma(level);
+  await onionCopy(level, order, rng, sources, minDist, 0, yieldToPage, rounds);
 }
 
-/* --------------------------------- the job -------------------------------- */
-
-// Where the brush actually went, plus a collar of real photograph around it to
-// copy from. The collar is the material the fill is allowed to use, so for a
-// big object it wants to be generous — the sky and grass behind a tree are a
-// long way from the tree. It costs nothing in sharpness any more: the collar
-// sets how big the map is, and the map is not what you end up looking at.
-function maskBounds(mask, iw, ih) {
-  const probe = 400;
-  const s = Math.min(1, probe / Math.max(iw, ih));
-  const pw = Math.max(1, Math.round(iw * s)), ph = Math.max(1, Math.round(ih * s));
-  const c = document.createElement("canvas");
-  c.width = pw; c.height = ph;
-  const ctx = c.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(mask, 0, 0, pw, ph);
-  const px = ctx.getImageData(0, 0, pw, ph).data;
-
-  let minX = pw, minY = ph, maxX = -1, maxY = -1;
-  for (let y = 0; y < ph; y++) {
-    for (let x = 0; x < pw; x++) {
-      if (px[(y * pw + x) * 4 + 3] <= 24) continue;
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
-    }
-  }
-  if (maxX < 0) return null;
-
-  let painted = 0;
-  for (let i = 0, n = pw * ph; i < n; i++) if (px[i * 4 + 3] > 24) painted++;
-
-  // Back to full-resolution pixels, then grown.
-  const x0 = minX / s, y0 = minY / s, x1 = (maxX + 1) / s, y1 = (maxY + 1) / s;
-  const pad = Math.max(48, Math.max(x1 - x0, y1 - y0) * 1.6);
-  const rx = Math.max(0, Math.floor(x0 - pad));
-  const ry = Math.max(0, Math.floor(y0 - pad));
-
-  // The brush's own bounding box, which is all that ever has to be repainted.
-  const hx = Math.max(0, Math.floor(x0)), hy = Math.max(0, Math.floor(y0));
-
-  return {
-    x: rx,
-    y: ry,
-    w: Math.min(iw, Math.ceil(x1 + pad)) - rx,
-    h: Math.min(ih, Math.ceil(y1 + pad)) - ry,
-    holeArea: painted / (s * s),          // in full-resolution pixels
-    hx,
-    hy,
-    hw: Math.max(1, Math.min(iw, Math.ceil(x1)) - hx),
-    hh: Math.max(1, Math.min(ih, Math.ceil(y1)) - hy),
-  };
-}
-
-// A fixed seed, so removing the same thing twice gives the same answer. A tool
-// that produced a different result every time you pressed it would be
-// impossible to judge.
-function seededRandom(seed) {
-  let s = seed >>> 0;
-  return () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 4294967296;
-  };
-}
-
-/**
- * Fill in whatever the mask covers.
- *
- * `image` is anything drawable, `mask` a canvas the same shape whose alpha says
- * what to remove. Returns a canvas at the image's own size.
- *
- * The map is solved small, because patch matching is O(pixels x passes x patch)
- * and at full resolution it would take minutes in a browser tab. The pixels are
- * then copied at full resolution through that map, so what lands in the hole is
- * camera data at camera resolution rather than an enlargement of a thumbnail.
- * Everything outside the brush is left exactly as it was.
- */
-export async function healRegion({ image, mask, onProgress }) {
-  const iw = image.naturalWidth || image.width;
-  const ih = image.naturalHeight || image.height;
-
-  const say = (m) => { if (onProgress) onProgress(m); };
-  const breathe = () => new Promise((r) => setTimeout(r, 0));
-
-  say("Reading the picture…");
-
-  const region = maskBounds(mask, iw, ih);
-  if (!region) return null;
-
-  // Two caps on the map, whichever bites first: the window must fit in WORK,
-  // and the hole itself must stay under HOLE_BUDGET pixels, because the cost is
-  // driven by how many pixels have to be decided, not by how big the picture
-  // is. These now only limit how finely the map is drawn — not how sharp the
-  // result is, which is the whole point of the rewrite.
-  const scale = Math.min(
-    1,
-    WORK / Math.max(region.w, region.h),
-    Math.sqrt(HOLE_BUDGET / Math.max(1, region.holeArea)),
-  );
-  const w = Math.max(8, Math.round(region.w * scale)), h = Math.max(8, Math.round(region.h * scale));
-
-  const small = document.createElement("canvas");
-  small.width = w; small.height = h;
-  const sctx = small.getContext("2d", { willReadFrequently: true });
-  sctx.drawImage(image, region.x, region.y, region.w, region.h, 0, 0, w, h);
-  const pixels = sctx.getImageData(0, 0, w, h).data;
-
-  const smallMask = document.createElement("canvas");
-  smallMask.width = w; smallMask.height = h;
-  const mctx = smallMask.getContext("2d", { willReadFrequently: true });
-  mctx.drawImage(mask, region.x, region.y, region.w, region.h, 0, 0, w, h);
-  const maskPixels = mctx.getImageData(0, 0, w, h).data;
-
-  const base = levelFromImageData(pixels, w, h, maskPixels);
-  let any = false;
-  for (let i = 0; i < base.hole.length; i++) if (base.hole[i]) { any = true; break; }
-  if (!any) return null;
-
-  // Coarse to fine: the big structure gets decided on a tiny image, where the
-  // search is cheap and a patch spans a lot of picture, and each finer level
-  // only has to add detail to an answer that is already roughly right.
-  const pyramid = [base];
-  while (Math.min(pyramid[pyramid.length - 1].w, pyramid[pyramid.length - 1].h) > COARSEST) {
-    pyramid.push(shrink(pyramid[pyramid.length - 1]));
-  }
-
-  const rng = seededRandom(12345);
-  seedHole(pyramid[pyramid.length - 1]);
-  for (let level = pyramid.length - 1; level >= 0; level--) {
-    say(`Working out what was behind it… ${pyramid.length - level}/${pyramid.length}`);
-    await breathe();                     // let the browser paint the message
-    await solveLevel(pyramid[level], rng, breathe);
-    if (level > 0) upsampleInto(pyramid[level], pyramid[level - 1]);
-  }
-
-  say("Copying the real pixels in…");
-  await breathe();
-
-  return synthesize(image, mask, region, base, iw, ih);
-}
-
-/* ------------------------------ the seam ---------------------------------- */
-
-// Copied material almost never sits at quite the right brightness. Grass taken
-// from forty pixels left came from slightly different light, and a whole region
-// of it lands a shade dark — which is why a fill can be perfectly textured and
-// still read as a rectangle stuck on the picture. Nothing about the texture is
-// wrong; the level is.
-//
-// So: look at every pixel where the fill meets real photograph, measure how far
-// off it is there, fit a gentle tilted plane through those differences, and
-// subtract it across the whole fill. A plane can only move the overall level and
-// lean it one way — it has no way to touch detail, so the texture survives
-// exactly as copied while the join disappears.
-const SEAM_LIMIT = 48;           // never shift a channel further than this
-
-function seamPlane(base) {
-  const { w, h, hole, rgb } = base;
-  // Normal equations for r = a + b*x + c*y, one set per channel.
-  const S = new Float64Array(9);
-  const t = [new Float64Array(3), new Float64Array(3), new Float64Array(3)];
-  let count = 0;
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      if (!hole[i]) continue;
-      let sr = 0, sg = 0, sb = 0, c = 0;
-      const look = (j) => {
-        if (hole[j]) return;
-        sr += rgb[j * 3] - rgb[i * 3];
-        sg += rgb[j * 3 + 1] - rgb[i * 3 + 1];
-        sb += rgb[j * 3 + 2] - rgb[i * 3 + 2];
-        c++;
-      };
-      if (x > 0) look(i - 1);
-      if (x < w - 1) look(i + 1);
-      if (y > 0) look(i - w);
-      if (y < h - 1) look(i + w);
-      if (!c) continue;
-
-      const v = [1, x, y];
-      for (let a = 0; a < 3; a++) {
-        for (let b = 0; b < 3; b++) S[a * 3 + b] += v[a] * v[b];
-        t[0][a] += v[a] * (sr / c);
-        t[1][a] += v[a] * (sg / c);
-        t[2][a] += v[a] * (sb / c);
-      }
-      count++;
-    }
-  }
-  if (count < 12) return null;   // too little edge to fit anything trustworthy
-
-  const solve = (rhs) => {
-    // Gauss-Jordan on a 3x3, with a nudge on the diagonal so a degenerate edge
-    // (a perfectly straight seam, say) falls back to a flat offset instead of
-    // blowing up.
-    const m = [
-      [S[0] + 1e-6, S[1], S[2], rhs[0]],
-      [S[3], S[4] + 1e-6, S[5], rhs[1]],
-      [S[6], S[7], S[8] + 1e-6, rhs[2]],
-    ];
-    for (let col = 0; col < 3; col++) {
-      let piv = col;
-      for (let r = col + 1; r < 3; r++) if (Math.abs(m[r][col]) > Math.abs(m[piv][col])) piv = r;
-      if (Math.abs(m[piv][col]) < 1e-9) return null;
-      const tmp = m[col]; m[col] = m[piv]; m[piv] = tmp;
-      const d = m[col][col];
-      for (let j = col; j < 4; j++) m[col][j] /= d;
-      for (let r = 0; r < 3; r++) {
-        if (r === col) continue;
-        const f = m[r][col];
-        if (!f) continue;
-        for (let j = col; j < 4; j++) m[r][j] -= f * m[col][j];
+// Carry a solved level up into the next finer one: the pixels, and the match
+// field with it, doubled — so the finer level starts from an answer that is
+// already roughly right rather than from nothing.
+function upsampleInto(coarse, fine) {
+  initNNF(fine);
+  for (let y = 0; y < fine.h; y++) {
+    const cy = Math.min(coarse.h - 1, y >> 1);
+    for (let x = 0; x < fine.w; x++) {
+      const fi = y * fine.w + x;
+      if (!fine.hole[fi]) continue;
+      const cx = Math.min(coarse.w - 1, x >> 1);
+      const ci = cy * coarse.w + cx;
+      fine.rgb[fi * 3] = coarse.rgb[ci * 3];
+      fine.rgb[fi * 3 + 1] = coarse.rgb[ci * 3 + 1];
+      fine.rgb[fi * 3 + 2] = coarse.rgb[ci * 3 + 2];
+      if (coarse.nnD && coarse.nnD[ci] < Infinity) {
+        fine.nnx[fi] = coarse.nnx[ci] * 2 + (x & 1);
+        fine.nny[fi] = coarse.nny[ci] * 2 + (y & 1);
+        fine.nnA[fi] = coarse.nnA[ci];
+        fine.nnS[fi] = coarse.nnS[ci];
+        fine.nnM[fi] = coarse.nnM[ci];
+        fine.nnD[fi] = 1e30;              // finite, so propagation will use it
       }
     }
-    return [m[0][3], m[1][3], m[2][3]];
-  };
-
-  const plane = [solve(t[0]), solve(t[1]), solve(t[2])];
-  if (plane.some((p) => !p || p.some((v) => !Number.isFinite(v)))) return null;
-  return plane;
+  }
 }
 
-// A plane gets the overall level right and cannot do any more than that. Where
-// the join runs through something that is itself changing -- a sky going pale
-// towards the horizon, mist thinning across the frame -- the true correction is
-// not a plane, and what is left over shows up as a hard straight edge exactly
-// along the line where the fill starts.
-//
-// So the leftover is diffused instead. Every pixel on the join knows how far out
-// it still is once the plane has had its say; that figure is held fixed there
-// and averaged inward over the rest of the hole until it dies away. It is the
-// membrane a soap film makes across a bent wire, and it is the classic way of
-// hiding a seam: smooth everywhere inside, exactly right at the edge.
-//
-// Solving it needs no accuracy in the usual sense. The answer is smooth by
-// definition, so a few hundred passes of averaging at the map's resolution --
-// starting from the plane, which has already taken out the part that carries
-// furthest -- lands close enough that nothing is visible.
+/* --------------------------------- the seam -------------------------------- */
+
+// Copied material almost never sits at quite the right brightness, so a fill
+// can be perfectly textured and still read as a shape stuck on the picture.
+// The difference is measured all along the join, held fixed there, and averaged
+// inward until it dies away — the soap film across a bent wire, which is the
+// usual way of hiding a seam. Smooth everywhere inside, exactly right at the
+// edge, and it cannot touch detail because it has no detail in it.
+const SEAM_LIMIT = 48;
 const SEAM_PASSES = 320;
 
-function seamField(base, plane) {
+function seamField(base) {
   const { w, h, hole, rgb } = base;
   const n = w * h;
-  const at = (p, x, y) => (plane ? p[0] + p[1] * x + p[2] * y : 0);
-
   let cur = new Float32Array(n * 3);
   const fixed = new Uint8Array(n);
 
@@ -651,19 +539,14 @@ function seamField(base, plane) {
       if (y > 0) look(i - w);
       if (y < h - 1) look(i + w);
       if (!c) continue;
-      // What the plane did not already account for.
-      cur[i * 3] = sr / c - at(plane ? plane[0] : null, x, y);
-      cur[i * 3 + 1] = sg / c - at(plane ? plane[1] : null, x, y);
-      cur[i * 3 + 2] = sb / c - at(plane ? plane[2] : null, x, y);
+      cur[i * 3] = sr / c; cur[i * 3 + 1] = sg / c; cur[i * 3 + 2] = sb / c;
       fixed[i] = 1;
     }
   }
 
-  // Only the inside of the hole ever changes. Walking the whole frame 320 times
-  // over, and copying the whole field each time, costs several hundred million
-  // operations for a few thousand pixels of answer — so the pixels that move
-  // are listed once and only they are touched. Everything else is identical in
-  // both buffers, so it needs copying once rather than every pass.
+  // Only the inside of the hole ever moves, so those pixels are listed once and
+  // only they are touched — everything else is identical in both buffers and
+  // needs copying once rather than on every pass.
   const loose = [];
   for (let i = 0; i < n; i++) if (hole[i] && !fixed[i]) loose.push(i);
 
@@ -685,10 +568,8 @@ function seamField(base, plane) {
     }
   }
 
-  // One ring outside the hole carries its neighbour's value, so reading the
-  // field smoothly at full resolution does not fade it away right at the join,
-  // which is the one place it has to be exactly right.
-  const out = cur;
+  // One ring outside carries its neighbour's value, so reading the field at
+  // full resolution does not fade it away right at the join.
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
@@ -696,60 +577,215 @@ function seamField(base, plane) {
       let r = 0, g = 0, b = 0, c = 0;
       const take = (j) => {
         if (!hole[j]) return;
-        r += out[j * 3]; g += out[j * 3 + 1]; b += out[j * 3 + 2]; c++;
+        r += cur[j * 3]; g += cur[j * 3 + 1]; b += cur[j * 3 + 2]; c++;
       };
       if (x > 0) take(i - 1);
       if (x < w - 1) take(i + 1);
       if (y > 0) take(i - w);
       if (y < h - 1) take(i + w);
-      if (c) { out[i * 3] = r / c; out[i * 3 + 1] = g / c; out[i * 3 + 2] = b / c; }
+      if (c) { cur[i * 3] = r / c; cur[i * 3 + 1] = g / c; cur[i * 3 + 2] = b / c; }
     }
   }
-  return out;
+  return cur;
+}
+
+/* --------------------------------- the job -------------------------------- */
+
+function maskBounds(mask, iw, ih) {
+  const probe = 400;
+  const s = Math.min(1, probe / Math.max(iw, ih));
+  const pw = Math.max(1, Math.round(iw * s)), ph = Math.max(1, Math.round(ih * s));
+  const c = document.createElement("canvas");
+  c.width = pw; c.height = ph;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(mask, 0, 0, pw, ph);
+  const px = ctx.getImageData(0, 0, pw, ph).data;
+
+  let minX = pw, minY = ph, maxX = -1, maxY = -1, painted = 0;
+  for (let y = 0; y < ph; y++) {
+    for (let x = 0; x < pw; x++) {
+      if (px[(y * pw + x) * 4 + 3] <= 24) continue;
+      painted++;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return null;
+
+  const x0 = minX / s, y0 = minY / s, x1 = (maxX + 1) / s, y1 = (maxY + 1) / s;
+  // The collar is the material the fill may draw on, so for a big object it
+  // wants to be generous — what was behind a tree is a long way from the tree.
+  const pad = Math.max(48, Math.max(x1 - x0, y1 - y0) * 1.6);
+  const rx = Math.max(0, Math.floor(x0 - pad)), ry = Math.max(0, Math.floor(y0 - pad));
+  const hx = Math.max(0, Math.floor(x0)), hy = Math.max(0, Math.floor(y0));
+
+  return {
+    x: rx, y: ry,
+    w: Math.min(iw, Math.ceil(x1 + pad)) - rx,
+    h: Math.min(ih, Math.ceil(y1 + pad)) - ry,
+    holeArea: painted / (s * s),
+    hx, hy,
+    hw: Math.max(1, Math.min(iw, Math.ceil(x1)) - hx),
+    hh: Math.max(1, Math.min(ih, Math.ceil(y1)) - hy),
+  };
+}
+
+// A fixed seed, so removing the same thing twice gives the same answer. A tool
+// that produced a different result every time you pressed it would be
+// impossible to judge.
+function seededRandom(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+// Draw a scaled copy of the region, and its mask, at some resolution.
+function regionAt(image, mask, region, scale) {
+  const w = Math.max(8, Math.round(region.w * scale));
+  const h = Math.max(8, Math.round(region.h * scale));
+
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(image, region.x, region.y, region.w, region.h, 0, 0, w, h);
+  const pixels = ctx.getImageData(0, 0, w, h).data;
+
+  const mc = document.createElement("canvas");
+  mc.width = w; mc.height = h;
+  const mctx = mc.getContext("2d", { willReadFrequently: true });
+  mctx.drawImage(mask, region.x, region.y, region.w, region.h, 0, 0, w, h);
+  const maskPixels = mctx.getImageData(0, 0, w, h).data;
+
+  return { w, h, pixels, maskPixels };
+}
+
+/**
+ * Fill in whatever the mask covers.
+ *
+ * `image` is anything drawable, `mask` a canvas the same shape whose alpha says
+ * what to remove. Returns a canvas at the image's own size, or null if there
+ * was nothing to do.
+ */
+export async function healRegion({ image, mask, onProgress }) {
+  const iw = image.naturalWidth || image.width;
+  const ih = image.naturalHeight || image.height;
+
+  const say = (m) => { if (onProgress) onProgress(m); };
+  const breathe = () => new Promise((r) => setTimeout(r, 0));
+
+  say("Reading the picture…");
+  const region = maskBounds(mask, iw, ih);
+  if (!region) return null;
+
+  const rng = seededRandom(12345);
+
+  /* ---- 1. complete it small, where the search can afford to look around --- */
+
+  const mapScale = Math.min(
+    1,
+    WORK / Math.max(region.w, region.h),
+    Math.sqrt(HOLE_BUDGET / Math.max(1, region.holeArea)),
+  );
+  const small = regionAt(image, mask, region, mapScale);
+  const base = levelFromImageData(small.pixels, small.w, small.h, small.maskPixels);
+
+  let any = false;
+  for (let i = 0; i < base.hole.length; i++) if (base.hole[i]) { any = true; break; }
+  if (!any) return null;
+
+  const pyramid = [base];
+  while (Math.min(pyramid[pyramid.length - 1].w, pyramid[pyramid.length - 1].h) > COARSEST) {
+    pyramid.push(shrink(pyramid[pyramid.length - 1]));
+  }
+
+  seedHole(pyramid[pyramid.length - 1]);
+  for (let li = pyramid.length - 1; li >= 0; li--) {
+    say(`Working out what was behind it… ${pyramid.length - li}/${pyramid.length}`);
+    await breathe();
+    // The coarsest levels decide the structure and are cheap, so they get the
+    // most rounds; the finest only has to add detail to an answer already
+    // roughly right.
+    const rounds = Math.round(REFINE_MIN + (REFINE_MAX - REFINE_MIN) * (li / Math.max(1, pyramid.length - 1)));
+    await solveLevel(pyramid[li], rng, breathe, rounds);
+    if (li > 0) upsampleInto(pyramid[li], pyramid[li - 1]);
+  }
+
+  /* ---- 2. refine the match field at something near the real resolution ---- */
+
+  const midScale = Math.min(1, Math.sqrt(MID_BUDGET / Math.max(1, region.w * region.h)));
+  let guide = base, guideScale = mapScale;
+
+  if (midScale > mapScale * 1.3) {
+    say("Looking again, close up…");
+    await breathe();
+    const midData = regionAt(image, mask, region, midScale);
+    const mid = levelFromImageData(midData.pixels, midData.w, midData.h, midData.maskPixels);
+    carryInto(base, mid);
+    const order = bandOrder(mid);
+    const minDist = holeDistance(mid);
+    const sources = [];
+    for (let i = 0, n = mid.w * mid.h; i < n; i++) {
+      if (minDist[i] > HALF * SCALE_HI * 1.45 + 1) sources.push(i);
+    }
+    if (order.length && sources.length) {
+      computeLuma(mid);
+      // Copied outright, never averaged: by this resolution the structure is
+      // settled and the only thing still wanted is the photograph's own grain.
+      await onionCopy(mid, order, rng, sources, minDist, MID_RADIUS, breathe, MID_ITERS);
+      guide = mid; guideScale = midScale;
+    }
+  }
+
+  /* ---- 3. copy camera pixels through the finished field ------------------- */
+
+  say("Copying the real pixels in…");
+  await breathe();
+  return synthesize(image, mask, region, guide, guideScale, iw, ih);
+}
+
+// Move a solved field onto a finer grid of arbitrary ratio (the pyramid's own
+// step is a clean halving; this one is not).
+function carryInto(from, to) {
+  initNNF(to);
+  const rx = from.w / to.w, ry = from.h / to.h;
+  for (let y = 0; y < to.h; y++) {
+    const sy = Math.min(from.h - 1, (y * ry) | 0);
+    for (let x = 0; x < to.w; x++) {
+      const ti = y * to.w + x;
+      if (!to.hole[ti]) continue;
+      const sx = Math.min(from.w - 1, (x * rx) | 0);
+      const si = sy * from.w + sx;
+      to.rgb[ti * 3] = from.rgb[si * 3];
+      to.rgb[ti * 3 + 1] = from.rgb[si * 3 + 1];
+      to.rgb[ti * 3 + 2] = from.rgb[si * 3 + 2];
+      if (from.nnD && from.nnD[si] < Infinity) {
+        // Offsets scale; a position does not.
+        to.nnx[ti] = clamp(Math.round(x + (from.nnx[si] - sx) / rx), 0, to.w - 1);
+        to.nny[ti] = clamp(Math.round(y + (from.nny[si] - sy) / ry), 0, to.h - 1);
+        to.nnA[ti] = from.nnA[si];
+        to.nnS[ti] = from.nnS[si];
+        to.nnM[ti] = from.nnM[si];
+        to.nnD[ti] = 1e30;
+      }
+    }
+  }
 }
 
 /* ---------------------------- the full-size copy --------------------------- */
 
-// The map says, for each pixel of the hole, which part of the photograph its
-// material comes from. Here that is turned back into pixels — at the photo's
-// own resolution, by copying, never by enlarging.
-//
-// The map is read as an offset rather than as a destination. "This came from
-// 180 pixels left and 40 up" scales cleanly to any resolution; "this came from
-// pixel (212, 88) of the thumbnail" does not.
-function synthesize(image, mask, region, base, iw, ih) {
-  const { w, h, nnx, hole, rgb } = base;
-  const nny = base.nny;
+// The field says, for each pixel of the hole, which part of the photograph its
+// material comes from. Here that becomes pixels — at the photo's own
+// resolution, by copying, never by enlarging. The field is read as an offset
+// rather than a destination: "180 pixels left and 40 up" scales to any
+// resolution, "pixel (212, 88) of the thumbnail" does not.
+function synthesize(image, mask, region, guide, guideScale, iw, ih) {
+  const { w, h, nnx, nny, nnD, hole, rgb } = guide;
 
-  // How much of the region we can afford to hold at once. On a normal photo
-  // this is 1 and the copy is literally camera pixels; on a very large one it
-  // steps down, and even then it is a long way above the old 512px solve.
   const fine = Math.min(1, Math.sqrt(FINE_BUDGET / Math.max(1, region.w * region.h)));
   const rw = Math.max(1, Math.round(region.w * fine)), rh = Math.max(1, Math.round(region.h * fine));
-  const k = rw / w;                       // fine pixels per map pixel
-
-  // How far off the level is where the fill meets the photograph: the plane for
-  // the part that carries right across, the membrane for everything left over.
-  // Both are smooth, so they can be read at full resolution without softening
-  // anything — which is the whole reason the correction is done this way round
-  // rather than by blurring the join.
-  const plane = seamPlane(base);
-  const field = seamField(base, plane);
-
-  const shift = (ch, mxf, myf) => {
-    const p = plane ? plane[ch] : null;
-    const flat = p ? p[0] + p[1] * mxf + p[2] * myf : 0;
-
-    const x0 = Math.floor(mxf), y0 = Math.floor(myf);
-    const fx = mxf - x0, fy = myf - y0;
-    const ax = clamp(x0, 0, w - 1), bx = clamp(x0 + 1, 0, w - 1);
-    const ay = clamp(y0, 0, h - 1), by = clamp(y0 + 1, 0, h - 1);
-    const g = (xx, yy) => field[(yy * w + xx) * 3 + ch];
-    const local = g(ax, ay) * (1 - fx) * (1 - fy) + g(bx, ay) * fx * (1 - fy)
-      + g(ax, by) * (1 - fx) * fy + g(bx, by) * fx * fy;
-
-    return clamp(flat + local, -SEAM_LIMIT, SEAM_LIMIT);
-  };
+  const k = rw / w;
 
   const srcCanvas = document.createElement("canvas");
   srcCanvas.width = rw; srcCanvas.height = rh;
@@ -757,21 +793,28 @@ function synthesize(image, mask, region, base, iw, ih) {
   srcCtx.drawImage(image, region.x, region.y, region.w, region.h, 0, 0, rw, rh);
   const src = srcCtx.getImageData(0, 0, rw, rh).data;
 
-  // The mask at the same scale, alpha only — a patch may never take its
-  // material from inside the thing being removed. Kept as one byte a pixel so
-  // the four-byte copy can be let go of straight away.
   const masked = new Uint8Array(rw * rh);
   {
-    const mkCanvas = document.createElement("canvas");
-    mkCanvas.width = rw; mkCanvas.height = rh;
-    const mkCtx = mkCanvas.getContext("2d", { willReadFrequently: true });
-    mkCtx.drawImage(mask, region.x, region.y, region.w, region.h, 0, 0, rw, rh);
-    const mkData = mkCtx.getImageData(0, 0, rw, rh).data;
-    for (let i = 0, n = rw * rh; i < n; i++) masked[i] = mkData[i * 4 + 3] > 24 ? 1 : 0;
+    const mk = document.createElement("canvas");
+    mk.width = rw; mk.height = rh;
+    const mctx = mk.getContext("2d", { willReadFrequently: true });
+    mctx.drawImage(mask, region.x, region.y, region.w, region.h, 0, 0, rw, rh);
+    const md = mctx.getImageData(0, 0, rw, rh).data;
+    for (let i = 0, n = rw * rh; i < n; i++) masked[i] = md[i * 4 + 3] > 24 ? 1 : 0;
   }
 
-  // Only the brush's own bounding box has to be repainted, with a small collar
-  // so the feather has something to bite on.
+  const field = seamField(guide);
+  const shift = (ch, mxf, myf) => {
+    const x0 = Math.floor(mxf), y0 = Math.floor(myf);
+    const fx = mxf - x0, fy = myf - y0;
+    const ax = clamp(x0, 0, w - 1), bx2 = clamp(x0 + 1, 0, w - 1);
+    const ay = clamp(y0, 0, h - 1), by2 = clamp(y0 + 1, 0, h - 1);
+    const g = (xx, yy) => field[(yy * w + xx) * 3 + ch];
+    const v = g(ax, ay) * (1 - fx) * (1 - fy) + g(bx2, ay) * fx * (1 - fy)
+      + g(ax, by2) * (1 - fx) * fy + g(bx2, by2) * fx * fy;
+    return clamp(v, -SEAM_LIMIT, SEAM_LIMIT);
+  };
+
   const margin = Math.ceil(k) + 4;
   const fx0 = clamp(Math.floor((region.hx - region.x) * fine) - margin, 0, rw - 1);
   const fy0 = clamp(Math.floor((region.hy - region.y) * fine) - margin, 0, rh - 1);
@@ -785,8 +828,6 @@ function synthesize(image, mask, region, base, iw, ih) {
   const outImg = pctx.createImageData(pw, ph);
   const out = outImg.data;
 
-  // Fall back to the map's own colour — only reachable where the brush covers
-  // something the map could not find any material for at all.
   const fallback = (o, mi, dr, dg, db) => {
     out[o] = clamp(rgb[mi * 3] + dr, 0, 255);
     out[o + 1] = clamp(rgb[mi * 3 + 1] + dg, 0, 255);
@@ -799,33 +840,28 @@ function synthesize(image, mask, region, base, iw, ih) {
       const o = ((Y - fy0) * pw + (X - fx0)) * 4;
       const fi = Y * rw + X;
 
-      // Outside the brush: the photograph, untouched. It is masked away in a
-      // moment anyway, but it makes the feather blend into the right colour.
       if (!masked[fi]) {
         out[o] = src[fi * 4]; out[o + 1] = src[fi * 4 + 1]; out[o + 2] = src[fi * 4 + 2]; out[o + 3] = 255;
         continue;
       }
 
-      // Which map pixel covers this one, and where it says to look.
       const mxf = (X + 0.5) / k - 0.5, myf = (Y + 0.5) / k - 0.5;
       const mx = clamp(Math.round(mxf), 0, w - 1);
       const my = clamp(Math.round(myf), 0, h - 1);
       let mi = my * w + mx;
 
-      // The level correction for this spot. Smooth by construction, so it can
-      // be evaluated at full resolution without softening anything.
       const dr = shift(0, mxf, myf), dg = shift(1, mxf, myf), db = shift(2, mxf, myf);
 
-      // The brush's edge is softer at full size than on the map, so a pixel can
-      // be hole here while its map pixel is not. Borrow the nearest one that is.
-      if (!hole[mi] || nnx[mi] < 0) {
+      // The brush's edge is softer at full size than on the field, so a pixel
+      // can be hole here while its field pixel is not. Borrow the nearest that is.
+      if (!hole[mi] || nnD[mi] === Infinity) {
         let found = -1;
         for (let r = 1; r <= 3 && found < 0; r++) {
           for (let dy = -r; dy <= r && found < 0; dy++) {
             for (let dx = -r; dx <= r; dx++) {
               const nx = clamp(mx + dx, 0, w - 1), ny = clamp(my + dy, 0, h - 1);
               const ni = ny * w + nx;
-              if (hole[ni] && nnx[ni] >= 0) { found = ni; break; }
+              if (hole[ni] && nnD[ni] < Infinity) { found = ni; break; }
             }
           }
         }
@@ -838,9 +874,6 @@ function synthesize(image, mask, region, base, iw, ih) {
       let SX = clamp(Math.round(X + ox), 0, rw - 1);
       let SY = clamp(Math.round(Y + oy), 0, rh - 1);
 
-      // The map was solved with a patch margin, so this should never land
-      // inside the thing being removed — but if a soft edge lets it, walk on
-      // along the same offset until it is out.
       if (masked[SY * rw + SX]) {
         let ok = false;
         for (let step = 1; step <= 8; step++) {
@@ -861,9 +894,6 @@ function synthesize(image, mask, region, base, iw, ih) {
   }
   pctx.putImageData(outImg, 0, 0);
 
-  // Mask it back to the brush, with a hairline feather. The fill is real detail
-  // now, so this wants to be small — the old version needed a wide soft edge to
-  // disguise a blurred patch, and a wide soft edge is its own kind of smear.
   const dx = region.x + fx0 / fine, dy = region.y + fy0 / fine;
   const dw = pw / fine, dh = ph / fine;
 
