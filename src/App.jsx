@@ -2372,10 +2372,11 @@ const hideBrokenThumb = (e) => { e.currentTarget.style.visibility = "hidden"; };
  * The <img> stays in charge of layout until the first frame lands, so the board
  * doesn't jump about while pictures arrive.
  */
-function BoardPhoto({ fileId, name, look, crop, peek, style, className, onError }) {
+function BoardPhoto({ fileId, name, look, crop, peek, style, className }) {
   const canvasRef = useRef(null);
   const [image, setImage] = useState(null);
   const [painted, setPainted] = useState(false);
+  const [broken, setBroken] = useState(false);
   // Holding the before/after button shows the original, but still framed the
   // way you framed it — you want to compare the look, not the crop.
   const effective = peek ? null : migrateLook(look);
@@ -2384,11 +2385,16 @@ function BoardPhoto({ fileId, name, look, crop, peek, style, className, onError 
   const src = driveThumbSrc(fileId, "s800");
 
   useEffect(() => {
+    setBroken(false);                    // a new file deserves a fresh try
     if (!canPaint) { setImage(null); setPainted(false); return undefined; }
     let alive = true;
-    const img = new Image();
+    // document.createElement rather than `new Image()`: this file imports an
+    // icon called Image from lucide, which shadows the global constructor at
+    // module scope, and `new Image()` here builds a React component instead of
+    // a picture. It throws, and it takes the whole Idea Bank down with it.
+    const img = document.createElement("img");
     img.onload = () => { if (alive) setImage(img); };
-    img.onerror = () => { if (alive) { setImage(null); setPainted(false); } };
+    img.onerror = () => { if (alive) { setImage(null); setPainted(false); setBroken(true); } };
     img.src = src;
     return () => { alive = false; };
   }, [src, canPaint]);
@@ -2402,6 +2408,29 @@ function BoardPhoto({ fileId, name, look, crop, peek, style, className, onError 
     setPainted(!!done);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [image, signature, canPaint]);
+
+  // A picture whose thumbnail will not load has to stay a rectangle you can
+  // grab. Hiding it — which is right in a list, where a tile surrounds it —
+  // collapses it to nothing out here, and what is left is a link badge and a
+  // resize handle floating on the board with no way to pick them up or delete
+  // them. Better to say what is missing and stay a target.
+  if (broken) {
+    return (
+      <div
+        className={className}
+        title={`${name || "This picture"} — the file is missing from Drive`}
+        style={{
+          width: "100%", aspectRatio: "4 / 3", display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center", gap: 6, padding: 10, boxSizing: "border-box",
+          border: "1px dashed var(--hair)", color: "var(--muted)", fontSize: 10.5, textAlign: "center",
+          ...style,
+        }}
+      >
+        <Image size={18} />
+        <span style={{ wordBreak: "break-word", lineHeight: 1.3 }}>{name || "Missing picture"}</span>
+      </div>
+    );
+  }
 
   // The canvas node itself is never swapped out while it is in use — React
   // would unmount it and the painted frame would go with it — so it is hidden
@@ -2419,7 +2448,7 @@ function BoardPhoto({ fileId, name, look, crop, peek, style, className, onError 
       )}
       {!(canPaint && painted) && (
         <img
-          src={src} onError={onError} alt={name || ""} draggable={false}
+          src={src} onError={() => setBroken(true)} alt={name || ""} draggable={false}
           className={className}
           style={{ width: "100%", display: "block", filter: peek ? "none" : photoFilter({ look }), ...style }}
         />
@@ -4931,7 +4960,6 @@ function IdeaBank({ data, saveData, profile }) {
                     <BoardPhoto
                       fileId={b.fileId} name={b.name} look={b.look} crop={b.crop}
                       peek={peeking && pickedPhoto && pickedPhoto.id === b.id}
-                      onError={hideBrokenThumb}
                       style={{ borderRadius: 8, boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}
                     />
                     {b.kind !== "image" && (

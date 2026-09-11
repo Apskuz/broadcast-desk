@@ -334,7 +334,10 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
   /* ---- load the picture once; every frame after that is the shader's ---- */
   useEffect(() => {
     let alive = true;
-    const img = new Image();
+    // Spelled out rather than `new Image()`, to match App.jsx — where an icon
+    // of that name shadows the global constructor. Same spelling everywhere
+    // means moving this code cannot quietly break it.
+    const img = document.createElement("img");
     img.onload = () => { if (alive) setImage(img); };
     img.onerror = () => { if (alive) setFailed(true); };
     img.src = src;
