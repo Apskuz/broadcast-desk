@@ -455,12 +455,13 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
 .cal-month{ font-size:16px; font-weight:600; min-width:150px; text-align:center; font-family:'Fraunces',serif; }
 .cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:6px; }
 .cal-dow{ font-size:10.5px; color:var(--muted); text-transform:uppercase; text-align:center; padding-bottom:4px; letter-spacing:0.06em; }
-.cal-cell{ min-height:82px; border:1px solid var(--hair); border-radius:8px; padding:6px; background:var(--panel); font-size:11.5px; cursor:pointer; transition:border-color .15s; }
+.cal-cell{ min-width:0; min-height:82px; border:1px solid var(--hair); border-radius:8px; padding:6px; background:var(--panel); font-size:11.5px; cursor:pointer; transition:border-color .15s; }
 .cal-cell:hover{ border-color:var(--gold); }
 .cal-cell.out{ opacity:0.32; }
 .cal-cell.today{ border-color:var(--gold); background:var(--gold-soft); }
 .cal-cell .dnum{ font-weight:700; margin-bottom:4px; }
-.cal-evt{ font-size:9.5px; background:var(--panel-raised); border-radius:4px; padding:2px 5px; margin-bottom:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; border-left:2px solid var(--gold); cursor:pointer; display:flex; align-items:center; gap:4px; }
+.cal-evt{ font-size:9.5px; background:var(--panel-raised); border-radius:4px; padding:2px 5px; margin-bottom:3px; overflow:hidden; border-left:2px solid var(--gold); cursor:pointer; display:flex; align-items:center; gap:4px; }
+.cal-evt .evt-text{ min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .evt-dot{ width:6px; height:6px; border-radius:50%; flex-shrink:0; display:inline-block; }
 .evt-dot.light{ box-shadow:0 0 0 1px rgba(0,0,0,0.25); }
 
@@ -638,6 +639,23 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
   .sidebar.open{ transform:translateX(0); }
   .menu-toggle{ display:flex; }
   .main{ padding:22px 18px 50px; }
+
+  /* A seventh of a phone screen is about 35px, which fits three characters —
+     wrapping inside that just breaks words in half. So the month grid keeps a
+     usable column width and the card scrolls sideways instead, the same way
+     the week view already does, and a title gets two real lines. */
+  .cal-grid{ min-width:600px; gap:5px; }
+  .cal-cell{ min-height:84px; padding:5px 5px; }
+  .cal-evt{ align-items:flex-start; line-height:1.3; padding:3px 5px; }
+  .cal-evt .evt-dot{ margin-top:3px; }
+  .cal-evt .evt-text{
+    white-space:normal;
+    text-overflow:clip;
+    overflow-wrap:anywhere;
+    display:-webkit-box;
+    -webkit-line-clamp:4;
+    -webkit-box-orient:vertical;
+  }
 }
 `;
 
@@ -1396,6 +1414,30 @@ function Duties({ data, saveData, profile }) {
 
 const WEEK_HOURS = Array.from({ length: 15 }, (_, i) => i + 7); // 07:00 - 21:00
 const HOUR_HEIGHT = 48; // px per hour in the day/week timelines
+// A block in the day and week views is only as tall as its event is long, and
+// whatever doesn't fit is cut off. That's fine on a laptop, where a title sits
+// on one line; on a phone the column is a third as wide, the same title wraps
+// to three lines, and a half-hour event showed the first few words. Give each
+// hour roughly twice the room there so the text has somewhere to go.
+const HOUR_HEIGHT_NARROW = 88;
+// And a floor, so even a 15-minute event gets more than a clipped line.
+const MIN_EVENT_HEIGHT = { day: 20, week: 18 };
+const MIN_EVENT_HEIGHT_NARROW = { day: 44, week: 38 };
+
+// Phone-width, and keeps up when the window is resized or the phone turned.
+function useIsNarrow(query = "(max-width: 820px)") {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = (e) => setNarrow(e.matches);
+    setNarrow(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return narrow;
+}
 
 // Uses the same colour already assigned to that person's profile (visible on
 // their avatar everywhere else) so one person reads as one colour consistently
@@ -1451,6 +1493,9 @@ function isoOf(d) {
 }
 
 function Calendar({ data, saveData, profile }) {
+  const isNarrow = useIsNarrow();
+  const hourHeight = isNarrow ? HOUR_HEIGHT_NARROW : HOUR_HEIGHT;
+  const minEventHeight = isNarrow ? MIN_EVENT_HEIGHT_NARROW : MIN_EVENT_HEIGHT;
   const [mode, setMode] = useState("week"); // "week" | "month" | "day"
   const [justMine, setJustMine] = useState(false);
   const [cursor, setCursor] = useState(new Date());
@@ -1550,13 +1595,13 @@ function Calendar({ data, saveData, profile }) {
             const dayIso = isoOf(cursor);
             const dayEvents = eventsByDate[dayIso] || [];
             const laidOut = layoutDayEvents(dayEvents);
-            const totalHeight = WEEK_HOURS.length * HOUR_HEIGHT;
+            const totalHeight = WEEK_HOURS.length * hourHeight;
             const gridStartMin = WEEK_HOURS[0] * 60;
             return (
               <div style={{ display: "flex" }}>
                 <div style={{ width: 52, flexShrink: 0 }}>
                   {WEEK_HOURS.map((h) => (
-                    <div key={h} style={{ height: HOUR_HEIGHT, fontSize: 10.5, color: "var(--muted)", textAlign: "right", paddingRight: 8, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
+                    <div key={h} style={{ height: hourHeight, fontSize: 10.5, color: "var(--muted)", textAlign: "right", paddingRight: 8, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
                   ))}
                 </div>
                 <div style={{ position: "relative", flex: 1, height: totalHeight, borderLeft: "1px solid var(--hair)" }}>
@@ -1564,13 +1609,13 @@ function Calendar({ data, saveData, profile }) {
                     <div
                       key={h}
                       onClick={() => openAdd(dayIso, `${String(h).padStart(2, "0")}:00`)}
-                      style={{ position: "absolute", top: hi * HOUR_HEIGHT, left: 0, right: 0, height: HOUR_HEIGHT, borderTop: "1px solid var(--hair)", cursor: "pointer" }}
+                      style={{ position: "absolute", top: hi * hourHeight, left: 0, right: 0, height: hourHeight, borderTop: "1px solid var(--hair)", cursor: "pointer" }}
                     />
                   ))}
                   {laidOut.map((e) => {
                     const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
-                    const top = ((e.startMin - gridStartMin) / 60) * HOUR_HEIGHT;
-                    const height = Math.max(((e.endMin - e.startMin) / 60) * HOUR_HEIGHT - 2, 20);
+                    const top = ((e.startMin - gridStartMin) / 60) * hourHeight;
+                    const height = Math.max(((e.endMin - e.startMin) / 60) * hourHeight - 2, minEventHeight.day);
                     const widthPct = 100 / e.totalCols;
                     return (
                       <div
@@ -1590,7 +1635,7 @@ function Calendar({ data, saveData, profile }) {
           })()}
         </div>
       ) : mode === "month" ? (
-        <div className="card">
+        <div className="card" style={{ overflowX: "auto" }}>
           <div className="cal-head">
             <div className="cal-month display">{monthLabel}</div>
             <div className="cal-nav">
@@ -1613,7 +1658,9 @@ function Calendar({ data, saveData, profile }) {
                   return (
                     <div className="cal-evt" key={e.id} title={e.title} style={{ borderLeftColor: personColor(e.assignee, data.profiles), borderLeftWidth: 3 }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
                       <span className="evt-dot" style={{ background: st.color }} />
-                      {e.time ? `${e.time}${e.endTime ? `–${e.endTime}` : ""} · ` : ""}{e.title}
+                      <span className="evt-text">
+                        {e.time ? `${e.time}${e.endTime ? `–${e.endTime}` : ""} · ` : ""}{e.title}
+                      </span>
                     </div>
                   );
                 })}
@@ -1644,13 +1691,13 @@ function Calendar({ data, saveData, profile }) {
             })}
             <div className="week-time-col">
               {WEEK_HOURS.map((h) => (
-                <div key={h} style={{ height: HOUR_HEIGHT, fontSize: 9.5, color: "var(--muted)", textAlign: "right", paddingRight: 6, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
+                <div key={h} style={{ height: hourHeight, fontSize: 9.5, color: "var(--muted)", textAlign: "right", paddingRight: 6, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
               ))}
             </div>
             {weekDays.map((d) => {
               const iso = isoOf(d);
               const laidOut = layoutDayEvents(eventsByDate[iso] || []);
-              const totalHeight = WEEK_HOURS.length * HOUR_HEIGHT;
+              const totalHeight = WEEK_HOURS.length * hourHeight;
               const gridStartMin = WEEK_HOURS[0] * 60;
               return (
                 <div key={iso} style={{ position: "relative", height: totalHeight, borderLeft: "1px solid var(--hair)" }}>
@@ -1658,13 +1705,13 @@ function Calendar({ data, saveData, profile }) {
                     <div
                       key={h}
                       onClick={() => openAdd(iso, `${String(h).padStart(2, "0")}:00`)}
-                      style={{ position: "absolute", top: hi * HOUR_HEIGHT, left: 0, right: 0, height: HOUR_HEIGHT, borderTop: "1px solid var(--hair)", cursor: "pointer" }}
+                      style={{ position: "absolute", top: hi * hourHeight, left: 0, right: 0, height: hourHeight, borderTop: "1px solid var(--hair)", cursor: "pointer" }}
                     />
                   ))}
                   {laidOut.map((e) => {
                     const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
-                    const top = ((e.startMin - gridStartMin) / 60) * HOUR_HEIGHT;
-                    const height = Math.max(((e.endMin - e.startMin) / 60) * HOUR_HEIGHT - 2, 18);
+                    const top = ((e.startMin - gridStartMin) / 60) * hourHeight;
+                    const height = Math.max(((e.endMin - e.startMin) / 60) * hourHeight - 2, minEventHeight.week);
                     const widthPct = 100 / e.totalCols;
                     return (
                       <div
