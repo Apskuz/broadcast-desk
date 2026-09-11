@@ -7,7 +7,7 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -2631,6 +2631,51 @@ function IdeaBank({ data, saveData, profile }) {
   const folders = data.ideaFolders || [];
   const ideas = data.ideas || [];
 
+  // Undo can't just put an old copy of the board back: someone else may have
+  // added a picture in the meantime, and restoring a snapshot would delete it.
+  // Each entry remembers the board either side of one of my changes, and
+  // undoing replays that change backwards onto the board as it stands now,
+  // through the same merge that lets two people edit at once. So undo reverses
+  // what I did and leaves what everyone else did alone.
+  const historyRef = useRef({ past: [], future: [] });
+  const [historyDepth, setHistoryDepth] = useState({ past: 0, future: 0 });
+  const noteDepth = () => setHistoryDepth({ past: historyRef.current.past.length, future: historyRef.current.future.length });
+
+  const edit = (next) => {
+    const h = historyRef.current;
+    h.past.push({ before: data, after: next });
+    if (h.past.length > 50) h.past.shift();
+    h.future = [];
+    noteDepth();
+    saveData(next);
+  };
+  const undo = () => {
+    const h = historyRef.current;
+    const step = h.past.pop();
+    if (!step) return;
+    h.future.push(step);
+    noteDepth();
+    saveData(mergeState(step.after, step.before, data));
+  };
+  const redo = () => {
+    const h = historyRef.current;
+    const step = h.future.pop();
+    if (!step) return;
+    h.past.push(step);
+    noteDepth();
+    saveData(mergeState(step.before, step.after, data));
+  };
+
+  // What's picked, so the toolbar knows what it's acting on. One at a time —
+  // multi-select is a bigger job and isn't in this batch.
+  const [selected, setSelected] = useState(null); // { kind: "item" | "idea" | "folder", id }
+  const isPicked = (kind, id) => !!selected && selected.kind === kind && selected.id === id;
+  // Drawn outside the element's own box so it never covers the content, and
+  // via outline rather than border so nothing shifts by 2px when picked.
+  const pickedRing = (kind, id) => (isPicked(kind, id)
+    ? { outline: "2px solid var(--gold)", outlineOffset: 3, borderRadius: 8 }
+    : null);
+
   // Who else is on this board right now, and what they're touching. None of
   // this is saved — see src/livePresence.js.
   const myColor = ((data.profiles || []).find((p) => p.name === profile) || {}).color || "gold";
@@ -2658,15 +2703,15 @@ function IdeaBank({ data, saveData, profile }) {
   const boardIdeas = positioned.filter((i) => (openFolderId ? i.folderId === openFolderId : !i.folderId));
   const currentFolder = openFolderId ? folders.find((f) => f.id === openFolderId) : null;
 
-  const saveFolderPos = (id, x, y) => saveData({ ...data, ideaFolders: folders.map((f) => (f.id === id ? { ...f, x, y } : f)) });
-  const saveIdeaPos = (id, x, y) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, x, y } : i)) });
-  const folderDrag = useDraggable(saveFolderPos, (id) => setOpenFolderId(id), onDragSignal);
-  const ideaDrag = useDraggable(saveIdeaPos, (id) => setOpenIdeaId(id), onDragSignal);
+  const saveFolderPos = (id, x, y) => edit({ ...data, ideaFolders: folders.map((f) => (f.id === id ? { ...f, x, y } : f)) });
+  const saveIdeaPos = (id, x, y) => edit({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, x, y } : i)) });
+  const folderDrag = useDraggable(saveFolderPos, (id) => (isPicked("folder", id) ? setOpenFolderId(id) : setSelected({ kind: "folder", id })), onDragSignal);
+  const ideaDrag = useDraggable(saveIdeaPos, (id) => (isPicked("idea", id) ? setOpenIdeaId(id) : setSelected({ kind: "idea", id })), onDragSignal);
 
   const addFolder = () => {
     if (!folderName.trim()) return;
     const count = folders.length;
-    saveData({ ...data, ideaFolders: [...folders, { id: uid(), name: folderName.trim(), x: 40 + (count % 5) * 140, y: 40 + Math.floor(count / 5) * 130, color: IDEA_COLORS[count % IDEA_COLORS.length] }] });
+    edit({ ...data, ideaFolders: [...folders, { id: uid(), name: folderName.trim(), x: 40 + (count % 5) * 140, y: 40 + Math.floor(count / 5) * 130, color: IDEA_COLORS[count % IDEA_COLORS.length] }] });
     setFolderName("");
     setShowFolderForm(false);
   };
@@ -2677,7 +2722,7 @@ function IdeaBank({ data, saveData, profile }) {
     // Nothing the team put in is destroyed — ideas and pictures move back out
     // to the main board. Only the drawing is dropped, since strokes only make
     // sense against the layout they were drawn on.
-    saveData({
+    edit({
       ...data,
       ideaFolders: folders.filter((f) => f.id !== id),
       ideas: ideas.map((i) => (i.folderId === id ? { ...i, folderId: null } : i)),
@@ -2693,7 +2738,7 @@ function IdeaBank({ data, saveData, profile }) {
     const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
     const count = boardIdeas.length;
     const item = { id: uid(), votes: [], ...form, tags, attachments: pendingIdeaAttachments, folderId: openFolderId, x: 40 + (count % 6) * 170, y: 40 + Math.floor(count / 6) * 150 };
-    saveData({ ...data, ideas: [item, ...ideas] });
+    edit({ ...data, ideas: [item, ...ideas] });
     setForm({ title: "", description: "", tags: "", author: form.author, link: "", color: IDEA_COLORS[(count + 1) % IDEA_COLORS.length] });
     setPendingIdeaAttachments([]);
     setShowForm(false);
@@ -2706,7 +2751,7 @@ function IdeaBank({ data, saveData, profile }) {
     setShowForm(false);
   };
   // One vote per person, and tapping again takes it back.
-  const vote = (id) => saveData({
+  const vote = (id) => edit({
     ...data,
     ideas: ideas.map((idea) => {
       if (idea.id !== id) return idea;
@@ -2719,12 +2764,21 @@ function IdeaBank({ data, saveData, profile }) {
   });
   const removeIdea = (id) => {
     const item = ideas.find((i) => i.id === id);
-    if (item) (item.attachments || []).forEach((a) => deleteDriveFile(a.fileId));
-    saveData({ ...data, ideas: ideas.filter((i) => i.id !== id) });
+    // A duplicated idea carries the same attachments, so only drop a file from
+    // Drive once nothing else on the board points at it.
+    if (item) {
+      (item.attachments || []).forEach((a) => {
+        const usedByAnotherIdea = ideas.some((i) => i.id !== id && (i.attachments || []).some((x) => x.fileId === a.fileId));
+        const usedByBoardItem = (data.boardItems || []).some((b) => b.fileId === a.fileId);
+        if (!usedByAnotherIdea && !usedByBoardItem) deleteDriveFile(a.fileId);
+      });
+    }
+    edit({ ...data, ideas: ideas.filter((i) => i.id !== id) });
     setOpenIdeaId(null);
+    if (isPicked("idea", id)) setSelected(null);
   };
-  const moveToFolder = (id, folderId) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, folderId: folderId || null } : i)) });
-  const setIdeaColor = (id, color) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, color } : i)) });
+  const moveToFolder = (id, folderId) => edit({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, folderId: folderId || null } : i)) });
+  const setIdeaColor = (id, color) => edit({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, color } : i)) });
 
   const ideaFileInputRef = useRef(null);
   const [ideaAttaching, setIdeaAttaching] = useState(false);
@@ -2761,7 +2815,7 @@ function IdeaBank({ data, saveData, profile }) {
         deleteDriveFile(result.link);
         throw new Error("That idea was removed while this was uploading.");
       }
-      saveData({
+      edit({
         ...data,
         ideas: ideas.map((i) => (i.id === id ? { ...i, attachments: [...(i.attachments || []), { fileId, name: result.name, kind: result.kind }] } : i)),
       });
@@ -2773,7 +2827,7 @@ function IdeaBank({ data, saveData, profile }) {
   };
   const removeIdeaAttachment = (ideaId, fileId) => {
     deleteDriveFile(fileId);
-    saveData({ ...data, ideas: ideas.map((i) => (i.id === ideaId ? { ...i, attachments: (i.attachments || []).filter((a) => a.fileId !== fileId) } : i)) });
+    edit({ ...data, ideas: ideas.map((i) => (i.id === ideaId ? { ...i, attachments: (i.attachments || []).filter((a) => a.fileId !== fileId) } : i)) });
   };
 
   const openIdea = openIdeaId ? positioned.find((i) => i.id === openIdeaId) : null;
@@ -2848,7 +2902,7 @@ function IdeaBank({ data, saveData, profile }) {
         ? shapeToSave.points.length < 4
         : Math.abs(shapeToSave.x2 - shapeToSave.x1) < 4 && Math.abs(shapeToSave.y2 - shapeToSave.y1) < 4;
       if (isDot) return; // a stray tap shouldn't leave a speck behind
-      saveData({ ...data, ideaDrawings: [...(data.ideaDrawings || []), { id: uid(), folderId: openFolderId || null, ...shapeToSave }] });
+      edit({ ...data, ideaDrawings: [...(data.ideaDrawings || []), { id: uid(), folderId: openFolderId || null, ...shapeToSave }] });
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", end);
@@ -2856,8 +2910,8 @@ function IdeaBank({ data, saveData, profile }) {
     window.addEventListener("touchend", end);
   };
 
-  const eraseShape = (id) => saveData({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => d.id !== id) });
-  const clearDrawings = () => saveData({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId !== openFolderId : !!d.folderId)) });
+  const eraseShape = (id) => edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => d.id !== id) });
+  const clearDrawings = () => edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId !== openFolderId : !!d.folderId)) });
 
   const renderShape = (s, key, isDraft) => {
     const common = { stroke: s.color, strokeWidth: 3, fill: "none", strokeLinecap: "round", strokeLinejoin: "round" };
@@ -2899,6 +2953,14 @@ function IdeaBank({ data, saveData, profile }) {
   // ---- loose pictures and text placed straight on the board ----
   // Separate from idea cards: these are for laying out a case — a wall of
   // reference shots with notes around them — rather than pitching one idea.
+  // Everything placed on the board shares one stacking order, so a picture can
+  // be put behind an idea card and not just behind other pictures. The drawing
+  // layer stays above all of it — pen marks annotate what's underneath.
+  const stackOf = (el) => (typeof el.z === "number" ? el.z : 0);
+  const allPlaced = () => [...(data.boardItems || []), ...ideas, ...folders];
+  const topStack = () => allPlaced().reduce((m, el) => Math.max(m, stackOf(el)), 0);
+  const bottomStack = () => allPlaced().reduce((m, el) => Math.min(m, stackOf(el)), 0);
+
   const allBoardItems = data.boardItems || [];
   const boardItems = allBoardItems.filter((b) => (openFolderId ? b.folderId === openFolderId : !b.folderId));
   const [editingTextId, setEditingTextId] = useState(null);
@@ -2908,26 +2970,105 @@ function IdeaBank({ data, saveData, profile }) {
   const [boardUploading, setBoardUploading] = useState(false);
   const [boardUploadProgress, setBoardUploadProgress] = useState(0);
 
-  const saveBoardItemPos = (id, x, y) => saveData({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
+  // The three lists are separate in the saved board but behave as one surface
+  // here, so each action works out which list it's touching from the kind.
+  const listKeyFor = { item: "boardItems", idea: "ideas", folder: "ideaFolders" };
+  const listFor = (kind) => (kind === "item" ? allBoardItems : kind === "idea" ? ideas : folders);
+  const pickedElement = () => (selected ? listFor(selected.kind).find((el) => el.id === selected.id) : null);
+
+  const restack = (z) => {
+    if (!selected) return;
+    const key = listKeyFor[selected.kind];
+    edit({ ...data, [key]: listFor(selected.kind).map((el) => (el.id === selected.id ? { ...el, z } : el)) });
+  };
+  const bringToFront = () => restack(topStack() + 1);
+  const sendToBack = () => restack(bottomStack() - 1);
+
+  const duplicateSelected = () => {
+    const el = pickedElement();
+    if (!el) return;
+    const key = listKeyFor[selected.kind];
+    // Offset so the copy is visibly a second thing rather than hidden under it.
+    const copy = { ...el, id: uid(), x: (el.x || 0) + 18, y: (el.y || 0) + 18, z: topStack() + 1 };
+    if (selected.kind === "idea") copy.votes = [];
+    // A duplicated picture points at the same Drive file on purpose: copying
+    // the file would double the team's storage for something that looks the
+    // same. Deleting one copy therefore leaves the file alone if another
+    // still uses it.
+    edit({ ...data, [key]: [...listFor(selected.kind), copy] });
+    setSelected({ kind: selected.kind, id: copy.id });
+  };
+
+  const saveBoardItemPos = (id, x, y) => edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
   const boardItemDrag = useDraggable(saveBoardItemPos, (id) => {
     const item = allBoardItems.find((b) => b.id === id);
     if (!item) return;
     if (tool === "erase") return removeBoardItem(id);
+    if (!isPicked("item", id)) return setSelected({ kind: "item", id });
     if (item.type === "text") { setEditingTextId(id); setEditingText(item.text || ""); live.signal({ kind: "write", itemId: id }); }
     else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
   }, onDragSignal);
 
   const addBoardItem = (item) => {
     const created = { id: uid(), folderId: openFolderId || null, ...item };
-    saveData({ ...data, boardItems: [...allBoardItems, created] });
+    edit({ ...data, boardItems: [...allBoardItems, created] });
     return created;
+  };
+  // A duplicated picture points at the same file in Drive as the original, so
+  // deleting one copy must not delete the file the other still shows. Only the
+  // last reference takes the file with it.
+  const fileStillUsedElsewhere = (fileId, ignoreItemId) => {
+    if (!fileId) return true;
+    if (allBoardItems.some((b) => b.id !== ignoreItemId && b.fileId === fileId)) return true;
+    return ideas.some((i) => (i.attachments || []).some((a) => a.fileId === fileId));
   };
   const removeBoardItem = (id) => {
     const item = allBoardItems.find((b) => b.id === id);
-    if (item && item.fileId) deleteDriveFile(item.fileId);
-    saveData({ ...data, boardItems: allBoardItems.filter((b) => b.id !== id) });
+    if (item && item.fileId && !fileStillUsedElsewhere(item.fileId, id)) deleteDriveFile(item.fileId);
+    edit({ ...data, boardItems: allBoardItems.filter((b) => b.id !== id) });
     if (editingTextId === id) setEditingTextId(null);
+    if (isPicked("item", id)) setSelected(null);
   };
+  // Delete routes back through each kind's own remover so the side effects
+  // still happen — a picture's Drive file goes with it, a folder asks first.
+  const deleteSelected = () => {
+    if (!selected) return;
+    const { kind, id } = selected;
+    setSelected(null);
+    if (kind === "item") return removeBoardItem(id);
+    if (kind === "idea") return removeIdea(id);
+    if (kind === "folder") return removeFolder(id);
+  };
+
+  // Opening is the second tap on something already picked, or the toolbar
+  // button — so one tap can pick a thing up without a modal appearing over it.
+  const openSelected = () => {
+    const el = pickedElement();
+    if (!el || !selected) return;
+    if (selected.kind === "idea") return setOpenIdeaId(el.id);
+    if (selected.kind === "folder") return setOpenFolderId(el.id);
+    if (el.type === "text") { setEditingTextId(el.id); setEditingText(el.text || ""); live.signal({ kind: "write", itemId: el.id }); return; }
+    setLightbox({ fileId: el.fileId, kind: el.kind, name: el.name });
+  };
+
+  // Board-wide shortcuts. Ignored while a field has focus, so Ctrl+Z inside a
+  // text box still undoes typing rather than the last thing put on the board.
+  useEffect(() => {
+    const onKey = (ev) => {
+      const el = ev.target;
+      const typing = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
+      if (typing) return;
+      const meta = ev.ctrlKey || ev.metaKey;
+      if (meta && ev.key.toLowerCase() === "z") { ev.preventDefault(); return ev.shiftKey ? redo() : undo(); }
+      if (meta && ev.key.toLowerCase() === "y") { ev.preventDefault(); return redo(); }
+      if (meta && ev.key.toLowerCase() === "d") { ev.preventDefault(); return duplicateSelected(); }
+      if (ev.key === "Delete" || ev.key === "Backspace") { if (selected) { ev.preventDefault(); deleteSelected(); } return; }
+      if (ev.key === "Escape") setSelected(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   const commitText = () => {
     live.stop();
     if (!editingTextId) return;
@@ -2936,7 +3077,7 @@ function IdeaBank({ data, saveData, profile }) {
     setEditingTextId(null);
     // An empty text box is just clutter — drop it rather than leave a blank.
     if (!text.trim()) return removeBoardItem(id);
-    saveData({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, text } : b)) });
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, text } : b)) });
   };
 
   const handleBoardFileSelect = async (e) => {
@@ -2982,7 +3123,7 @@ function IdeaBank({ data, saveData, profile }) {
       window.removeEventListener("touchmove", move);
       window.removeEventListener("touchend", end);
       setResizing(null);
-      saveData({ ...data, boardItems: allBoardItems.map((b) => (b.id === item.id ? { ...b, w: latest } : b)) });
+      edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === item.id ? { ...b, w: latest } : b)) });
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", end);
@@ -3040,6 +3181,15 @@ function IdeaBank({ data, saveData, profile }) {
       )}
 
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        <button
+          className="btn" style={{ padding: "6px 10px", fontSize: 12 }}
+          onClick={undo} disabled={historyDepth.past === 0} title="Undo (Ctrl+Z)"
+        ><RotateCcw size={13} /> Undo</button>
+        <button
+          className="btn" style={{ padding: "6px 10px", fontSize: 12 }}
+          onClick={redo} disabled={historyDepth.future === 0} title="Redo (Ctrl+Shift+Z)"
+        ><RotateCw size={13} /> Redo</button>
+        <span style={{ width: 1, height: 20, background: "var(--hair)", margin: "0 2px" }} />
         {TOOLS.map((t) => {
           const TIcon = t.icon;
           return (
@@ -3073,11 +3223,27 @@ function IdeaBank({ data, saveData, profile }) {
         )}
       </div>
 
+      {/* A bar rather than a popover floating by the element: it can't fall off
+          the edge of a phone screen, and it doesn't cover what you just picked. */}
+      {selected && pickedElement() && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "7px 10px", background: "var(--gold-soft)", border: "1px solid var(--gold)", borderRadius: 9 }}>
+          <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--gold)", marginRight: 2 }}>
+            {selected.kind === "idea" ? "Idea" : selected.kind === "folder" ? "Folder" : pickedElement().type === "text" ? "Text" : "Picture"} picked
+          </span>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={openSelected}><ExternalLink size={12} /> Open</button>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={duplicateSelected} title="Duplicate (Ctrl+D)"><Copy size={12} /> Duplicate</button>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={bringToFront} title="Bring to front"><ChevronUp size={12} /> Front</button>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={sendToBack} title="Send to back"><ChevronDown size={12} /> Back</button>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, borderColor: "var(--alert)", color: "var(--alert)" }} onClick={deleteSelected} title="Delete (Del)"><Trash2 size={12} /> Delete</button>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, marginLeft: "auto" }} onClick={() => setSelected(null)}>Done</button>
+        </div>
+      )}
+
       <div style={{ position: "relative", width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}>
         <div
           ref={boardRef}
-          onMouseDown={startDraw}
-          onTouchStart={startDraw}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
+          onTouchStart={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
           style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px", cursor: drawingMode && tool !== "erase" ? "crosshair" : "default", touchAction: drawingMode ? "none" : "auto" }}
         >
           <svg
@@ -3085,7 +3251,9 @@ function IdeaBank({ data, saveData, profile }) {
             height={BOARD_H}
             // The layer itself never catches clicks — only the strokes do, and
             // only while erasing — so cards and pictures underneath stay usable.
-            style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 3 }}
+            // Above every element: pen marks annotate whatever is underneath,
+            // so restacking a picture must never bury someone's notes.
+            style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 900 }}
           >
             {drawings.map((s) => renderShape(s, s.id, false))}
             {draft && renderShape(draft, "draft", true)}
@@ -3106,7 +3274,8 @@ function IdeaBank({ data, saveData, profile }) {
                   pointerEvents: drawingMode && tool !== "erase" ? "none" : "auto",
                   cursor: isEditing ? "text" : tool === "erase" ? "pointer" : "grab",
                   userSelect: isEditing ? "text" : "none",
-                  touchAction: "none", zIndex: 2,
+                  touchAction: "none", zIndex: 2 + stackOf(b),
+                  ...pickedRing("item", b.id),
                 }}
               >
                 {b.type === "image" ? (
@@ -3191,7 +3360,7 @@ function IdeaBank({ data, saveData, profile }) {
                 key={f.id}
                 onMouseDown={(e) => { if (!drawingMode) folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0); }}
                 onTouchStart={(e) => { if (!drawingMode) folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0); }}
-                style={{ position: "absolute", left: pos.x, top: pos.y, width: 116, cursor: "grab", userSelect: "none", touchAction: "none", pointerEvents: drawingMode ? "none" : "auto", textAlign: "center" }}
+                style={{ position: "absolute", left: pos.x, top: pos.y, width: 116, cursor: "grab", userSelect: "none", touchAction: "none", pointerEvents: drawingMode ? "none" : "auto", textAlign: "center", zIndex: 2 + stackOf(f), ...pickedRing("folder", f.id) }}
               >
                 <div style={{ width: 62, height: 50, margin: "0 auto 6px", borderRadius: 8, background: f.color || IDEA_COLORS[0], display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 10px rgba(0,0,0,0.35)" }}>
                   <FolderOpen size={24} color="#22232b" />
@@ -3209,7 +3378,7 @@ function IdeaBank({ data, saveData, profile }) {
                 key={i.id}
                 onMouseDown={(e) => { if (!drawingMode) ideaDrag.startDrag(e, i.id, i.x, i.y); }}
                 onTouchStart={(e) => { if (!drawingMode) ideaDrag.startDrag(e, i.id, i.x, i.y); }}
-                style={{ position: "absolute", left: pos.x, top: pos.y, width: 152, minHeight: 88, pointerEvents: drawingMode ? "none" : "auto", background: i.color, borderRadius: 8, padding: "10px 11px", boxShadow: "0 4px 10px rgba(0,0,0,0.35)", cursor: "grab", userSelect: "none", touchAction: "none" }}
+                style={{ position: "absolute", left: pos.x, top: pos.y, width: 152, minHeight: 88, pointerEvents: drawingMode ? "none" : "auto", background: i.color, borderRadius: 8, padding: "10px 11px", boxShadow: "0 4px 10px rgba(0,0,0,0.35)", cursor: "grab", userSelect: "none", touchAction: "none", zIndex: 2 + stackOf(i), ...pickedRing("idea", i.id) }}
               >
                 {i.attachments && i.attachments.length > 0 && (
                   i.attachments[0].kind === "image" ? (
