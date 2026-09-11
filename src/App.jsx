@@ -11,7 +11,7 @@ import {
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
   Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
-  Minus, ArrowRight, Square, Circle, Triangle, Star, Bold, Italic, AlignLeft, AlignCenter, AlignRight
+  Minus, ArrowRight, Square, Circle, Triangle, Star, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, Scissors
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -120,6 +120,16 @@ const BOARD_FONTS = [
 ];
 const fontStack = (id) => (BOARD_FONTS.find((f) => f.id === id) || BOARD_FONTS[0]).stack;
 const TEXT_SIZES = [13, 16, 22, 30, 44];
+
+// Emoji rather than image files: they need no upload, no storage, no Drive
+// quota, and they render on every phone the team owns. Grouped the way people
+// reach for them on a planning board.
+const STICKER_GROUPS = [
+  { label: "Marks", items: ["✅", "❌", "⭐", "❗", "❓", "🔥", "💡", "📌", "🎯", "⚡", "💯", "🚫"] },
+  { label: "Making", items: ["🎬", "📷", "🎥", "🎙️", "✏️", "🎨", "💻", "📱", "🖼️", "🎞️", "🔊", "📝"] },
+  { label: "People", items: ["🙂", "😎", "🤔", "🥳", "😅", "👀", "👏", "🙌", "🤝", "💪", "🧠", "☕"] },
+  { label: "Time", items: ["📅", "⏰", "⏳", "🔁", "➡️", "⬅️", "⬆️", "⬇️", "🔝", "🏁", "📈", "📉"] },
+];
 const TEXT_DEFAULTS = { fontSize: 15, font: "sans", align: "left", bold: false, italic: false };
 
 // Starter layouts. Each returns plain board items and shapes — nothing a
@@ -3000,6 +3010,9 @@ function IdeaBank({ data, saveData, profile }) {
   const [textItalic, setTextItalic] = useState(false);
   const [textAlign, setTextAlign] = useState(TEXT_DEFAULTS.align);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [showStickers, setShowStickers] = useState(false);
+  const [linkDraft, setLinkDraft] = useState(null); // the url being typed, or null
+  const [cropping, setCropping] = useState(null);   // the picture being reframed
   const [exporting, setExporting] = useState("");
   const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
   const boardRef = useRef(null);
@@ -3192,6 +3205,27 @@ function IdeaBank({ data, saveData, profile }) {
   const bringToFront = () => restack(stackPeers().reduce((m, el) => Math.max(m, stackOf(el)), 0) + 1);
   const sendToBack = () => restack(stackPeers().reduce((m, el) => Math.min(m, stackOf(el)), 0) - 1);
 
+  // Anything on the board can point somewhere — a reference shot at the Canva
+  // design it came from, a note at the brief. Only http(s) is ever stored, so
+  // a pasted "javascript:" can't be turned into something clickable.
+  const saveLink = (raw) => {
+    if (!selected || selected.kind !== "item") return;
+    const trimmed = (raw || "").trim();
+    const url = !trimmed ? null
+      : /^https?:\/\//i.test(trimmed) ? trimmed
+      : /^[\w-]+(\.[\w-]+)+/.test(trimmed) ? `https://${trimmed}`
+      : null;
+    if (trimmed && !url) return;      // not a link — leave what was there alone
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === selected.id ? { ...b, link: url } : b)) });
+    setLinkDraft(null);
+  };
+
+  const saveCrop = (crop, imgAspect) => {
+    if (!cropping) return;
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === cropping.id ? { ...b, crop, imgAspect: imgAspect || b.imgAspect } : b)) });
+    setCropping(null);
+  };
+
   const duplicateSelected = () => {
     const el = pickedElement();
     if (!el) return;
@@ -3327,6 +3361,18 @@ function IdeaBank({ data, saveData, profile }) {
       // can be pressed again.
     }
     setExporting("");
+  };
+
+  // A sticker is a text box holding one emoji at a large size — same dragging,
+  // resizing, stacking and undo as everything else, and nothing new to store.
+  const addSticker = (emoji) => {
+    const count = boardItems.filter((b) => b.sticker).length;
+    addBoardItem({
+      type: "text", sticker: true, text: emoji,
+      x: 70 + (count % 8) * 70, y: 70 + Math.floor(count / 8) * 70,
+      w: 64, fontSize: 44, align: "center", font: "sans", color: "var(--text)", bg: null,
+    });
+    setShowStickers(false);
   };
 
   const addBoardItem = (item) => {
@@ -3469,6 +3515,7 @@ function IdeaBank({ data, saveData, profile }) {
           ) : (
             <button className="btn" onClick={() => setShowFolderForm(true)}><Folder size={15} /> New folder</button>
           )}
+          <button className="btn" onClick={() => setShowStickers(true)}><Smile size={15} /> Stickers</button>
           <button className="btn" onClick={() => setShowTemplates(true)}><Layers size={15} /> Templates</button>
           <button className="btn" onClick={() => exportBoard("png")} disabled={!!exporting}>
             <Upload size={15} /> {exporting === "png" ? "Saving…" : "PNG"}
@@ -3664,6 +3711,32 @@ function IdeaBank({ data, saveData, profile }) {
             <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={openSelected}><ExternalLink size={12} /> Open</button>
           )}
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={duplicateSelected} title="Duplicate (Ctrl+D)"><Copy size={12} /> Duplicate</button>
+          {selected.kind === "item" && (
+            linkDraft === null ? (
+              <button
+                className="btn" style={{ padding: "5px 9px", fontSize: 11.5, ...(pickedElement().link ? { borderColor: "var(--teal)", color: "var(--teal)" } : {}) }}
+                onClick={() => setLinkDraft(pickedElement().link || "")}
+                title={pickedElement().link || "Point this at a link"}
+              ><Link2 size={12} /> {pickedElement().link ? "Linked" : "Link"}</button>
+            ) : (
+              <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                <input
+                  autoFocus value={linkDraft} onChange={(e) => setLinkDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveLink(linkDraft); if (e.key === "Escape") setLinkDraft(null); }}
+                  placeholder="Paste a link…"
+                  style={{ width: 190, background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11.5, padding: "5px 7px", outline: "none" }}
+                />
+                <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={() => saveLink(linkDraft)}>Save</button>
+                <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={() => setLinkDraft(null)}>Cancel</button>
+              </span>
+            )
+          )}
+          {selected.kind === "item" && pickedElement().type === "image" && pickedElement().kind === "image" && (
+            <button
+              className="btn" style={{ padding: "5px 9px", fontSize: 11.5, ...(pickedElement().crop ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }}
+              onClick={() => setCropping(pickedElement())} title="Choose what part of the picture to show"
+            ><Crop size={12} /> Crop</button>
+          )}
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={bringToFront} title="Bring to front"><ChevronUp size={12} /> Front</button>
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={sendToBack} title="Send to back"><ChevronDown size={12} /> Back</button>
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, borderColor: "var(--alert)", color: "var(--alert)" }} onClick={deleteSelected} title="Delete (Del)"><Trash2 size={12} /> Delete</button>
@@ -3710,14 +3783,39 @@ function IdeaBank({ data, saveData, profile }) {
                   ...pickedRing("item", b.id),
                 }}
               >
+                {b.link && (
+                  // Its own tap target rather than making the whole element a
+                  // link: you still need to be able to pick the thing up, move
+                  // it and edit it without being sent off to a browser tab.
+                  <a
+                    href={b.link} target="_blank" rel="noopener noreferrer"
+                    onClick={(ev) => ev.stopPropagation()} onMouseDown={(ev) => ev.stopPropagation()} onTouchStart={(ev) => ev.stopPropagation()}
+                    title={b.link}
+                    style={{ position: "absolute", top: -9, right: -9, zIndex: 6, width: 24, height: 24, borderRadius: "50%", background: "var(--teal)", color: "#0d1b19", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,0,0,0.45)" }}
+                  ><Link2 size={13} /></a>
+                )}
                 {b.type === "image" ? (
                   <div style={{ position: "relative" }}>
-                    <img
-                      src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
-                      alt={b.name || ""}
-                      draggable={false}
-                      style={{ width: "100%", borderRadius: 8, display: "block", boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}
-                    />
+                    {b.crop ? (
+                      // The whole picture is still the thing being drawn; the
+                      // window in front of it decides how much shows. Height
+                      // comes from the crop's share of the picture, which is
+                      // why the picture's own proportions are remembered.
+                      <div style={{ position: "relative", width: "100%", paddingTop: `${(b.crop.h / b.crop.w) * (100 / (b.imgAspect || 1))}%`, overflow: "hidden", borderRadius: 8, boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}>
+                        <img
+                          src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
+                          alt={b.name || ""} draggable={false}
+                          style={{ position: "absolute", top: 0, left: 0, width: `${100 / b.crop.w}%`, maxWidth: "none", transform: `translate(${-b.crop.x * 100 / b.crop.w}%, ${-b.crop.y * 100 / b.crop.h}%)`, display: "block" }}
+                        />
+                      </div>
+                    ) : (
+                      <img
+                        src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
+                        alt={b.name || ""}
+                        draggable={false}
+                        style={{ width: "100%", borderRadius: 8, display: "block", boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}
+                      />
+                    )}
                     {b.kind !== "image" && (
                       <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
                         <span style={{ width: 44, height: 44, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -3871,6 +3969,33 @@ function IdeaBank({ data, saveData, profile }) {
           )}
         </div>
       </div>
+
+      {cropping && (
+        <CropModal item={cropping} onCancel={() => setCropping(null)} onSave={saveCrop} />
+      )}
+
+      {showStickers && (
+        <Modal title="Stickers" onClose={() => setShowStickers(false)}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+            Drops onto {currentFolder ? `"${currentFolder.name}"` : "the board"}, then drag it where you want it. Resize it
+            like any text — the size control makes it bigger.
+          </div>
+          {STICKER_GROUPS.map((g) => (
+            <div key={g.label} style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", fontWeight: 600, marginBottom: 7 }}>{g.label}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {g.items.map((e) => (
+                  <button
+                    key={e} onClick={() => addSticker(e)} title={`Add ${e}`}
+                    style={{ width: 40, height: 40, fontSize: 21, lineHeight: 1, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 8, cursor: "pointer" }}
+                  >{e}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div className="modal-actions"><button className="btn" onClick={() => setShowStickers(false)}>Close</button></div>
+        </Modal>
+      )}
 
       {showTemplates && (
         <Modal title="Start from a template" onClose={() => setShowTemplates(false)}>
@@ -4055,6 +4180,100 @@ function IdeaBank({ data, saveData, profile }) {
 
       {lightbox && <MediaLightbox fileId={lightbox.fileId} kind={lightbox.kind} name={lightbox.name} onClose={() => setLightbox(null)} />}
     </div>
+  );
+}
+
+/* ---------------------------------- Crop ---------------------------------- */
+
+// Cropping here never touches the file in Drive. It records which part of the
+// picture to show, as fractions of the whole, so the original is still there
+// underneath — the crop can be changed or cleared later, other copies of the
+// same picture keep their own framing, and nothing has to be re-uploaded.
+function CropModal({ item, onCancel, onSave }) {
+  const [box, setBox] = useState(item.crop || { x: 0, y: 0, w: 1, h: 1 });
+  const [aspect, setAspect] = useState(item.imgAspect || null);
+  const frameRef = useRef(null);
+
+  // Drag anywhere on the picture to draw the new frame.
+  const startDrag = (e) => {
+    e.preventDefault();
+    const rect = frameRef.current.getBoundingClientRect();
+    const at = (ev) => {
+      const pt = ev.touches ? ev.touches[0] : ev;
+      return {
+        x: Math.min(1, Math.max(0, (pt.clientX - rect.left) / rect.width)),
+        y: Math.min(1, Math.max(0, (pt.clientY - rect.top) / rect.height)),
+      };
+    };
+    const origin = at(e);
+    const move = (ev) => {
+      ev.preventDefault();
+      const now = at(ev);
+      setBox({
+        x: Math.min(origin.x, now.x), y: Math.min(origin.y, now.y),
+        w: Math.abs(now.x - origin.x), h: Math.abs(now.y - origin.y),
+      });
+    };
+    const end = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", end);
+      window.removeEventListener("touchmove", move);
+      window.removeEventListener("touchend", end);
+      // A tap rather than a drag shouldn't leave a crop of nothing.
+      setBox((b) => (b.w < 0.04 || b.h < 0.04 ? { x: 0, y: 0, w: 1, h: 1 } : b));
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", end);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("touchend", end);
+  };
+
+  // Presets crop from the centre outwards, to the largest box that fits.
+  const toRatio = (r) => {
+    if (!aspect) return;
+    let w = 1, h = 1;
+    if (aspect > r) w = r / aspect; else h = aspect / r;
+    setBox({ x: (1 - w) / 2, y: (1 - h) / 2, w, h });
+  };
+
+  const pct = (n) => `${n * 100}%`;
+
+  return (
+    <Modal title="Crop picture" onClose={onCancel}>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+        Drag across the picture to choose what to keep. The file in Drive isn't changed — this only
+        records the framing, so you can widen it again or clear it at any point.
+      </div>
+      <div
+        ref={frameRef}
+        onMouseDown={startDrag}
+        onTouchStart={startDrag}
+        style={{ position: "relative", width: "100%", background: "#000", borderRadius: 8, overflow: "hidden", cursor: "crosshair", touchAction: "none", userSelect: "none" }}
+      >
+        <img
+          src={driveThumbSrc(item.fileId, "s1600")} alt={item.name || ""} draggable={false}
+          onLoad={(e) => { if (!aspect && e.target.naturalHeight) setAspect(e.target.naturalWidth / e.target.naturalHeight); }}
+          style={{ width: "100%", display: "block", opacity: 0.4 }}
+        />
+        {/* The kept part shown at full strength, the rest dimmed behind it. */}
+        <div style={{ position: "absolute", left: pct(box.x), top: pct(box.y), width: pct(box.w), height: pct(box.h), overflow: "hidden", outline: "2px solid var(--gold)", boxShadow: "0 0 0 9999px rgba(0,0,0,0.35)", pointerEvents: "none" }}>
+          <img
+            src={driveThumbSrc(item.fileId, "s1600")} alt="" draggable={false}
+            style={{ position: "absolute", width: pct(1 / (box.w || 1)), left: pct(-box.x / (box.w || 1)), top: pct(-box.y / (box.h || 1)), height: "auto", maxWidth: "none" }}
+          />
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 }}>
+        {[{ l: "Square", r: 1 }, { l: "4:5", r: 4 / 5 }, { l: "16:9", r: 16 / 9 }, { l: "9:16", r: 9 / 16 }].map((o) => (
+          <button key={o.l} className="btn" style={{ padding: "5px 10px", fontSize: 11.5 }} onClick={() => toRatio(o.r)} disabled={!aspect}>{o.l}</button>
+        ))}
+        <button className="btn" style={{ padding: "5px 10px", fontSize: 11.5 }} onClick={() => setBox({ x: 0, y: 0, w: 1, h: 1 })}>Whole picture</button>
+      </div>
+      <div className="modal-actions">
+        <button className="btn" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-gold" onClick={() => onSave(box.w >= 0.999 && box.h >= 0.999 ? null : box, aspect)}>Save crop</button>
+      </div>
+    </Modal>
   );
 }
 
