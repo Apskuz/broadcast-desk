@@ -1,0 +1,178 @@
+/* Styles for the Instagram analytics view.
+   Kept in its own file rather than the CSS template in App.jsx: that block is
+   shared ground another session is working in, and this screen's styles have
+   no reason to live there.
+   Everything reuses the app's existing tokens (--panel, --gold, --hair ...) so
+   the screen sits in the product rather than beside it. */
+
+.ig-root { padding: 2px 0 40px; }
+
+/* ---------------------------------- header --------------------------------- */
+.ig-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 18px;
+}
+.ig-head h2 { font-size: 23px; margin: 0 0 4px; font-weight: 600; }
+.ig-dim { color: var(--muted); font-size: 12.5px; margin: 0; }
+.ig-head-actions { display: flex; gap: 8px; }
+.ig-spin { animation: ig-spin 1s linear infinite; }
+@keyframes ig-spin { to { transform: rotate(360deg); } }
+
+/* ------------------------------ notices & setup ---------------------------- */
+.ig-note {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--panel-raised); border: 1px solid var(--hair);
+  border-radius: 8px; padding: 10px 13px; font-size: 12.5px;
+  color: var(--muted); margin-bottom: 12px;
+}
+.ig-note a { color: var(--gold); }
+.ig-note-bad { border-color: rgba(217, 86, 75, 0.4); color: var(--text); }
+
+.ig-setup, .ig-connect {
+  background: var(--panel); border: 1px solid var(--hair); border-radius: 12px;
+  padding: 30px; display: flex; gap: 14px;
+}
+.ig-setup { align-items: flex-start; color: var(--muted); }
+.ig-setup strong { color: var(--text); display: block; margin-bottom: 5px; }
+.ig-setup p { margin: 0 0 6px; font-size: 13px; }
+.ig-connect {
+  flex-direction: column; align-items: center; text-align: center;
+  padding: 46px 30px; color: var(--muted);
+}
+.ig-connect h3 { margin: 6px 0 2px; font-size: 19px; color: var(--text); font-weight: 600; }
+.ig-connect p { margin: 0; font-size: 13.5px; max-width: 52ch; line-height: 1.55; }
+.ig-connect .btn { margin-top: 10px; }
+
+/* --------------------------------- filters --------------------------------- */
+.ig-filters {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 18px;
+}
+.ig-seg {
+  display: inline-flex; background: var(--panel); border: 1px solid var(--hair);
+  border-radius: 8px; padding: 3px; gap: 2px;
+}
+.ig-seg-right { margin-left: auto; }
+.ig-seg button {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; border: 0; color: var(--muted);
+  font-size: 12px; font-weight: 600; padding: 6px 11px; border-radius: 6px;
+  cursor: pointer; transition: color .12s, background .12s; font-family: inherit;
+}
+.ig-seg button:hover { color: var(--text); }
+.ig-seg button.on { background: var(--gold-soft); color: var(--gold); }
+
+/* ------------------------------- hero figure ------------------------------- */
+/* Exactly one per view. Fraunces rather than the sans the method's reference
+   prescribes, because in THIS app Fraunces is what big numbers wear (see
+   .ring-num .n and .hstat .n) -- switching to Inter here would be the thing
+   that reads as off-brand. */
+.ig-hero {
+  background: linear-gradient(135deg, var(--panel) 0%, var(--panel-raised) 100%);
+  border: 1px solid var(--hair); border-radius: 14px;
+  padding: 24px 28px; margin-bottom: 16px;
+}
+.ig-hero-label {
+  font-size: 10.5px; color: var(--muted); letter-spacing: 0.1em;
+  text-transform: uppercase; margin-bottom: 6px;
+}
+.ig-hero-value {
+  font-family: 'Fraunces', serif; font-size: 52px; font-weight: 600;
+  line-height: 1; letter-spacing: -0.01em;
+}
+.ig-hero-delta {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12.5px; font-weight: 600; margin-top: 9px;
+}
+
+/* -------------------------------- stat tiles ------------------------------- */
+.ig-tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+.ig-tile {
+  background: var(--panel); border: 1px solid var(--hair);
+  border-radius: 11px; padding: 15px 16px;
+}
+.ig-tile-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--muted); margin-bottom: 9px;
+}
+/* Proportional figures: tabular-nums makes a display-size number look loose.
+   The table below is where tabular alignment earns its keep. */
+.ig-tile-value { font-size: 26px; font-weight: 600; line-height: 1; }
+.ig-tile-foot {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 10px; margin-top: 11px; min-height: 26px;
+}
+.ig-delta { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; font-weight: 600; }
+.ig-delta-label { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 3px; }
+
+/* ---------------------------------- cards ---------------------------------- */
+.ig-card {
+  background: var(--panel); border: 1px solid var(--hair);
+  border-radius: 12px; padding: 18px 20px 14px; margin-bottom: 16px;
+}
+.ig-card h3 { font-size: 14px; font-weight: 600; margin: 0 0 14px; }
+.ig-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.ig-card-head h3 { margin: 0; }
+
+.ig-chart-wrap { position: relative; }
+.ig-empty-chart {
+  color: var(--muted); font-size: 12.5px; text-align: center;
+  padding: 34px 10px; border: 1px dashed var(--hair); border-radius: 9px;
+}
+
+/* --------------------------------- legend ---------------------------------- */
+/* Always present at two or more series -- identity never rests on color alone. */
+.ig-legend { display: flex; gap: 16px; flex-wrap: wrap; margin: -4px 0 12px; }
+.ig-legend-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--muted);
+}
+.ig-swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+
+/* --------------------------------- tooltip --------------------------------- */
+.ig-tooltip {
+  position: absolute; top: 8px; transform: translateX(-50%);
+  background: var(--panel-raised); border: 1px solid var(--hair);
+  border-radius: 8px; padding: 8px 10px; pointer-events: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); min-width: 128px; z-index: 3;
+}
+.ig-tooltip-day { font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+.ig-tooltip-row { display: flex; align-items: center; gap: 7px; font-size: 12px; margin-top: 3px; }
+.ig-tooltip-label { color: var(--muted); }
+.ig-tooltip-value { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ig-bar-hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; min-height: 16px; }
+
+/* ---------------------------------- table ---------------------------------- */
+.ig-table-scroll { overflow-x: auto; }
+.ig-table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 860px; }
+.ig-table th {
+  text-align: left; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--muted); font-weight: 600;
+  padding: 0 10px 9px; border-bottom: 1px solid var(--hair); white-space: nowrap;
+}
+.ig-table td { padding: 9px 10px; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+.ig-table tr:last-child td { border-bottom: 0; }
+.ig-table tbody tr:hover { background: var(--panel-raised); }
+/* Columns of numbers are exactly where tabular figures belong. */
+.ig-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ig-post-cell { display: flex; align-items: center; gap: 9px; min-width: 240px; }
+.ig-post-cell img, .ig-thumb-blank {
+  width: 34px; height: 34px; border-radius: 5px; object-fit: cover;
+  flex-shrink: 0; background: var(--panel-raised);
+}
+.ig-post-cell a { color: var(--text); text-decoration: none; }
+.ig-post-cell a:hover { color: var(--gold); }
+
+/* -------------------------------- narrow ----------------------------------- */
+@media (max-width: 820px) {
+  .ig-hero-value { font-size: 40px; }
+  .ig-seg-right { margin-left: 0; }
+  .ig-filters { gap: 8px; }
+  .ig-card { padding: 15px 14px 12px; }
+  .ig-connect { padding: 34px 18px; }
+}
