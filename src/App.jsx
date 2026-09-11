@@ -155,9 +155,26 @@ const CONTENT_STATUS = [
 const CAL_STATUS = [
   { id: "planned", label: "Planned", color: "var(--muted)" },
   { id: "ready", label: "Ready to post", color: "var(--gold)" },
-  { id: "posted", label: "Posted", color: "var(--good)" },
-  { id: "skipped", label: "Skipped", color: "var(--alert)" },
+  { id: "posted", label: "Done / posted", color: "var(--good)", done: true },
+  { id: "skipped", label: "Skipped", color: "var(--alert)", dismissed: true },
 ];
+const calStatus = (e) => CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+
+// The status used to be a 6px dot, which told you there was a status but not
+// which one unless you remembered what each colour meant. Something finished
+// now gets a tick and fades back; something skipped gets a cross and is struck
+// through. Both stay in place rather than disappearing, so the day still reads
+// as what was planned for it.
+function EventMark({ status, size = 12 }) {
+  if (status.done) return <Check size={size} strokeWidth={3.5} style={{ flexShrink: 0 }} />;
+  if (status.dismissed) return <X size={size - 1} strokeWidth={3} style={{ flexShrink: 0 }} />;
+  return <span className="evt-dot" style={{ background: status.color, width: 6, height: 6 }} />;
+}
+// Finished work shouldn't shout as loudly as what's still to do.
+const doneStyle = (status) => ({
+  opacity: status.done ? 0.72 : status.dismissed ? 0.5 : 1,
+  textDecoration: status.dismissed ? "line-through" : "none",
+});
 const TASK_TYPES = [
   { id: "film", label: "Film", verb: "Film", icon: Video, color: "var(--gold)" },
   { id: "edit", label: "Edit", verb: "Edit", icon: Pencil, color: "var(--teal)" },
@@ -1613,7 +1630,7 @@ function Calendar({ data, saveData, profile }) {
                     />
                   ))}
                   {laidOut.map((e) => {
-                    const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                    const st = calStatus(e);
                     const top = ((e.startMin - gridStartMin) / 60) * hourHeight;
                     const height = Math.max(((e.endMin - e.startMin) / 60) * hourHeight - 2, minEventHeight.day);
                     const widthPct = 100 / e.totalCols;
@@ -1621,9 +1638,9 @@ function Calendar({ data, saveData, profile }) {
                       <div
                         key={e.id}
                         onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
-                        style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 4px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 6, padding: "5px 8px", fontSize: 11.5, fontWeight: 600, overflow: "hidden", cursor: "pointer", zIndex: 2 }}
+                        style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 4px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 6, padding: "5px 8px", fontSize: 11.5, fontWeight: 600, overflow: "hidden", cursor: "pointer", zIndex: 2, ...doneStyle(st) }}
                       >
-                        <span className="evt-dot" style={{ background: st.color, marginRight: 4 }} />
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 4, verticalAlign: "-2px" }}><EventMark status={st} /></span>
                         {e.time}{e.endTime ? `–${e.endTime}` : ""} {e.title}
                         {e.assignee && <div style={{ fontSize: 10, fontWeight: 500, opacity: 0.75 }}>{e.assignee}</div>}
                       </div>
@@ -1654,10 +1671,16 @@ function Calendar({ data, saveData, profile }) {
               >
                 <div className="dnum">{c.day}</div>
                 {c.iso && (eventsByDate[c.iso] || []).sort((a, b) => (a.time || "").localeCompare(b.time || "")).slice(0, 3).map((e) => {
-                  const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                  const st = calStatus(e);
                   return (
-                    <div className="cal-evt" key={e.id} title={e.title} style={{ borderLeftColor: personColor(e.assignee, data.profiles), borderLeftWidth: 3 }} onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}>
-                      <span className="evt-dot" style={{ background: st.color }} />
+                    <div
+                      className="cal-evt"
+                      key={e.id}
+                      title={`${e.title} — ${st.label}`}
+                      style={{ borderLeftColor: personColor(e.assignee, data.profiles), borderLeftWidth: 3, background: st.done ? "var(--good-soft)" : undefined, ...doneStyle(st) }}
+                      onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
+                    >
+                      <EventMark status={st} size={10} />
                       <span className="evt-text">
                         {e.time ? `${e.time}${e.endTime ? `–${e.endTime}` : ""} · ` : ""}{e.title}
                       </span>
@@ -1709,7 +1732,7 @@ function Calendar({ data, saveData, profile }) {
                     />
                   ))}
                   {laidOut.map((e) => {
-                    const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                    const st = calStatus(e);
                     const top = ((e.startMin - gridStartMin) / 60) * hourHeight;
                     const height = Math.max(((e.endMin - e.startMin) / 60) * hourHeight - 2, minEventHeight.week);
                     const widthPct = 100 / e.totalCols;
@@ -1718,9 +1741,9 @@ function Calendar({ data, saveData, profile }) {
                         key={e.id}
                         title={`${e.time}${e.endTime ? `–${e.endTime}` : ""} · ${e.title}`}
                         onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
-                        style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 3px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 5, padding: "2px 5px", fontSize: 9.5, fontWeight: 700, lineHeight: 1.3, overflow: "hidden", cursor: "pointer", zIndex: 2 }}
+                        style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 3px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 5, padding: "2px 5px", fontSize: 9.5, fontWeight: 700, lineHeight: 1.3, overflow: "hidden", cursor: "pointer", zIndex: 2, ...doneStyle(st) }}
                       >
-                        <span className="evt-dot light" style={{ background: st.color }} />
+                        <span style={{ display: "inline-flex", alignItems: "center", marginRight: 3, verticalAlign: "-2px" }}><EventMark status={st} size={10} /></span>
                         {e.time} {e.title}
                       </div>
                     );
@@ -1778,7 +1801,7 @@ function Calendar({ data, saveData, profile }) {
             <div className="field">
               <label>Already on this day</label>
               {eventsByDate[form.date].filter((e) => e.id !== editId).sort((a, b) => (a.time || "").localeCompare(b.time || "")).map((e) => {
-                const st = CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+                const st = calStatus(e);
                 return (
                   <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, padding: "6px 0", borderBottom: "1px solid var(--hair)", cursor: "pointer" }} onClick={() => openEdit(e)}>
                     <span>{e.time ? `${e.time} · ` : ""}{e.title}</span>
