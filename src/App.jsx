@@ -2764,6 +2764,8 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
 /* ---------------------------------- Idea bank ---------------------------------- */
 
 function IdeaBank({ data, saveData, profile }) {
+  // Phone width decides whether the panel sits beside the board or under it.
+  const isNarrow = useIsNarrow();
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ title: "", description: "", tags: "", author: "", link: "", color: IDEA_COLORS[0] });
   const [showFolderForm, setShowFolderForm] = useState(false);
@@ -3475,6 +3477,19 @@ function IdeaBank({ data, saveData, profile }) {
     setSelection(picked);
   };
 
+  // Worked out once here rather than three times inside the markup: what is
+  // picked, what to call it, and which groups of controls are worth showing.
+  const picked = !!(selected && pickedElement());
+  const pickedLabel = !picked ? ""
+    : selected.kind === "idea" ? "Idea"
+    : selected.kind === "folder" ? "Folder"
+    : selected.kind === "shape" ? "Shape"
+    : pickedElement().sticker ? "Sticker"
+    : pickedElement().type === "text" ? (pickedElement().bg ? "Note" : "Text")
+    : "Picture";
+  const showShapeControls = drawingMode || !!pickedShape;
+  const showTextControls = tool === "text" || tool === "note" || !!pickedText || !!editingTextId;
+
   const saveBoardItemPos = (id, x, y, dx, dy) => {
     const moved = dragSelectionBy("item", id, dx || 0, dy || 0);
     if (moved) return edit({ ...moved, boardItems: moved.boardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
@@ -3858,183 +3873,13 @@ function IdeaBank({ data, saveData, profile }) {
         <input ref={boardFileInputRef} type="file" accept="video/*,image/*" onChange={handleBoardFileSelect} disabled={boardUploading} style={{ display: "none" }} />
       </div>
 
-      {/* Style sits on its own row: on a phone the tools alone already wrap to
-          two lines, and mixing the two makes neither easy to hit. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, fontSize: 11, color: "var(--muted)" }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Colour</span>
-          {IDEA_COLORS.map((c) => (
-            <button
-              key={c} onClick={() => applyStyle({ color: c })} title="Line, pen and text colour"
-              style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: styleNow.color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer", padding: 0 }}
-            />
-          ))}
-          <input
-            type="color" value={styleNow.color} onChange={(e) => applyStyle({ color: e.target.value })}
-            title="Any other colour"
-            style={{ width: 24, height: 22, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
-          />
-        </span>
-
-        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Width</span>
-          {STROKE_WIDTHS.map((wpx) => (
-            <button
-              key={wpx} onClick={() => applyStyle({ width: wpx })} title={`${wpx}px line`}
-              style={{ width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: styleNow.width === wpx ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${styleNow.width === wpx ? "var(--gold)" : "var(--hair)"}`, borderRadius: 5, cursor: "pointer" }}
-            >
-              <span style={{ width: 13, height: Math.min(wpx, 8), borderRadius: 4, background: styleNow.width === wpx ? "var(--gold)" : "var(--text)", display: "block" }} />
-            </button>
-          ))}
-        </span>
-
-        {(FILLABLE.includes(tool) || tool === "note" || (pickedShape && FILLABLE.includes(pickedShape.tool))) && (
-          <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Fill</span>
-            <button
-              onClick={() => applyStyle({ fill: "none" })} title="No fill — outline only"
-              style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--panel-raised)", border: styleNow.fill === "none" ? "2px solid var(--text)" : "1px solid var(--hair)", cursor: "pointer", color: "var(--muted)", fontSize: 12, lineHeight: 1, padding: 0 }}
-            >⌀</button>
-            {IDEA_COLORS.map((c) => (
-              <button
-                key={c} onClick={() => applyStyle({ fill: c })} title="Fill colour"
-                style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: styleNow.fill === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer", padding: 0 }}
-              />
-            ))}
-            <input
-              type="color" value={styleNow.fill === "none" ? "#000000" : styleNow.fill}
-              onChange={(e) => applyStyle({ fill: e.target.value })} title="Any other fill colour"
-              style={{ width: 24, height: 22, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
-            />
-          </span>
-        )}
-
-        {(tool === "text" || tool === "note" || pickedText || editingTextId) && (
-          <>
-            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Font</span>
-              <select
-                value={textNow.font || "sans"} onChange={(e) => applyText({ font: e.target.value })}
-                style={{ background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "4px 6px", outline: "none" }}
-              >
-                {BOARD_FONTS.map((fnt) => <option key={fnt.id} value={fnt.id}>{fnt.label}</option>)}
-              </select>
-              <select
-                value={textNow.fontSize || TEXT_DEFAULTS.fontSize} onChange={(e) => applyText({ fontSize: Number(e.target.value) })}
-                title="Text size"
-                style={{ background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "4px 6px", outline: "none" }}
-              >
-                {TEXT_SIZES.map((sz) => <option key={sz} value={sz}>{sz}px</option>)}
-              </select>
-              {[
-                { key: "bold", Icon: Bold, title: "Bold", on: !!textNow.bold },
-                { key: "italic", Icon: Italic, title: "Italic", on: !!textNow.italic },
-              ].map(({ key, Icon, title, on }) => (
-                <button
-                  key={key} title={title} onClick={() => applyText({ [key]: !on })}
-                  style={{ width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${on ? "var(--gold)" : "var(--hair)"}`, color: on ? "var(--gold)" : "var(--text)", borderRadius: 5, cursor: "pointer", padding: 0 }}
-                ><Icon size={12} /></button>
-              ))}
-              {[
-                { val: "left", Icon: AlignLeft }, { val: "center", Icon: AlignCenter }, { val: "right", Icon: AlignRight },
-              ].map(({ val, Icon }) => {
-                const on = (textNow.align || "left") === val;
-                return (
-                  <button
-                    key={val} title={`Align ${val}`} onClick={() => applyText({ align: val })}
-                    style={{ width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${on ? "var(--gold)" : "var(--hair)"}`, color: on ? "var(--gold)" : "var(--text)", borderRadius: 5, cursor: "pointer", padding: 0 }}
-                  ><Icon size={12} /></button>
-                );
-              })}
-            </span>
-          </>
-        )}
-
-        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Opacity</span>
-          <input
-            type="range" min="10" max="100" step="5" value={Math.round(styleNow.opacity * 100)}
-            onChange={(e) => applyStyle({ opacity: Number(e.target.value) / 100 })}
-            style={{ width: 84, accentColor: "var(--gold)" }}
-          />
-          <span style={{ width: 30, textAlign: "right" }}>{Math.round(styleNow.opacity * 100)}%</span>
-        </span>
-        {drawings.length > 0 && (
-          <button className="btn" style={{ padding: "6px 10px", fontSize: 12, marginLeft: "auto" }} onClick={clearDrawings}>Clear drawing</button>
-        )}
-      </div>
-
-      {/* A bar rather than a popover floating by the element: it can't fall off
-          the edge of a phone screen, and it doesn't cover what you just picked.
-          Its row is always here, holding the hint when nothing is picked — an
-          empty row costs 40px, and the alternative was the board jumping down
-          the moment you picked something, which put Delete under the cursor
-          just in time for the second click of a double-click. */}
-      {!(selected && pickedElement()) && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, padding: "7px 10px", background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 9, fontSize: 11.5, color: "var(--muted)", minHeight: 40, boxSizing: "border-box" }}>
-          Click something to pick it up · double-click to open it · Shift-click to pick several
-        </div>
-      )}
-      {selected && pickedElement() && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "7px 10px", background: "var(--gold-soft)", border: "1px solid var(--gold)", borderRadius: 9, minHeight: 40, boxSizing: "border-box" }}>
-          <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--gold)", marginRight: 2 }}>
-            {selection.length > 1 ? `${selection.length} picked`
-              : `${selected.kind === "idea" ? "Idea"
-                : selected.kind === "folder" ? "Folder"
-                : selected.kind === "shape" ? "Shape"
-                : pickedElement().type === "text" ? "Text" : "Picture"} picked`}
-          </span>
-          {selection.length > 1 && (
-            <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={groupSelection} title="Keep these together">
-              <Layers size={12} /> Group
-            </button>
-          )}
-          {selection.some((sel) => (listFor(sel.kind).find((el) => el.id === sel.id) || {}).groupId) && (
-            <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={ungroupSelection} title="Let these move apart again">
-              Ungroup
-            </button>
-          )}
-          {selection.length === 1 && selected.kind !== "shape" && (
-            <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={openSelected}><ExternalLink size={12} /> Open</button>
-          )}
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={duplicateSelected} title="Duplicate (Ctrl+D)"><Copy size={12} /> Duplicate</button>
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={copySelection} title="Copy (Ctrl+C)"><Copy size={12} /> Copy</button>
-          {selection.length === 1 && selected.kind === "item" && (
-            linkDraft === null ? (
-              <button
-                className="btn" style={{ padding: "5px 9px", fontSize: 11.5, ...(pickedElement().link ? { borderColor: "var(--teal)", color: "var(--teal)" } : {}) }}
-                onClick={() => setLinkDraft(pickedElement().link || "")}
-                title={pickedElement().link || "Point this at a link"}
-              ><Link2 size={12} /> {pickedElement().link ? "Linked" : "Link"}</button>
-            ) : (
-              <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                <input
-                  autoFocus value={linkDraft} onChange={(e) => setLinkDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") saveLink(linkDraft); if (e.key === "Escape") setLinkDraft(null); }}
-                  placeholder="Paste a link…"
-                  style={{ width: 190, background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11.5, padding: "5px 7px", outline: "none" }}
-                />
-                <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={() => saveLink(linkDraft)}>Save</button>
-                <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={() => setLinkDraft(null)}>Cancel</button>
-              </span>
-            )
-          )}
-          {selection.length === 1 && selected.kind === "item" && pickedElement().type === "image" && pickedElement().kind === "image" && (
-            <button
-              className="btn" style={{ padding: "5px 9px", fontSize: 11.5, ...(pickedElement().crop ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }}
-              onClick={() => setCropping(pickedElement())} title="Choose what part of the picture to show"
-            ><Crop size={12} /> Crop</button>
-          )}
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={bringToFront} title="Bring to front"><ChevronUp size={12} /> Front</button>
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={sendToBack} title="Send to back"><ChevronDown size={12} /> Back</button>
-          {/* Pushed to the far end, away from the buttons people actually aim
-              for, since it's the one that can't be taken back by aiming again. */}
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, marginLeft: "auto" }} onClick={() => setSelected(null)}>Done</button>
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, borderColor: "var(--alert)", color: "var(--alert)" }} onClick={deleteSelected} title="Delete (Del)"><Trash2 size={12} /> Delete</button>
-        </div>
-      )}
-
-      <div style={{ position: "relative", width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}>
+      {/* Board and its panel sit side by side on a laptop. On a phone the panel
+          drops underneath instead, because a 268px column beside a 414px screen
+          leaves room for neither. Either way it is always present, so picking
+          something up never moves the board — that shift is what once put
+          Delete under a double-click. */}
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexDirection: isNarrow ? "column" : "row" }}>
+        <div style={{ position: "relative", flex: "1 1 auto", minWidth: 0, width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}>
         <div
           ref={boardRef}
           onMouseMove={(e) => {
@@ -4319,6 +4164,204 @@ function IdeaBank({ data, saveData, profile }) {
             </div>
           )}
         </div>
+        </div>
+        {/* ---- properties panel: only ever shows controls for what's picked ---- */}
+        <div
+          style={{
+            width: isNarrow ? "100%" : 272, flexShrink: 0, boxSizing: "border-box",
+            background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 12,
+            maxHeight: isNarrow ? 420 : BOARD_H, overflowY: "auto",
+          }}
+        >
+          <div style={{ padding: "11px 12px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: picked ? "var(--gold)" : "var(--text)" }}>
+                {selection.length > 1 ? `${selection.length} picked` : picked ? pickedLabel : "Nothing picked"}
+              </span>
+              {picked && (
+                <button className="btn" style={{ padding: "3px 8px", fontSize: 10.5 }} onClick={() => setSelected(null)}>Done</button>
+              )}
+            </div>
+            {!picked && (
+              <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 }}>
+                Click something to pick it up, double-click to open it, Shift-click for several.
+                The settings below apply to whatever you draw next.
+              </div>
+            )}
+          </div>
+
+          {picked && (
+            <PanelSection title="Do">
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                {selection.length === 1 && selected.kind !== "shape" && (
+                  <button className="btn" style={PANEL_BTN} onClick={openSelected}><ExternalLink size={11} /> Open</button>
+                )}
+                <button className="btn" style={PANEL_BTN} onClick={copySelection} title="Ctrl+C"><Copy size={11} /> Copy</button>
+                <button className="btn" style={PANEL_BTN} onClick={duplicateSelected} title="Ctrl+D"><Copy size={11} /> Duplicate</button>
+                <button className="btn" style={PANEL_BTN} onClick={bringToFront}><ChevronUp size={11} /> Front</button>
+                <button className="btn" style={PANEL_BTN} onClick={sendToBack}><ChevronDown size={11} /> Back</button>
+                {selection.length > 1 && (
+                  <button className="btn" style={PANEL_BTN} onClick={groupSelection}><Layers size={11} /> Group</button>
+                )}
+                {selection.some((sel) => (listFor(sel.kind).find((el) => el.id === sel.id) || {}).groupId) && (
+                  <button className="btn" style={PANEL_BTN} onClick={ungroupSelection}>Ungroup</button>
+                )}
+                {selection.length === 1 && selected.kind === "item" && pickedElement().type === "image" && pickedElement().kind === "image" && (
+                  <button
+                    className="btn"
+                    style={{ ...PANEL_BTN, ...(pickedElement().crop ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }}
+                    onClick={() => setCropping(pickedElement())}
+                  ><Crop size={11} /> Crop</button>
+                )}
+              </div>
+              {/* Kept away from the rest: it's the one action that can't be
+                  taken back by aiming again. */}
+              <button
+                className="btn"
+                style={{ ...PANEL_BTN, marginTop: 8, width: "100%", justifyContent: "center", borderColor: "var(--alert)", color: "var(--alert)" }}
+                onClick={deleteSelected} title="Delete key"
+              ><Trash2 size={11} /> Delete</button>
+            </PanelSection>
+          )}
+
+          {picked && selection.length === 1 && selected.kind === "item" && (
+            <PanelSection title="Link">
+              {linkDraft === null ? (
+                <button
+                  className="btn"
+                  style={{ ...PANEL_BTN, width: "100%", justifyContent: "center", ...(pickedElement().link ? { borderColor: "var(--teal)", color: "var(--teal)" } : {}) }}
+                  onClick={() => setLinkDraft(pickedElement().link || "")}
+                  title={pickedElement().link || "Point this at a link"}
+                ><Link2 size={11} /> {pickedElement().link ? "Linked — change" : "Add a link"}</button>
+              ) : (
+                <>
+                  <input
+                    autoFocus value={linkDraft} onChange={(e) => setLinkDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveLink(linkDraft); if (e.key === "Escape") setLinkDraft(null); }}
+                    placeholder="Paste a link…"
+                    style={{ width: "100%", boxSizing: "border-box", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11.5, padding: "6px 8px", outline: "none", marginBottom: 6 }}
+                  />
+                  <div style={{ display: "flex", gap: 5 }}>
+                    <button className="btn" style={PANEL_BTN} onClick={() => saveLink(linkDraft)}>Save</button>
+                    <button className="btn" style={PANEL_BTN} onClick={() => setLinkDraft(null)}>Cancel</button>
+                    {pickedElement().link && <button className="btn" style={PANEL_BTN} onClick={() => saveLink("")}>Remove</button>}
+                  </div>
+                </>
+              )}
+            </PanelSection>
+          )}
+
+          {(showTextControls || showShapeControls) && (
+            <PanelSection title={pickedShape ? "Shape" : showTextControls && !showShapeControls ? "Text colour" : "Colour"}>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                {IDEA_COLORS.map((c) => (
+                  <button
+                    key={c} onClick={() => applyStyle({ color: c })} title="Line, pen and text colour"
+                    style={{ width: 22, height: 22, borderRadius: "50%", background: c, border: styleNow.color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer", padding: 0 }}
+                  />
+                ))}
+                <input
+                  type="color" value={styleNow.color} onChange={(e) => applyStyle({ color: e.target.value })}
+                  title="Any other colour"
+                  style={{ width: 26, height: 24, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
+                />
+              </div>
+            </PanelSection>
+          )}
+
+          {showShapeControls && (
+            <PanelSection title="Line">
+              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}>
+                {STROKE_WIDTHS.map((wpx) => (
+                  <button
+                    key={wpx} onClick={() => applyStyle({ width: wpx })} title={`${wpx}px line`}
+                    style={{ flex: 1, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: styleNow.width === wpx ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${styleNow.width === wpx ? "var(--gold)" : "var(--hair)"}`, borderRadius: 5, cursor: "pointer" }}
+                  >
+                    <span style={{ width: 16, height: Math.min(wpx, 8), borderRadius: 4, background: styleNow.width === wpx ? "var(--gold)" : "var(--text)", display: "block" }} />
+                  </button>
+                ))}
+              </div>
+              {(FILLABLE.includes(tool) || tool === "note" || (pickedShape && FILLABLE.includes(pickedShape.tool))) && (
+                <>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 6 }}>Fill</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                    <button
+                      onClick={() => applyStyle({ fill: "none" })} title="No fill — outline only"
+                      style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--panel-raised)", border: styleNow.fill === "none" ? "2px solid var(--text)" : "1px solid var(--hair)", cursor: "pointer", color: "var(--muted)", fontSize: 12, lineHeight: 1, padding: 0 }}
+                    >⌀</button>
+                    {IDEA_COLORS.map((c) => (
+                      <button
+                        key={c} onClick={() => applyStyle({ fill: c })} title="Fill colour"
+                        style={{ width: 22, height: 22, borderRadius: "50%", background: c, border: styleNow.fill === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer", padding: 0 }}
+                      />
+                    ))}
+                    <input
+                      type="color" value={styleNow.fill === "none" ? "#000000" : styleNow.fill}
+                      onChange={(e) => applyStyle({ fill: e.target.value })} title="Any other fill colour"
+                      style={{ width: 26, height: 24, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
+                    />
+                  </div>
+                </>
+              )}
+              <div style={{ fontSize: 10, color: "var(--muted)", margin: "10px 0 4px" }}>Opacity · {Math.round(styleNow.opacity * 100)}%</div>
+              <input
+                type="range" min="10" max="100" step="5" value={Math.round(styleNow.opacity * 100)}
+                onChange={(e) => applyStyle({ opacity: Number(e.target.value) / 100 })}
+                style={{ width: "100%", accentColor: "var(--gold)" }}
+              />
+            </PanelSection>
+          )}
+
+          {showTextControls && (
+            <PanelSection title="Text">
+              <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+                <select
+                  value={textNow.font || "sans"} onChange={(e) => applyText({ font: e.target.value })}
+                  style={{ flex: 1, minWidth: 0, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "5px 6px", outline: "none" }}
+                >
+                  {BOARD_FONTS.map((fnt) => <option key={fnt.id} value={fnt.id}>{fnt.label}</option>)}
+                </select>
+                <select
+                  value={textNow.fontSize || TEXT_DEFAULTS.fontSize} onChange={(e) => applyText({ fontSize: Number(e.target.value) })}
+                  title="Text size"
+                  style={{ width: 72, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "5px 6px", outline: "none" }}
+                >
+                  {TEXT_SIZES.map((sz) => <option key={sz} value={sz}>{sz}px</option>)}
+                </select>
+              </div>
+              <div style={{ display: "flex", gap: 5 }}>
+                {[
+                  { key: "bold", Icon: Bold, title: "Bold", on: !!textNow.bold },
+                  { key: "italic", Icon: Italic, title: "Italic", on: !!textNow.italic },
+                ].map(({ key, Icon, title, on }) => (
+                  <button
+                    key={key} title={title} onClick={() => applyText({ [key]: !on })}
+                    style={{ flex: 1, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${on ? "var(--gold)" : "var(--hair)"}`, color: on ? "var(--gold)" : "var(--text)", borderRadius: 5, cursor: "pointer", padding: 0 }}
+                  ><Icon size={12} /></button>
+                ))}
+                {[
+                  { val: "left", Icon: AlignLeft }, { val: "center", Icon: AlignCenter }, { val: "right", Icon: AlignRight },
+                ].map(({ val, Icon }) => {
+                  const on = (textNow.align || "left") === val;
+                  return (
+                    <button
+                      key={val} title={`Align ${val}`} onClick={() => applyText({ align: val })}
+                      style={{ flex: 1, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${on ? "var(--gold)" : "var(--hair)"}`, color: on ? "var(--gold)" : "var(--text)", borderRadius: 5, cursor: "pointer", padding: 0 }}
+                    ><Icon size={12} /></button>
+                  );
+                })}
+              </div>
+            </PanelSection>
+          )}
+
+          {drawings.length > 0 && (
+            <PanelSection title="Board">
+              <button className="btn" style={{ ...PANEL_BTN, width: "100%", justifyContent: "center" }} onClick={clearDrawings}>
+                Clear the drawing on this board
+              </button>
+            </PanelSection>
+          )}
+        </div>
       </div>
 
       {cropping && (
@@ -4540,6 +4583,19 @@ function IdeaBank({ data, saveData, profile }) {
 // picture to show, as fractions of the whole, so the original is still there
 // underneath — the crop can be changed or cleared later, other copies of the
 // same picture keep their own framing, and nothing has to be re-uploaded.
+// One look for every button in the panel, so a column of them reads as a set
+// rather than as things that happened to end up next to each other.
+const PANEL_BTN = { padding: "5px 9px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5 };
+
+function PanelSection({ title, children }) {
+  return (
+    <div style={{ borderTop: "1px solid var(--hair)", padding: "11px 12px" }}>
+      <div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--muted)", fontWeight: 700, marginBottom: 9 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
 function CropModal({ item, onCancel, onSave }) {
   const [box, setBox] = useState(item.crop || { x: 0, y: 0, w: 1, h: 1 });
   const [aspect, setAspect] = useState(item.imgAspect || null);
