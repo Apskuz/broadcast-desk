@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
+import { mergeState, deepEqual } from "./syncState";
+import { useLiveBoard } from "./livePresence";
 import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
@@ -29,7 +31,11 @@ function useDebouncedCallback(callback, delay) {
 // hammers the shared board with saves the way typing-per-keystroke did.
 // Also tells clicks (no real movement) apart from drags, so a tap can open
 // something instead of "moving" it by a pixel.
-function useDraggable(onDragEnd, onClick) {
+//
+// onDragMove, if given, is called with every position while the drag is live
+// and with null when it ends. Nothing is saved from it — it exists so other
+// people's screens can show the thing moving as it moves.
+function useDraggable(onDragEnd, onClick, onDragMove) {
   const [dragging, setDragging] = useState(null); // { id, x, y }
   const posRef = useRef(null);
   const movedRef = useRef(false);
@@ -47,6 +53,10 @@ function useDraggable(onDragEnd, onClick) {
     const startY = point.clientY;
     movedRef.current = false;
     posRef.current = { id, x: origX, y: origY };
+    const box = e.currentTarget && e.currentTarget.getBoundingClientRect
+      ? e.currentTarget.getBoundingClientRect()
+      : null;
+    const size = box ? { w: Math.round(box.width), h: Math.round(box.height) } : null;
 
     const move = (ev) => {
       const p = ev.touches ? ev.touches[0] : ev;
@@ -56,6 +66,7 @@ function useDraggable(onDragEnd, onClick) {
       const next = { id, x: Math.max(0, origX + dx), y: Math.max(0, origY + dy) };
       posRef.current = next;
       setDragging(next);
+      if (onDragMove) onDragMove({ id, x: next.x, y: next.y, ...(size || {}) });
     };
     const detach = () => {
       window.removeEventListener("mousemove", move);
@@ -71,6 +82,7 @@ function useDraggable(onDragEnd, onClick) {
       else if (!movedRef.current && onClick) onClick(id);
       posRef.current = null;
       setDragging(null);
+      if (onDragMove) onDragMove(null);
     };
     cleanupRef.current = detach;
     window.addEventListener("mousemove", move);
@@ -86,6 +98,26 @@ function useDraggable(onDragEnd, onClick) {
 const IDEA_COLORS = ["#F5D76E", "#F2A65A", "#F2789F", "#B79CED", "#7EC8E3", "#8FD9A8"];
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+// Votes are a list of who voted, not a tally. A bare number meant one person
+// could tap the button ten times, and — because two screens both read "4" and
+// both wrote "5" — two people voting at once counted as one. A list of names
+// has neither problem: the merge in syncState.js keeps both names, and tapping
+// again takes your own name back off.
+const voteList = (idea) => (Array.isArray(idea.votes) ? idea.votes : []);
+const voteCount = (idea) =>
+  Array.isArray(idea.votes) ? idea.votes.length
+  : typeof idea.votes === "number" ? Math.max(0, Math.floor(idea.votes))
+  : 0;
+const hasVoted = (idea, profile) => voteList(idea).some((v) => v.id === profile);
+// An idea saved back when votes were a number keeps its score: each one becomes
+// an anonymous entry so the count nobody expects to change doesn't drop. They
+// can't be un-cast, which is right — there's no record of whose they were.
+const withVoteList = (idea) => {
+  if (Array.isArray(idea.votes)) return idea;
+  const count = voteCount(idea);
+  return { ...idea, votes: Array.from({ length: count }, (_, i) => ({ id: `earlier-${i + 1}`, legacy: true })) };
+};
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const fmtDate = (iso) => {
   if (!iso) return "";
@@ -654,7 +686,7 @@ function MediaLightbox({ fileId, kind, name, onClose }) {
     >
       <button className="icon-btn" onClick={onClose} style={{ position: "absolute", top: 16, right: 16, color: "var(--text)" }}><X size={22} /></button>
       {kind === "image" ? (
-        <img src={driveThumbSrc(fileId, "s1600")} alt={name || ""} onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }} />
+        <img src={driveThumbSrc(fileId, "s1600")} onError={hideBrokenThumb} alt={name || ""} onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }} />
       ) : (
         <video src={driveMediaSrc(fileId)} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", borderRadius: 8, background: "#000" }} />
       )}
@@ -1802,6 +1834,11 @@ const driveMediaSrc = (fileId) => `/api/drive-stream?fileId=${fileId}`;
 // of phone photos would otherwise transfer megabytes each to fill tiny squares.
 const driveThumbSrc = (fileId, size = "s400") => `/api/drive-stream?fileId=${fileId}&thumb=1&size=${size}`;
 
+// Drive can take a moment to generate a preview after an upload, and some files
+// never get one. Hide the broken image rather than showing a torn-page icon —
+// what is underneath (a dark tile, a play badge) reads fine on its own.
+const hideBrokenThumb = (e) => { e.currentTarget.style.visibility = "hidden"; };
+
 // Fire-and-forget cleanup so an abandoned or deleted upload doesn't sit in
 // Drive forever taking up the team's space.
 function deleteDriveFile(fileIdOrLink) {
@@ -2253,7 +2290,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                     // team's Workspace sharing restrictions.
                     <div style={{ marginBottom: 16, borderRadius: 8, overflow: "hidden", background: "#000", display: "flex", justifyContent: "center" }}>
                       {isPhoto ? (
-                        <img src={driveThumbSrc(driveId, "s1600")} alt={c.title} style={{ width: "100%", maxHeight: "78vh", objectFit: "contain", display: "block" }} />
+                        <img src={driveThumbSrc(driveId, "s1600")} onError={hideBrokenThumb} alt={c.title} style={{ width: "100%", maxHeight: "78vh", objectFit: "contain", display: "block" }} />
                       ) : loadedVideo === c.id ? (
                         <video
                           src={driveMediaSrc(driveId)}
@@ -2407,6 +2444,20 @@ function IdeaBank({ data, saveData, profile }) {
   const folders = data.ideaFolders || [];
   const ideas = data.ideas || [];
 
+  // Who else is on this board right now, and what they're touching. None of
+  // this is saved — see src/livePresence.js.
+  const myColor = ((data.profiles || []).find((p) => p.name === profile) || {}).color || "gold";
+  const live = useLiveBoard("ideabank", profile, myColor, openFolderId);
+  // Only show markers for people looking at the same board or folder as us.
+  const liveHere = Object.values(live.activity).filter((a) => (a.where || null) === (openFolderId || null));
+  const dragsHere = liveHere.filter((a) => a.kind === "drag");
+  const strokesHere = liveHere.filter((a) => a.kind === "draw" && a.shape);
+  const writersHere = liveHere.filter((a) => a.kind === "write");
+  const writerOn = (id) => writersHere.find((a) => a.itemId === id);
+  // A drag ends by sending "idle", but announce the tool too so a marker says
+  // "moving" rather than just showing a box.
+  const onDragSignal = (at) => (at ? live.signal({ kind: "drag", ...at }, true) : live.stop());
+
   // Backward compat: an idea saved before this feature existed has no
   // position/colour yet — give it one, cascading so old ideas don't pile up
   // on top of each other at the same spot.
@@ -2422,8 +2473,8 @@ function IdeaBank({ data, saveData, profile }) {
 
   const saveFolderPos = (id, x, y) => saveData({ ...data, ideaFolders: folders.map((f) => (f.id === id ? { ...f, x, y } : f)) });
   const saveIdeaPos = (id, x, y) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, x, y } : i)) });
-  const folderDrag = useDraggable(saveFolderPos, (id) => setOpenFolderId(id));
-  const ideaDrag = useDraggable(saveIdeaPos, (id) => setOpenIdeaId(id));
+  const folderDrag = useDraggable(saveFolderPos, (id) => setOpenFolderId(id), onDragSignal);
+  const ideaDrag = useDraggable(saveIdeaPos, (id) => setOpenIdeaId(id), onDragSignal);
 
   const addFolder = () => {
     if (!folderName.trim()) return;
@@ -2433,16 +2484,28 @@ function IdeaBank({ data, saveData, profile }) {
     setShowFolderForm(false);
   };
   const removeFolder = (id) => {
-    // Ideas inside go back to the board instead of vanishing with the folder.
-    saveData({ ...data, ideaFolders: folders.filter((f) => f.id !== id), ideas: ideas.map((i) => (i.folderId === id ? { ...i, folderId: null } : i)) });
+    const folder = folders.find((f) => f.id === id);
+    const insideCount = ideas.filter((i) => i.folderId === id).length + allBoardItems.filter((b) => b.folderId === id).length;
+    if (insideCount > 0 && !window.confirm(`"${folder ? folder.name : "This folder"}" has ${insideCount} thing${insideCount === 1 ? "" : "s"} inside. They'll move back out to the main board, and anything drawn in here is removed. Delete the folder?`)) return;
+    // Nothing the team put in is destroyed — ideas and pictures move back out
+    // to the main board. Only the drawing is dropped, since strokes only make
+    // sense against the layout they were drawn on.
+    saveData({
+      ...data,
+      ideaFolders: folders.filter((f) => f.id !== id),
+      ideas: ideas.map((i) => (i.folderId === id ? { ...i, folderId: null } : i)),
+      boardItems: allBoardItems.map((b) => (b.folderId === id ? { ...b, folderId: null } : b)),
+      ideaDrawings: (data.ideaDrawings || []).filter((d) => d.folderId !== id),
+    });
     if (openFolderId === id) setOpenFolderId(null);
   };
 
   const addIdea = () => {
+    live.stop();
     if (!form.title.trim()) return;
     const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
     const count = boardIdeas.length;
-    const item = { id: uid(), votes: 0, ...form, tags, attachments: pendingIdeaAttachments, folderId: openFolderId, x: 40 + (count % 6) * 170, y: 40 + Math.floor(count / 6) * 150 };
+    const item = { id: uid(), votes: [], ...form, tags, attachments: pendingIdeaAttachments, folderId: openFolderId, x: 40 + (count % 6) * 170, y: 40 + Math.floor(count / 6) * 150 };
     saveData({ ...data, ideas: [item, ...ideas] });
     setForm({ title: "", description: "", tags: "", author: form.author, link: "", color: IDEA_COLORS[(count + 1) % IDEA_COLORS.length] });
     setPendingIdeaAttachments([]);
@@ -2450,11 +2513,23 @@ function IdeaBank({ data, saveData, profile }) {
   };
   // Backing out after attaching would strand those files in Drive.
   const cancelAddIdea = () => {
+    live.stop();
     pendingIdeaAttachments.forEach((a) => deleteDriveFile(a.fileId));
     setPendingIdeaAttachments([]);
     setShowForm(false);
   };
-  const vote = (id) => saveData({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, votes: i.votes + 1 } : i)) });
+  // One vote per person, and tapping again takes it back.
+  const vote = (id) => saveData({
+    ...data,
+    ideas: ideas.map((idea) => {
+      if (idea.id !== id) return idea;
+      const current = withVoteList(idea);
+      const votes = hasVoted(current, profile)
+        ? voteList(current).filter((v) => v.id !== profile)
+        : [...voteList(current), { id: profile, at: todayISO() }];
+      return { ...current, votes };
+    }),
+  });
   const removeIdea = (id) => {
     const item = ideas.find((i) => i.id === id);
     if (item) (item.attachments || []).forEach((a) => deleteDriveFile(a.fileId));
@@ -2570,6 +2645,7 @@ function IdeaBank({ data, saveData, profile }) {
       }
       draftRef.current = next;
       setDraft(next);
+      live.signal({ kind: "draw", shape: next }, true);
     };
     const end = () => {
       window.removeEventListener("mousemove", move);
@@ -2579,6 +2655,7 @@ function IdeaBank({ data, saveData, profile }) {
       const shapeToSave = draftRef.current;
       draftRef.current = null;
       setDraft(null);
+      live.stop();
       if (!shapeToSave) return;
       const isDot = shapeToSave.tool === "pen"
         ? shapeToSave.points.length < 4
@@ -2649,9 +2726,9 @@ function IdeaBank({ data, saveData, profile }) {
     const item = allBoardItems.find((b) => b.id === id);
     if (!item) return;
     if (tool === "erase") return removeBoardItem(id);
-    if (item.type === "text") { setEditingTextId(id); setEditingText(item.text || ""); }
+    if (item.type === "text") { setEditingTextId(id); setEditingText(item.text || ""); live.signal({ kind: "write", itemId: id }); }
     else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
-  });
+  }, onDragSignal);
 
   const addBoardItem = (item) => {
     const created = { id: uid(), folderId: openFolderId || null, ...item };
@@ -2665,6 +2742,7 @@ function IdeaBank({ data, saveData, profile }) {
     if (editingTextId === id) setEditingTextId(null);
   };
   const commitText = () => {
+    live.stop();
     if (!editingTextId) return;
     const id = editingTextId;
     const text = editingText;
@@ -2741,9 +2819,38 @@ function IdeaBank({ data, saveData, profile }) {
           ) : (
             <button className="btn" onClick={() => setShowFolderForm(true)}><Folder size={15} /> New folder</button>
           )}
-          <button className="btn btn-gold" onClick={() => { setForm((f) => ({ ...f, color: IDEA_COLORS[boardIdeas.length % IDEA_COLORS.length] })); setShowForm(true); }}><Plus size={15} /> Add idea</button>
+          <button className="btn btn-gold" onClick={() => { setForm((f) => ({ ...f, color: IDEA_COLORS[boardIdeas.length % IDEA_COLORS.length] })); setShowForm(true); live.signal({ kind: "write", label: "writing a new idea" }); }}><Plus size={15} /> Add idea</button>
         </div>
       </div>
+
+      {live.peers.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 10, fontSize: 11.5, color: "var(--muted)" }}>
+          <span style={{ textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, fontSize: 10.5 }}>Also here</span>
+          {live.peers.map((peer) => {
+            const act = live.activity[peer.id];
+            const tone = `var(--${peer.color || "gold"})`;
+            const doing = !act ? null
+              : act.kind === "drag" ? "moving something"
+              : act.kind === "draw" ? "drawing"
+              : act.kind === "write" ? (act.label || "writing") : null;
+            const theirFolder = peer.where ? (folders.find((f) => f.id === peer.where) || {}).name : null;
+            const elsewhere = (peer.where || null) !== (openFolderId || null);
+            return (
+              <span
+                key={peer.id}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px 3px 3px", borderRadius: 999, background: "var(--panel-raised)", border: `1px solid ${doing ? tone : "var(--hair)"}` }}
+              >
+                <span style={{ width: 18, height: 18, borderRadius: "50%", background: `var(--${peer.color || "gold"}-soft)`, color: tone, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  {(peer.name || "?").split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
+                </span>
+                <span style={{ color: "var(--text)", fontWeight: 600 }}>{peer.name}</span>
+                {doing && <span style={{ color: tone }}>· {doing}</span>}
+                {!doing && elsewhere && <span>· {theirFolder ? `in ${theirFolder}` : "on the main board"}</span>}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
         {TOOLS.map((t) => {
@@ -2795,6 +2902,7 @@ function IdeaBank({ data, saveData, profile }) {
           >
             {drawings.map((s) => renderShape(s, s.id, false))}
             {draft && renderShape(draft, "draft", true)}
+            {strokesHere.map((a) => renderShape(a.shape, `live-${a.id}`, true))}
           </svg>
 
           {boardItems.map((b) => {
@@ -2817,7 +2925,7 @@ function IdeaBank({ data, saveData, profile }) {
                 {b.type === "image" ? (
                   <div style={{ position: "relative" }}>
                     <img
-                      src={driveThumbSrc(b.fileId, "s800")}
+                      src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
                       alt={b.name || ""}
                       draggable={false}
                       style={{ width: "100%", borderRadius: 8, display: "block", boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}
@@ -2842,7 +2950,7 @@ function IdeaBank({ data, saveData, profile }) {
                   <textarea
                     autoFocus
                     value={editingText}
-                    onChange={(e) => setEditingText(e.target.value)}
+                    onChange={(e) => { setEditingText(e.target.value); live.signal({ kind: "write", itemId: b.id }, true); }}
                     onBlur={commitText}
                     onKeyDown={(e) => { if (e.key === "Escape") commitText(); }}
                     style={{ width: "100%", minHeight: 70, background: "var(--panel-raised)", color: "var(--text)", border: `1px solid ${b.color || "var(--gold)"}`, borderRadius: 6, padding: "8px 10px", fontSize: 14, lineHeight: 1.45, resize: "none" }}
@@ -2855,6 +2963,39 @@ function IdeaBank({ data, saveData, profile }) {
               </div>
             );
           })}
+          {/* Follows the other person's pointer in real time. Nothing here is
+              saved — when they let go, the real item arrives through the
+              normal save and this marker disappears. */}
+          {dragsHere.map((a) => (
+            <div
+              key={a.id}
+              style={{
+                position: "absolute", left: a.x, top: a.y,
+                width: a.w || 152, height: a.h || 88,
+                border: `2px dashed var(--${a.color || "gold"})`,
+                borderRadius: 8, pointerEvents: "none", zIndex: 4,
+              }}
+            >
+              <span style={{ position: "absolute", top: -19, left: -2, fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", padding: "2px 6px", borderRadius: 4, background: `var(--${a.color || "gold"})`, color: "#171812" }}>
+                {a.name}
+              </span>
+            </div>
+          ))}
+
+          {/* "…is writing" over the box they're typing in. */}
+          {writersHere.filter((a) => a.itemId).map((a) => {
+            const target = boardItems.find((b) => b.id === a.itemId);
+            if (!target) return null;
+            return (
+              <span
+                key={a.id}
+                style={{ position: "absolute", left: target.x, top: target.y - 19, zIndex: 4, pointerEvents: "none", fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", padding: "2px 6px", borderRadius: 4, background: `var(--${a.color || "gold"})`, color: "#171812" }}
+              >
+                {a.name} is writing…
+              </span>
+            );
+          })}
+
           {!currentFolder && folders.map((f) => {
             const pos = folderDrag.dragging && folderDrag.dragging.id === f.id ? folderDrag.dragging : f;
             const count = ideas.filter((i) => i.folderId === f.id).length;
@@ -2885,10 +3026,10 @@ function IdeaBank({ data, saveData, profile }) {
               >
                 {i.attachments && i.attachments.length > 0 && (
                   i.attachments[0].kind === "image" ? (
-                    <img src={driveThumbSrc(i.attachments[0].fileId)} alt="" draggable={false} style={{ width: "100%", height: 66, objectFit: "cover", borderRadius: 5, marginBottom: 7, display: "block" }} />
+                    <img src={driveThumbSrc(i.attachments[0].fileId)} onError={hideBrokenThumb} alt="" draggable={false} style={{ width: "100%", height: 66, objectFit: "cover", borderRadius: 5, marginBottom: 7, display: "block" }} />
                   ) : (
                     <div style={{ position: "relative", width: "100%", height: 66, borderRadius: 5, marginBottom: 7, overflow: "hidden", background: "rgba(0,0,0,0.35)" }}>
-                      <img src={driveThumbSrc(i.attachments[0].fileId)} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      <img src={driveThumbSrc(i.attachments[0].fileId)} onError={hideBrokenThumb} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                       <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                         <span style={{ width: 26, height: 26, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                           <Play size={13} fill="#fff" color="#fff" />
@@ -2902,7 +3043,7 @@ function IdeaBank({ data, saveData, profile }) {
                   <span style={{ fontSize: 10, color: "#22232b", opacity: 0.7 }}>{i.author || "Anon"}</span>
                   <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     {i.attachments && i.attachments.length > 1 && <span style={{ fontSize: 10, color: "#22232b", opacity: 0.7 }}>{i.attachments.length} files</span>}
-                    {i.votes > 0 && <span style={{ fontSize: 10, color: "#22232b", fontWeight: 700 }}>▲ {i.votes}</span>}
+                    {voteCount(i) > 0 && <span style={{ fontSize: 10, color: "#22232b", fontWeight: 700 }}>▲ {voteCount(i)}</span>}
                   </span>
                 </div>
               </div>
@@ -2940,7 +3081,7 @@ function IdeaBank({ data, saveData, profile }) {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
                 {pendingIdeaAttachments.map((a) => (
                   <div key={a.fileId} style={{ position: "relative" }}>
-                    <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                    <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                     {a.kind !== "image" && (
                       <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
                         <span style={{ width: 28, height: 28, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -3012,10 +3153,10 @@ function IdeaBank({ data, saveData, profile }) {
                   <div key={a.fileId} style={{ position: "relative" }}>
                     <button onClick={() => setLightbox(a)} title={`Open ${a.name}`} style={{ padding: 0, border: "none", background: "none", cursor: "zoom-in", lineHeight: 0 }}>
                       {a.kind === "image" ? (
-                        <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 92, height: 92, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                        <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: 92, height: 92, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                       ) : (
                         <div style={{ position: "relative", width: 92, height: 92, borderRadius: 6, overflow: "hidden", background: "var(--panel-raised)" }}>
-                          <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                          <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                           <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <span style={{ width: 30, height: 30, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                               <Play size={14} fill="#fff" color="#fff" />
@@ -3068,7 +3209,14 @@ function IdeaBank({ data, saveData, profile }) {
             <button className="btn" style={{ borderColor: "var(--alert)", color: "var(--alert)" }} onClick={() => removeIdea(openIdea.id)}><Trash2 size={13} /> Delete</button>
             <div style={{ display: "flex", gap: 8 }}>
               <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>{openIdea.author || "Anonymous"}</span>
-              <button className="vote-btn" onClick={() => vote(openIdea.id)}><ThumbsUp size={13} /> {openIdea.votes}</button>
+              <button
+                className="vote-btn"
+                onClick={() => vote(openIdea.id)}
+                title={voteList(openIdea).filter((v) => !v.legacy).map((v) => v.id).join(", ") || "No votes yet"}
+                style={hasVoted(openIdea, profile) ? { borderColor: "var(--gold)", background: "var(--gold-soft)" } : undefined}
+              >
+                <ThumbsUp size={13} /> {voteCount(openIdea)}
+              </button>
             </div>
           </div>
         </Modal>
@@ -3182,7 +3330,7 @@ function Meeting({ data, saveData, profile }) {
                 {pendingAttachments.map((a) => (
                   <div key={a.fileId} style={{ position: "relative", width: 84 }}>
                     {a.kind === "image" ? (
-                      <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                      <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                     ) : (
                       <video src={driveMediaSrc(a.fileId)} poster={driveThumbSrc(a.fileId)} controls preload="none" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 6, background: "#000", display: "block" }} />
                     )}
@@ -3224,10 +3372,10 @@ function Meeting({ data, saveData, profile }) {
                         style={{ position: "relative", padding: 0, border: "none", background: "none", cursor: "zoom-in", lineHeight: 0 }}
                       >
                         {a.kind === "image" ? (
-                          <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                          <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
                         ) : (
                           <div style={{ position: "relative", width: 120, height: 120, borderRadius: 6, overflow: "hidden", background: "var(--panel-raised)" }}>
-                            <img src={driveThumbSrc(a.fileId)} alt={a.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                            <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                             <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                               <span style={{ width: 36, height: 36, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                                 <Play size={16} fill="#fff" color="#fff" />
@@ -3420,7 +3568,7 @@ function ApprovedQueue({ data, saveData, profile }) {
                 <div className="content-body">
                   {c.caption && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>{c.caption}</div>}
                   {driveId && isPhotoItem(c) ? (
-                    <img src={driveThumbSrc(driveId, "s1600")} alt={c.title} style={{ width: "100%", maxHeight: "60vh", objectFit: "contain", borderRadius: 8, background: "#000", display: "block" }} />
+                    <img src={driveThumbSrc(driveId, "s1600")} onError={hideBrokenThumb} alt={c.title} style={{ width: "100%", maxHeight: "60vh", objectFit: "contain", borderRadius: 8, background: "#000", display: "block" }} />
                   ) : (yt || driveId) && (
                     <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 4, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
                       {loadedVideo === c.id ? (
@@ -3579,7 +3727,7 @@ function Guidelines({ data, saveData, profile }) {
             {moodboard.map((m) => (
               <div key={m.id} className="card" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {m.type === "image" && m.fileId && (
-                  <img src={driveThumbSrc(m.fileId, "s600")} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
+                  <img src={driveThumbSrc(m.fileId, "s600")} onError={hideBrokenThumb} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
                 )}
                 {m.type === "color" && (
                   <div style={{ width: "100%", aspectRatio: "1 / 1", background: m.hex }} />
@@ -4193,7 +4341,10 @@ function referencedFileIds(data) {
   (data.moodboard || []).forEach((m) => add(m.fileId));
   (data.meetingItems || []).forEach((m) => (m.attachments || []).forEach((a) => add(a.fileId)));
   (data.ideas || []).forEach((i) => { add(i.link); (i.attachments || []).forEach((a) => add(a.fileId)); });
+  (data.boardItems || []).forEach((b) => add(b.fileId));
   (data.tasks || []).forEach((t) => add(t.link));
+  (data.calendarEvents || []).forEach((e) => add(e.link));
+  (data.resources || []).forEach((r) => add(r.link));
   return ids;
 }
 
@@ -4346,7 +4497,7 @@ function TeamManage({ data, saveData }) {
     try { await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
   };
   const clearDemoContent = () => {
-    saveData({
+    const cleared = {
       ...data,
       tasks: [],
       calendarEvents: [],
@@ -4359,7 +4510,13 @@ function TeamManage({ data, saveData }) {
       resources: [],
       moodboard: [],
       approvedOrder: [],
-    });
+    };
+    // Whatever this wipes would otherwise leave its files sitting in Drive with
+    // nothing pointing at them. Compare before and after so anything still
+    // referenced elsewhere (meeting attachments, say) is left alone.
+    const stillUsed = referencedFileIds(cleared);
+    referencedFileIds(data).forEach((id) => { if (!stillUsed.has(id)) deleteDriveFile(id); });
+    saveData(cleared);
     setClearConfirm(false);
     setClearPin("");
     setClearPinError(false);
@@ -4738,6 +4895,56 @@ const NAV = [
   { id: "team", label: "Team", icon: Shield },
 ];
 
+/* ------------------------- shared board plumbing ------------------------- */
+
+// A save is only allowed to land on the exact row version it was written
+// against, and `updated_at` is that version token. Postgres keeps microseconds
+// but toISOString only writes milliseconds, so the spare digits carry some
+// randomness: two people saving inside the same millisecond still get distinct
+// tokens, and one of them is told to merge rather than both overwriting.
+const nextStamp = (previous) => {
+  let ms = Date.now();
+  const previousMs = previous ? Date.parse(previous) : NaN;
+  // A phone with a slow clock still has to produce a token newer than the one
+  // it replaces, or its saves look older than they are and get skipped.
+  if (Number.isFinite(previousMs) && ms <= previousMs) ms = previousMs + 1;
+  const micros = String(Math.floor(Math.random() * 1000)).padStart(3, "0");
+  return new Date(ms).toISOString().replace("Z", `${micros}Z`);
+};
+
+// Long enough to collapse a burst — a drag, a run of votes, a flurry of
+// strokes — into one save, short enough that nobody notices the wait.
+const SAVE_DEBOUNCE_MS = 180;
+// Backstop for anything realtime failed to deliver.
+const RESYNC_MS = 45000;
+
+// Every list the board carries. Filling in the missing ones on read means a
+// board last saved before a feature existed still lines up, key for key,
+// against one saved after it — which is what the merge compares.
+const BOARD_LISTS = [
+  "profiles", "tasks", "deletedTasks", "projects", "calendarEvents", "notes",
+  "content", "ideas", "resources", "messages", "notifications", "moodboard",
+  "approvedOrder", "meetingItems", "announcements", "ideaFolders",
+  "ideaDrawings", "boardItems",
+];
+
+function normalizeBoard(raw) {
+  const board = { ...(raw || {}) };
+  for (const key of BOARD_LISTS) if (!Array.isArray(board[key])) board[key] = [];
+  board.ideas = board.ideas.map(withVoteList);
+  if (typeof board.adminCode !== "string") board.adminCode = "";
+  if (!board.goals || typeof board.goals !== "object" || Array.isArray(board.goals)) board.goals = {};
+  if (!board.goals.individualTargets || typeof board.goals.individualTargets !== "object") {
+    board.goals = { ...board.goals, individualTargets: {} };
+  }
+  // Somebody has to be able to open team settings, so if no one is marked as
+  // lead the first profile is.
+  if (board.profiles.length > 0 && !board.profiles.some((p) => p.isLead)) {
+    board.profiles = board.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p));
+  }
+  return board;
+}
+
 export default function TeamHub() {
   const [data, setData] = useState(null);
   const [view, setView] = useState("dashboard");
@@ -4752,33 +4959,104 @@ export default function TeamHub() {
     return () => { document.body.style.overflow = ""; };
   }, [navOpen]);
 
-  useEffect(() => {
-    // Fires precise reminders while someone has the app open somewhere — a daily
-    // digest (api/daily-reminders.js, run by Vercel Cron) is the backup for
-    // reminders due when nobody has a tab open at that exact moment.
-    const check = async () => {
-      if (!data || !loggedIn) return;
-      const me = loggedIn.name;
-      const now = new Date();
-      for (const e of data.calendarEvents || []) {
-        if (!e.remind || e.reminderSent || e.assignee !== me || !e.date) continue;
-        const [h, m] = (e.time || "09:00").split(":").map(Number);
-        const eventDt = new Date(e.date + "T00:00:00");
-        eventDt.setHours(h || 0, m || 0, 0, 0);
-        const remindAt = new Date(eventDt.getTime() - (e.reminderMinutesBefore || 30) * 60000);
-        if (now >= remindAt && now <= eventDt) {
-          sendPush(me, "Reminder", `${e.title} at ${e.time}`);
-          const updated = { ...data, calendarEvents: data.calendarEvents.map((x) => (x.id === e.id ? { ...x, reminderSent: true } : x)) };
-          try {
-            await supabase.from("hub_state").update({ data: updated, updated_at: new Date().toISOString() }).eq("id", "main");
-          } catch { /* best-effort */ }
-        }
+  // --------------------------- shared board sync ---------------------------
+  // One Supabase row holds the whole board, and every open screen edits it.
+  // These refs are what src/syncState.js needs to merge those edits instead of
+  // letting the last save win:
+  //   dataRef     the board as it looks here right now, unsaved edits included
+  //   baseRef     the server's board as we last saw it
+  //   versionRef  that row's updated_at — the token we save against, so a save
+  //               built on an out-of-date board is refused by Postgres rather
+  //               than quietly wiping out whatever landed in the meantime
+  const dataRef = useRef(null);
+  const baseRef = useRef(null);
+  const versionRef = useRef(null);
+  const dirtyRef = useRef(false);
+  const writingRef = useRef(false);
+  const flushTimerRef = useRef(null);
+  const failureRef = useRef(0);
+
+  const applyLocal = (next) => { dataRef.current = next; setData(next); };
+
+  // Read the live board and fold our unsaved edits into it.
+  const reconcile = async () => {
+    const { data: row, error } = await supabase
+      .from("hub_state").select("data, updated_at").eq("id", "main").maybeSingle();
+    if (error || !row || !row.data) return false;
+    const theirs = normalizeBoard(row.data);
+    const merged = mergeState(baseRef.current, dataRef.current, theirs);
+    baseRef.current = theirs;
+    versionRef.current = row.updated_at;
+    if (!deepEqual(merged, dataRef.current)) applyLocal(merged);
+    if (!deepEqual(merged, theirs)) dirtyRef.current = true;
+    return true;
+  };
+
+  const flush = async () => {
+    if (writingRef.current || !dirtyRef.current || !dataRef.current) return;
+    writingRef.current = true;
+    dirtyRef.current = false;
+    const mine = dataRef.current;
+    let retryIn = 0;
+    try {
+      let write = supabase
+        .from("hub_state")
+        .update({ data: mine, updated_at: nextStamp(versionRef.current) })
+        .eq("id", "main");
+      // The guard that makes this safe: save only if the row is still the one
+      // this edit was built on. If it isn't, nothing is written and no other
+      // screen's work is lost — we get told to merge and try again.
+      if (versionRef.current) write = write.eq("updated_at", versionRef.current);
+      const { data: rows, error } = await write.select("updated_at");
+      if (error) throw error;
+
+      if (rows && rows.length === 1) {
+        baseRef.current = mine;
+        versionRef.current = rows[0].updated_at;
+        failureRef.current = 0;
+        setSaveError(false);
+      } else {
+        // Somebody saved first. That is normal, not a failure: take their
+        // board, put our edit back on top, and go again after a little jitter
+        // so two screens saving together don't keep colliding.
+        await reconcile();
+        dirtyRef.current = true;
+        retryIn = 30 + Math.floor(Math.random() * 120);
       }
-    };
-    check();
-    const id = setInterval(check, 60000);
-    return () => clearInterval(id);
-  }, [data, loggedIn]);
+    } catch {
+      // Offline, or the database said no. Keep the edit and keep trying; only
+      // bother the team about it once it has clearly stopped being a blip.
+      dirtyRef.current = true;
+      failureRef.current += 1;
+      if (failureRef.current > 3) setSaveError(true);
+      retryIn = Math.min(8000, failureRef.current * 500);
+    } finally {
+      writingRef.current = false;
+    }
+
+    if (dirtyRef.current) setTimeout(flush, retryIn);
+  };
+
+  const scheduleFlush = () => {
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = setTimeout(() => { flushTimerRef.current = null; flush(); }, SAVE_DEBOUNCE_MS);
+  };
+  const flushNow = () => {
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+    flush();
+  };
+
+  // What every page calls to change the board. The `data` it closes over is
+  // the copy this render handed that page — which is the point: a handler that
+  // spent ten seconds uploading a photo still knows which board its change was
+  // written against, so the change gets laid onto the current board instead of
+  // replacing it with a ten-second-old one.
+  const saveData = (next) => {
+    const latest = dataRef.current;
+    applyLocal(!latest || latest === data ? next : mergeState(data, next, latest));
+    dirtyRef.current = true;
+    scheduleFlush();
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -4788,69 +5066,138 @@ export default function TeamHub() {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
 
+    const onRemote = (payload) => {
+      const row = payload && payload.new;
+      if (cancelled || !row) return;
+      // Our own save is already on screen; a save still in flight reconciles
+      // itself when it lands.
+      if (writingRef.current) return;
+      if (row.updated_at === versionRef.current) return;
+      if (row.updated_at && versionRef.current &&
+          Date.parse(row.updated_at) < Date.parse(versionRef.current)) return;
+      // Realtime leaves the row out once the board outgrows its payload limit.
+      // Skipping those is what left screens sitting on hours-old boards, so
+      // treat a missing row as "go and read it".
+      if (!row.data) { reconcile().then(() => { if (dirtyRef.current) scheduleFlush(); }); return; }
+
+      const theirs = normalizeBoard(row.data);
+      const merged = mergeState(baseRef.current, dataRef.current, theirs);
+      baseRef.current = theirs;
+      versionRef.current = row.updated_at;
+      if (!deepEqual(merged, dataRef.current)) applyLocal(merged);
+      if (!deepEqual(merged, theirs)) { dirtyRef.current = true; scheduleFlush(); }
+    };
+
     (async () => {
-      let loadedData = null;
-      const { data: row, error } = await supabase.from("hub_state").select("data").eq("id", "main").single();
+      const { data: row } = await supabase
+        .from("hub_state").select("data, updated_at").eq("id", "main").maybeSingle();
 
+      let board;
+      let version;
       if (row && row.data) {
-        loadedData = row.data;
+        board = normalizeBoard(row.data);
+        version = row.updated_at;
       } else {
-        loadedData = seedData();
-        await supabase.from("hub_state").upsert({ id: "main", data: loadedData });
+        board = normalizeBoard(seedData());
+        version = nextStamp(null);
+        const { data: seeded } = await supabase
+          .from("hub_state")
+          .upsert({ id: "main", data: board, updated_at: version })
+          .select("updated_at").maybeSingle();
+        if (seeded) version = seeded.updated_at;
       }
-      if (!loadedData.profiles) loadedData.profiles = [];
-      if (!loadedData.deletedTasks) loadedData.deletedTasks = [];
-      if (!loadedData.messages) loadedData.messages = [];
-      if (!loadedData.notifications) loadedData.notifications = [];
-      if (!loadedData.projects) loadedData.projects = [];
-      if (!loadedData.moodboard) loadedData.moodboard = [];
-      if (!loadedData.approvedOrder) loadedData.approvedOrder = [];
-      if (!loadedData.ideaFolders) loadedData.ideaFolders = [];
-      if (!loadedData.ideaDrawings) loadedData.ideaDrawings = [];
-      if (!loadedData.boardItems) loadedData.boardItems = [];
-      if (loadedData.profiles.length > 0 && !loadedData.profiles.some((p) => p.isLead)) {
-        loadedData = { ...loadedData, profiles: loadedData.profiles.map((p, i) => (i === 0 ? { ...p, isLead: true } : p)) };
-      }
-
       if (cancelled) return;
-      setData(loadedData);
+
+      baseRef.current = board;
+      versionRef.current = version;
+      applyLocal(board);
 
       try {
         const savedId = localStorage.getItem("my-profile-id");
         if (savedId) {
-          const match = loadedData.profiles.find((p) => p.id === savedId);
+          const match = board.profiles.find((p) => p.id === savedId);
           if (match) setLoggedIn(match);
         }
       } catch {
         // stay on login screen
       }
-      if (!cancelled) setAuthReady(true);
+      setAuthReady(true);
 
       channel = supabase
         .channel("hub_state_live")
         .on(
           "postgres_changes",
           { event: "UPDATE", schema: "public", table: "hub_state", filter: "id=eq.main" },
-          (payload) => { if (!cancelled && payload.new && payload.new.data) setData(payload.new.data); }
+          onRemote
         )
         .subscribe();
     })();
 
+    // Realtime misses things — a dropped socket, an oversized payload, a phone
+    // that was asleep. Checking just the timestamp on a timer and whenever the
+    // tab comes back is cheap, and it stops a screen drifting out of date,
+    // which is the state a screen has to be in to overwrite anyone.
+    const resync = async () => {
+      if (cancelled || !dataRef.current || writingRef.current || document.hidden) return;
+      const { data: head } = await supabase
+        .from("hub_state").select("updated_at").eq("id", "main").maybeSingle();
+      if (head && head.updated_at !== versionRef.current) {
+        await reconcile();
+        if (dirtyRef.current) scheduleFlush();
+      }
+    };
+    // Leaving the tab shouldn't lose an edit still sitting in the debounce.
+    const onVisibility = () => { if (document.hidden) flushNow(); else resync(); };
+
+    const timer = setInterval(resync, RESYNC_MS);
+    window.addEventListener("focus", resync);
+    window.addEventListener("pagehide", flushNow);
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", resync);
+      window.removeEventListener("pagehide", flushNow);
+      document.removeEventListener("visibilitychange", onVisibility);
       if (channel) supabase.removeChannel(channel);
     };
   }, []);
 
-  const saveData = async (next) => {
-    setData(next);
-    try {
-      const { error } = await supabase.from("hub_state").update({ data: next, updated_at: new Date().toISOString() }).eq("id", "main");
-      setSaveError(!!error);
-    } catch {
-      setSaveError(true);
-    }
-  };
+  useEffect(() => {
+    // Fires precise reminders while someone has the app open somewhere — a daily
+    // digest (api/daily-reminders.js, run by Vercel Cron) is the backup for
+    // reminders due when nobody has a tab open at that exact moment.
+    const check = () => {
+      if (!data || !loggedIn) return;
+      const me = loggedIn.name;
+      const now = new Date();
+      const fired = [];
+      for (const e of data.calendarEvents || []) {
+        if (!e.remind || e.reminderSent || e.assignee !== me || !e.date) continue;
+        const [h, m] = (e.time || "09:00").split(":").map(Number);
+        const eventDt = new Date(e.date + "T00:00:00");
+        eventDt.setHours(h || 0, m || 0, 0, 0);
+        const remindAt = new Date(eventDt.getTime() - (e.reminderMinutesBefore || 30) * 60000);
+        if (now >= remindAt && now <= eventDt) {
+          sendPush(me, "Reminder", `${e.title} at ${e.time}`);
+          fired.push(e.id);
+        }
+      }
+      // Marking these off goes through saveData like any other edit, so a
+      // reminder firing on a tab nobody has touched for hours can't roll the
+      // whole board back to what that tab remembers.
+      if (fired.length > 0) {
+        saveData({
+          ...data,
+          calendarEvents: data.calendarEvents.map((e) => (fired.includes(e.id) ? { ...e, reminderSent: true } : e)),
+        });
+      }
+    };
+    check();
+    const id = setInterval(check, 60000);
+    return () => clearInterval(id);
+  }, [data, loggedIn]);
 
   const handleLogin = (p) => {
     setLoggedIn(p);
@@ -4923,6 +5270,15 @@ export default function TeamHub() {
   return (
     <div className="hub">
       <style>{CSS}</style>
+
+      {/* Saves retry on their own, but a save that keeps failing used to do
+          so in complete silence — the board simply stopped matching what
+          everyone else saw. Say so instead. */}
+      {saveError && (
+        <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)", zIndex: 60, background: "var(--alert)", color: "#fff", fontSize: 12, fontWeight: 600, padding: "8px 14px", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.35)", display: "flex", alignItems: "center", gap: 8 }}>
+          <AlertTriangle size={14} /> Can't reach the board — still trying. Keep this tab open.
+        </div>
+      )}
 
       <button className="menu-toggle btn btn-ghost" style={{ position: "fixed", top: 16, left: 16, zIndex: 20 }} onClick={() => setNavOpen((o) => !o)}>
         <Menu size={18} />

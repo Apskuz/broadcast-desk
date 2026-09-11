@@ -85,6 +85,35 @@ notes, content, ideas, resources, profiles — all of it) that lives in a single
 feature pushes the updated row to every other open phone/browser automatically
 — nobody needs to refresh.
 
+Two people editing at once used to be a problem: a save sent that screen's
+whole copy of the board, so whoever saved last quietly replaced everyone
+else's work — deleted messages came back, new folders and pictures vanished,
+and a tab that had been open a while was the worst offender because its copy
+was the oldest. Saves are now merged instead of overwritten:
+
+- A save is only accepted if the board is still the version that edit was
+  written against. If someone got there first, nothing is written.
+- The app then re-reads their board, lays its own change back on top, and
+  saves again. Both people's work survives (`src/syncState.js` decides how),
+  and anything either of them deleted stays deleted.
+- Screens re-check the board when you come back to the tab, and on a timer,
+  so a phone that slept through a Realtime message can't drift out of date.
+
+If a save genuinely can't get through, a red bar appears at the top of the
+screen and the app keeps retrying — it no longer fails silently.
+
+### Seeing each other on the Idea Bank
+
+Open the Idea Bank and a row above the tools shows who else has it open.
+While someone drags a card, a dashed outline in their colour follows it on
+your screen; while they draw, you see the stroke appear; while they type in
+a text box or write a new idea, their name says so.
+
+None of that is saved — it rides Supabase Realtime's Presence and Broadcast
+(`src/livePresence.js`), which are pure message passing. A marker clears
+itself a few seconds after that person stops sending, so a phone that goes
+to sleep mid-drag doesn't leave an outline stuck on the board.
+
 Each device separately remembers *who's currently checked in on it* using the
 browser's own local storage — that part is intentionally per-device, not
 shared, so people can log in/out on their own phones independently.
