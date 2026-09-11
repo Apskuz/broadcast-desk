@@ -388,13 +388,29 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
         const pick = sources[(rng() * sources.length) | 0];
         consider(pick % w, (pick / w) | 0, 0, 1, 0);
       }
-      let radius = Math.min(maxRadius || Math.max(w, h), Math.max(w, h)), frac = 1;
+      // Every other guess is a plain copy — not turned, not resized.
+      //
+      // The search used to perturb the angle on every single sample, which had
+      // two costs. A turned patch lands between pixels and has to interpolate,
+      // about four times the work of a straight lookup, so essentially nothing
+      // ever took the fast path. And it biased the whole search away from
+      // simply copying, which is exactly what a course of bricks or a window
+      // frame wants — turning those by a couple of degrees is what puts a kink
+      // in them. Alternating costs nothing in reach, because a plain copy is
+      // just the middle of the range the other samples cover anyway.
+      let radius = Math.min(maxRadius || Math.max(w, h), Math.max(w, h)), frac = 1, turn = false;
       while (radius >= 1) {
         const ox = ((rng() * 2 - 1) * radius) | 0, oy = ((rng() * 2 - 1) * radius) | 0;
-        const oa = (rng() * 2 - 1) * ROT_MAX * frac;
-        const os = 1 + (rng() * 2 - 1) * (SCALE_HI - 1) * frac;
-        const om = MIRROR && rng() < 0.12 ? (bM ? 0 : 1) : bM;
-        consider((bD === Infinity ? x : bx) + ox, (bD === Infinity ? y : by) + oy, bA + oa, bS * os, om);
+        const cx = (bD === Infinity ? x : bx) + ox, cy = (bD === Infinity ? y : by) + oy;
+        if (turn) {
+          const oa = (rng() * 2 - 1) * ROT_MAX * frac;
+          const os = 1 + (rng() * 2 - 1) * (SCALE_HI - 1) * frac;
+          const om = MIRROR && rng() < 0.12 ? (bM ? 0 : 1) : bM;
+          consider(cx, cy, bA + oa, bS * os, om);
+        } else {
+          consider(cx, cy, 0, 1, 0);
+        }
+        turn = !turn;
         radius >>= 1; frac *= 0.5;
       }
 
