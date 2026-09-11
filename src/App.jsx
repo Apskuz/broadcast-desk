@@ -3709,11 +3709,25 @@ function IdeaBank({ data, saveData, profile }) {
 
   // The develop room saves the look and the crop together, because in there
   // they are one decision — you frame while you are grading.
-  const saveDevelop = (id) => (look, crop, imgAspect) => {
+  const saveDevelop = (id) => async (look, crop, imgAspect, healedBlob) => {
+    let fileId = null;
+    if (healedBlob) {
+      // The removal has to become real bytes. A new file, so the original is
+      // still in Drive if the fill turns out to be wrong.
+      const item = allBoardItems.find((b) => b.id === id);
+      const base = ((item && item.name) || "picture").replace(/\.[^.]+$/, "");
+      try {
+        const file = new File([healedBlob], `${base}-removed.jpg`, { type: "image/jpeg" });
+        const result = await uploadToDrive(file, () => {}, profile);
+        fileId = driveFileId(result.link);
+      } catch {
+        fileId = null;                    // keep the settings, lose the removal
+      }
+    }
     edit({
       ...data,
       boardItems: allBoardItems.map((b) => (b.id === id
-        ? { ...b, look, crop, imgAspect: imgAspect || b.imgAspect }
+        ? { ...b, look, crop, imgAspect: imgAspect || b.imgAspect, ...(fileId ? { fileId } : {}) }
         : b)),
     });
     setDeveloping(null);

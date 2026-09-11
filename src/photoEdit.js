@@ -473,15 +473,20 @@ export function parametricLUT(edit, out) {
 
   for (let i = 0; i < 256; i++) {
     const x = i / 255;
+    // Pure black and pure white stay where they are. Without this the Shadows
+    // slider lifts the black point off the floor and the picture goes milky,
+    // which is not what any of these four sliders is supposed to do — that is
+    // what Blacks and Whites are for.
+    const ends = Math.min(1, Math.min(x, 1 - x) / 0.1);
     let y = x;
     for (let r = 0; r < 4; r++) {
       const a = amounts[r];
       if (!a) continue;
       const d = (x - centres[r]) / width;
-      const w = Math.exp(-d * d);
+      const w = Math.exp(-d * d) * ends;
       // Headroom-aware: pushing up can only use what is left above, pushing
       // down only what is there below, so the curve stays inside 0..1.
-      y += (a / 100) * 0.5 * w * (a > 0 ? 1 - y : y);
+      y += (a / 100) * 0.32 * w * (a > 0 ? 1 - y : y);
     }
     lut[i] = Math.min(1, Math.max(0, y));
   }

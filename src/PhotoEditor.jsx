@@ -14,15 +14,17 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { createPortal } from "react-dom";
 import {
   X, RotateCw, RotateCcw, FlipHorizontal, FlipVertical, Crop as CropIcon, Pipette,
-  Sliders, Wand2, Copy, ClipboardPaste, Download, Eye, Undo2, Trash2,
-  Circle as CircleIcon, Minus, Brush, ChevronDown, ChevronRight, Check,
+  Sliders, Wand2, Copy, ClipboardPaste, Download, Eye, Undo2, Redo2, Trash2,
+  Circle as CircleIcon, Minus, Brush, ChevronDown, ChevronRight, Check, Eraser, Loader,
 } from "lucide-react";
 import {
   EDIT_PANELS, EDIT_DEFAULTS, MASK_SLIDERS, MASK_ADJUST_DEFAULTS,
   HSL_BANDS, PRESET_GROUPS, CROP_RATIOS, CURVE_LINE,
-  fullEdit, fullMask, trimEdit, isFlatCurve, touchedPanels, curveLUT, histogramOf, autoTone,
+  fullEdit, fullMask, trimEdit, isFlatCurve, touchedPanels, curveLUT, parametricLUT,
+  histogramOf, autoTone,
 } from "./photoEdit";
 import { renderPhoto, renderToBlob, rendererAvailable, turnedAspect, MAX_MASKS } from "./photoRender";
+import { healRegion } from "./photoHeal";
 
 const GOLD = "var(--gold)";
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -75,9 +77,13 @@ function Section({ title, dot, open, onToggle, children, right }) {
   );
 }
 
+// Spelled out rather than the `border` shorthand, because the variants below
+// override only the colour, and React warns (loudly, every render) about mixing
+// a shorthand with one of its parts.
 const BTN = {
   padding: "5px 9px", fontSize: 11, borderRadius: 7, cursor: "pointer",
-  background: "var(--panel-raised)", border: "1px solid var(--hair)", color: "var(--text)",
+  background: "var(--panel-raised)", color: "var(--text)",
+  borderWidth: 1, borderStyle: "solid", borderColor: "var(--hair)",
   display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
 };
 const BTN_ON = { ...BTN, borderColor: GOLD, color: GOLD, background: "var(--gold-soft)" };
@@ -87,7 +93,7 @@ const BTN_ON = { ...BTN, borderColor: GOLD, color: GOLD, background: "var(--gold
 // The point curve, drawn and dragged directly. Clicking the line adds a point,
 // double-clicking one takes it away, and the ends can only slide up and down —
 // which is what stops you accidentally making a curve that has no black in it.
-function CurveEditor({ points, onChange, channel }) {
+function CurveEditor({ points, onChange, channel, base }) {
   const ref = useRef(null);
   const size = 220;
   const drag = useRef(null);
@@ -122,22 +128,41 @@ function CurveEditor({ points, onChange, channel }) {
     ctx.beginPath(); ctx.moveTo(0, size); ctx.lineTo(size, 0); ctx.stroke();
 
     const lut = curveLUT(points);
-    ctx.strokeStyle = channel === "curveR" ? "#D9564B" : channel === "curveG" ? "#6FBE7A"
-      : channel === "curveB" ? "#5A7FD9" : "#EDEBE3";
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
-    for (let i = 0; i < 256; i++) {
-      const x = (i / 255) * size, y = size - lut[i] * size;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
+    // What the shader will actually do: the parametric curve first, then this
+    // channel's points on top of it. Drawing only the points was the bug —
+    // the four parametric sliders changed the picture while the line sat
+    // still, which makes the whole panel feel broken.
+    const plot = (fn, style, width, dash) => {
+      ctx.strokeStyle = style;
+      ctx.lineWidth = width;
+      ctx.setLineDash(dash || []);
+      ctx.beginPath();
+      for (let i = 0; i < 256; i++) {
+        const x = (i / 255) * size, y = size - fn(i) * size;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
 
+    // The parametric alone, faint, so you can see which part of the shape is
+    // the sliders' doing and which is yours.
+    if (base) plot((i) => base[i], "rgba(201,162,75,0.45)", 1.2, [4, 4]);
+    plot(
+      (i) => lut[Math.round((base ? base[i] : i / 255) * 255)],
+      channel === "curveR" ? "#D9564B" : channel === "curveG" ? "#6FBE7A"
+        : channel === "curveB" ? "#5A7FD9" : "#EDEBE3",
+      1.8,
+    );
+
+    // The handles sit at the point curve's own coordinates, which is what you
+    // are dragging — not on the composed line.
     ctx.fillStyle = GOLD;
     for (const p of points) {
       const c = toCanvas(p);
       ctx.beginPath(); ctx.arc(c.x, c.y, 4, 0, Math.PI * 2); ctx.fill();
     }
-  }, [points, channel]);
+  }, [points, channel, base]);
 
   const nearest = (at) => {
     let best = -1, bestD = 14;
@@ -325,6 +350,14 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
   const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.innerWidth < 900);
   const [picking, setPicking] = useState(false);   // eyedropper armed
 
+  // Removing something makes new pixels, which is the one thing in here that
+  // is not just numbers. The healed picture is held in memory and only written
+  // to Drive on Done, so Cancel still means cancel.
+  const [healed, setHealed] = useState(null);      // a canvas standing in for the original
+  const [healStrokes, setHealStrokes] = useState([]);
+  const [healBrush, setHealBrush] = useState(0.06);
+  const [healing, setHealing] = useState("");
+
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
   const frameRef = useRef(0);
@@ -352,6 +385,18 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
 
   useEffect(() => {
     const onKey = (e) => {
+      // Not while someone is typing in a field, or Ctrl+Z would undo the
+      // picture instead of their last few characters.
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || "")
+        && e.target.type !== "range";
+      if (typing) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
       if (e.key === "Escape") { if (mode !== "adjust") setMode("adjust"); else onClose(); }
       if (e.key === "\\") { e.preventDefault(); setPeek((p) => !p); }
     };
@@ -360,21 +405,28 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
   }, [mode, onClose]);
 
   /* ---- one frame per animation tick, however fast a slider is dragged ---- */
+  // Everything downstream works from this, so a removal simply becomes "the
+  // picture" and every slider, mask and curve applies on top of it as usual.
+  const source = healed || image;
+
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !image) return;
+    if (!canvas || !source) return;
     const ok = renderPhoto({
-      image,
+      image: source,
+      preview: mode === "remove" ? fullEdit(null)
       // Holding Before keeps the framing and drops the look: you are comparing
       // the grade, not asking where the picture went.
-      preview: peek ? fullEdit({
+      : peek ? fullEdit({
         spin: edit.spin, straighten: edit.straighten, flipH: edit.flipH, flipV: edit.flipV,
         perspV: edit.perspV, perspH: edit.perspH, perspRotate: edit.perspRotate,
         geoAspect: edit.geoAspect, geoScale: edit.geoScale, geoX: edit.geoX, geoY: edit.geoY,
       }) : edit,
       // While cropping you need to see what you are cutting away, so the whole
-      // picture is drawn and the rectangle sits over it.
-      crop: mode === "crop" ? null : cropBox,
+      // picture is drawn and the rectangle sits over it. Removing works on the
+      // original too — undeveloped and uncropped — so that where you brush is
+      // exactly where the pixels are, with no geometry to invert.
+      crop: mode === "crop" || mode === "remove" ? null : cropBox,
       out: canvas,
       maxSize: narrow ? 1100 : 1600,
       showMask: showMask && mode === "mask" && activeMask != null,
@@ -389,19 +441,65 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
       histAt.current = now;
       setHist(histogramOf(canvas));
     }
-  }, [image, edit, cropBox, peek, showMask, mode, activeMask, narrow]);
+  }, [source, edit, cropBox, peek, showMask, mode, activeMask, narrow]);
 
   useEffect(() => {
-    if (!supported || !image) return;
+    if (!supported || !source) return;
     cancelAnimationFrame(frameRef.current);
     frameRef.current = requestAnimationFrame(paint);
     return () => cancelAnimationFrame(frameRef.current);
   }, [paint, supported, image]);
 
+  /* --------------------------------- history ------------------------------ */
+  // Dragging a slider fires a change per pixel of travel, and one undo step
+  // per pixel would be useless. A step is only recorded once things have been
+  // still for a moment, so one drag, one preset or one mask becomes one undo.
+  const history = useRef({ past: [], future: [], last: null, replaying: false });
+  const [depth, setDepth] = useState({ past: 0, future: 0 });
+  const noteDepth = () => setDepth({ past: history.current.past.length, future: history.current.future.length });
+
+  useEffect(() => {
+    const h = history.current;
+    if (h.last === null) { h.last = { edit, cropBox }; return undefined; }   // first render
+    if (h.replaying) { h.replaying = false; h.last = { edit, cropBox }; noteDepth(); return undefined; }
+    const timer = setTimeout(() => {
+      if (h.last.edit === edit && h.last.cropBox === cropBox) return;
+      h.past.push(h.last);
+      if (h.past.length > 60) h.past.shift();
+      h.future = [];
+      h.last = { edit, cropBox };
+      noteDepth();
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [edit, cropBox]);
+
+  const step = (from, to) => {
+    const h = history.current;
+    const entry = from.pop();
+    if (!entry) return;
+    to.push(h.last);
+    h.replaying = true;
+    h.last = entry;
+    setEdit(entry.edit);
+    setCropBox(entry.cropBox);
+    noteDepth();
+  };
+  const undo = () => step(history.current.past, history.current.future);
+  const redo = () => step(history.current.future, history.current.past);
+
   /* ---------------------------- changing things --------------------------- */
   const set = (patch) => setEdit((e) => ({ ...e, ...(typeof patch === "function" ? patch(e) : patch) }));
   const setBand = (band, patch) => setEdit((e) => ({ ...e, hsl: { ...e.hsl, [band]: { ...e.hsl[band], ...patch } } }));
   const touched = useMemo(() => touchedPanels(edit), [edit]);
+  // Recomputed only when one of the four sliders or a split actually moves,
+  // because the curve graph redraws on every render.
+  const parametric = useMemo(
+    () => (edit.parHighlights || edit.parLights || edit.parDarks || edit.parShadows
+      ? parametricLUT(edit)
+      : null),
+    [edit.parHighlights, edit.parLights, edit.parDarks, edit.parShadows,
+      edit.splitShadow, edit.splitMid, edit.splitHigh],
+  );
 
   const resetPanel = (panel) => {
     const patch = {};
@@ -435,7 +533,7 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
     // Read the picture as it comes out of the geometry pass only, so Auto is
     // judging the original tones rather than whatever is already dialled in.
     const scratch = document.createElement("canvas");
-    const ok = renderPhoto({ image, preview: fullEdit({ spin: edit.spin, straighten: edit.straighten, flipH: edit.flipH, flipV: edit.flipV }), crop: cropBox, out: scratch, maxSize: 400 });
+    const ok = renderPhoto({ image: source, preview: fullEdit({ spin: edit.spin, straighten: edit.straighten, flipH: edit.flipH, flipV: edit.flipV }), crop: cropBox, out: scratch, maxSize: 400 });
     if (!ok) return;
     set(autoTone(histogramOf(scratch)));
   };
@@ -450,7 +548,7 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
     const x = Math.round(((e.clientX - r.left) / r.width) * canvas.width);
     const y = Math.round(((e.clientY - r.top) / r.height) * canvas.height);
     const scratch = document.createElement("canvas");
-    if (!renderPhoto({ image, preview: fullEdit({ ...edit, temp: 0, tint: 0 }), crop: cropBox, out: scratch, maxSize: 1600 })) return;
+    if (!renderPhoto({ image: source, preview: fullEdit({ ...edit, temp: 0, tint: 0 }), crop: cropBox, out: scratch, maxSize: 1600 })) return;
     let px;
     try {
       px = scratch.getContext("2d").getImageData(
@@ -540,6 +638,47 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
     window.addEventListener("pointerup", end);
   };
 
+  /* -------------------------------- removing ------------------------------- */
+  // Brushed in the picture's own 0..1 space, with the radius a fraction of its
+  // width — so a dab is round on screen and round in the file.
+  const paintHeal = (e) => {
+    if (mode !== "remove" || healing) return;
+    e.preventDefault();
+    const dab = (ev) => {
+      const p = stagePoint(ev);
+      setHealStrokes((s) => [...s, { x: p.x, y: p.y, r: healBrush }]);
+    };
+    dab(e);
+    const move = (ev) => dab(ev);
+    const end = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+  };
+
+  const applyHeal = async () => {
+    if (!source || !healStrokes.length) return;
+    const iw = source.naturalWidth || source.width;
+    const ih = source.naturalHeight || source.height;
+    const mask = document.createElement("canvas");
+    mask.width = iw; mask.height = ih;
+    const mctx = mask.getContext("2d");
+    mctx.fillStyle = "#fff";
+    for (const s of healStrokes) {
+      mctx.beginPath();
+      mctx.arc(s.x * iw, s.y * ih, Math.max(2, s.r * iw), 0, Math.PI * 2);
+      mctx.fill();
+    }
+    setHealing("Starting…");
+    try {
+      const result = await healRegion({ image: source, mask, onProgress: setHealing });
+      if (result) { setHealed(result); setHealStrokes([]); }
+      setHealing("");
+    } catch {
+      setHealing("That didn't work — try a smaller area.");
+      setTimeout(() => setHealing(""), 3500);
+    }
+  };
+
   /* --------------------------------- crop --------------------------------- */
   const imgAspect = image ? image.naturalWidth / image.naturalHeight : 1;
   // The crop rectangle lives on the picture as it looks now — turned, flipped,
@@ -604,10 +743,21 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
   };
 
   /* -------------------------------- leaving ------------------------------- */
-  const save = () => {
+  const save = async () => {
     const trimmed = trimEdit(edit);
     const finalCrop = cropBox.w >= 0.999 && cropBox.h >= 0.999 && cropBox.x < 0.001 && cropBox.y < 0.001
       ? null : cropBox;
+    // A removal is the one edit that cannot be stored as numbers, so it has to
+    // become a file. It goes up as a new one and the original is left alone —
+    // the model is good but not perfect, and having overwritten the only copy
+    // of a photo with a bad fill is not something you could undo.
+    if (healed) {
+      setBusy("Saving the picture with it removed…");
+      const blob = await new Promise((r) => healed.toBlob(r, "image/jpeg", 0.95));
+      if (blob) { onSave(trimmed, finalCrop, imgAspect, blob); return; }
+      setBusy("Couldn't save that — the edit is kept, the removal is not.");
+      setTimeout(() => setBusy(""), 4000);
+    }
     onSave(trimmed, finalCrop, imgAspect);
   };
 
@@ -615,7 +765,7 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
     if (!onExport || !image) return;
     setBusy("Rendering a copy…");
     try {
-      const blob = await renderToBlob({ image, look: trimEdit(edit), crop: cropBox, maxSize: 2400 });
+      const blob = await renderToBlob({ image: source, look: trimEdit(edit), crop: cropBox, maxSize: 2400 });
       if (!blob) { setBusy("That didn't render."); setTimeout(() => setBusy(""), 3000); return; }
       setBusy("Saving it to Drive…");
       await onExport(blob);
@@ -651,14 +801,41 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
         <div style={{ position: "relative", maxWidth: "100%", maxHeight: "100%", lineHeight: 0 }}>
           <canvas
             ref={canvasRef}
-            onPointerDown={picking ? undefined : mode === "mask" && mask && mask.type === "brush" ? startBrush : undefined}
+            onPointerDown={
+              picking ? undefined
+                : mode === "remove" ? paintHeal
+                : mode === "mask" && mask && mask.type === "brush" ? startBrush
+                : undefined
+            }
             onClick={picking ? pickWhite : undefined}
             style={{
               maxWidth: "100%", maxHeight: narrow ? "46vh" : "78vh", display: "block", borderRadius: 4,
-              cursor: picking ? "crosshair" : mode === "mask" && mask && mask.type === "brush" ? "cell" : "default",
+              cursor: picking ? "crosshair"
+                : mode === "remove" || (mode === "mask" && mask && mask.type === "brush") ? "cell"
+                : "default",
               touchAction: "none",
             }}
           />
+
+          {/* ---- what is about to be removed ---- */}
+          {mode === "remove" && healStrokes.length > 0 && (
+            <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+              {healStrokes.map((s, i) => (
+                <circle
+                  key={i} cx={`${s.x * 100}%`} cy={`${s.y * 100}%`} r={`${s.r * 100}%`}
+                  fill="rgba(217,86,75,0.45)" stroke="rgba(217,86,75,0.9)" strokeWidth="1"
+                />
+              ))}
+            </svg>
+          )}
+          {healing && (
+            <div style={{
+              position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+              background: "rgba(10,11,14,0.65)", color: GOLD, fontSize: 12.5, gap: 8, borderRadius: 4,
+            }}>
+              <Loader size={14} /> {healing}
+            </div>
+          )}
 
           {/* ---- crop frame ---- */}
           {mode === "crop" && (
@@ -753,6 +930,8 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
       <div style={{ padding: 12, borderBottom: "1px solid var(--hair)" }}>
         <Histogram hist={hist} />
         <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 9 }}>
+          <button style={BTN} onClick={undo} disabled={!depth.past} title="Undo (Ctrl+Z)"><Undo2 size={11} /></button>
+          <button style={BTN} onClick={redo} disabled={!depth.future} title="Redo (Ctrl+Y)"><Redo2 size={11} /></button>
           <button style={BTN} onClick={auto} title="Read the picture and set the six light sliders"><Wand2 size={11} /> Auto</button>
           <button
             style={BTN}
@@ -803,6 +982,10 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
               <CurveEditor
                 channel={curveChannel}
                 points={edit[curveChannel]}
+                // The parametric curve runs before the master points and not
+                // before the per-channel ones, which is where it sits in the
+                // shader too.
+                base={curveChannel === "curveRGB" ? parametric : null}
                 onChange={(next) => set((e) => ({ ...e, [curveChannel]: typeof next === "function" ? next(e[curveChannel]) : next }))}
               />
               <button
@@ -1006,7 +1189,34 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
           <button style={mode === "adjust" ? BTN_ON : BTN} onClick={() => setMode("adjust")}>Develop</button>
           <button style={mode === "crop" ? BTN_ON : BTN} onClick={() => setMode("crop")}><CropIcon size={11} /> Crop</button>
           <button style={mode === "mask" ? BTN_ON : BTN} onClick={() => setMode("mask")}><Brush size={11} /> Mask</button>
+          <button style={mode === "remove" ? BTN_ON : BTN} onClick={() => setMode("remove")}><Eraser size={11} /> Remove</button>
         </div>
+
+        {mode === "remove" && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginLeft: 6 }}>
+            <span style={{ fontSize: 10.5, color: "var(--muted)" }}>Brush</span>
+            <input
+              type="range" min={1} max={25} value={Math.round(healBrush * 100)}
+              onChange={(e) => setHealBrush(Number(e.target.value) / 100)}
+              style={{ width: 90, accentColor: GOLD }}
+            />
+            <button style={BTN} onClick={() => setHealStrokes([])} disabled={!healStrokes.length || !!healing}>Clear</button>
+            <button
+              style={healStrokes.length ? BTN_ON : BTN}
+              onClick={applyHeal} disabled={!healStrokes.length || !!healing}
+            ><Eraser size={11} /> Remove it</button>
+            {healed && (
+              <button style={BTN} onClick={() => { setHealed(null); setHealStrokes([]); }} disabled={!!healing}>
+                <Undo2 size={11} /> Put the original back
+              </button>
+            )}
+            <span style={{ fontSize: 10.5, color: "var(--muted)", maxWidth: 320, lineHeight: 1.35 }}>
+              Paint over what should go. It rebuilds the area from the rest of this photo,
+              so it works on a bin or a passer-by against a busy background, and less well
+              on something with nothing similar nearby.
+            </span>
+          </div>
+        )}
 
         {mode === "crop" && (
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginLeft: 6 }}>
