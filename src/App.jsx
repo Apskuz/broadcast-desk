@@ -12,7 +12,7 @@ import {
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
   Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
-  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste
+  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -40,7 +40,7 @@ function useDebouncedCallback(callback, delay) {
 // onDragMove, if given, is called with every position while the drag is live
 // and with null when it ends. Nothing is saved from it — it exists so other
 // people's screens can show the thing moving as it moves.
-function useDraggable(onDragEnd, onClick, onDragMove, getScale) {
+function useDraggable(onDragEnd, onClick, onDragMove, getScale, snapTo) {
   const [dragging, setDragging] = useState(null); // { id, x, y }
   const posRef = useRef(null);
   const movedRef = useRef(false);
@@ -73,7 +73,14 @@ function useDraggable(onDragEnd, onClick, onDragMove, getScale) {
       const dx = (p.clientX - startX) / scale;
       const dy = (p.clientY - startY) / scale;
       if (Math.abs(dx * scale) > 4 || Math.abs(dy * scale) > 4) movedRef.current = true;
-      const next = { id, x: Math.max(0, Math.round(origX + dx)), y: Math.max(0, Math.round(origY + dy)) };
+      let next = { id, x: Math.max(0, Math.round(origX + dx)), y: Math.max(0, Math.round(origY + dy)) };
+      // The board gets to nudge the position onto a neighbour's edge. Holding
+      // Alt turns that off, for the times the thing genuinely belongs slightly
+      // off-line and the snapping is fighting you.
+      if (snapTo && !ev.altKey) {
+        const landed = snapTo(id, next.x, next.y, size);
+        if (landed) next = { id, x: landed.x, y: landed.y };
+      }
       posRef.current = next;
       setDragging(next);
       if (onDragMove) onDragMove({ id, x: next.x, y: next.y, ...(size || {}) });
@@ -88,6 +95,7 @@ function useDraggable(onDragEnd, onClick, onDragMove, getScale) {
     };
     const end = () => {
       detach();
+      if (snapTo) snapTo(null);   // take the guides off the board
       if (movedRef.current && posRef.current) onDragEnd(posRef.current.id, posRef.current.x, posRef.current.y, posRef.current.x - origX, posRef.current.y - origY);
       else if (!movedRef.current && onClick) onClick(id, e);
       posRef.current = null;
@@ -112,6 +120,18 @@ const IDEA_COLORS = ["#F5D76E", "#F2A65A", "#F2789F", "#B79CED", "#7EC8E3", "#8F
 // needs. Shapes saved before fill/width/opacity existed simply have none of
 // those fields, and the defaults below are what they were being drawn with.
 const SHAPE_DEFAULTS = { width: 3, fill: "none", opacity: 1 };
+
+// What the board itself looks like behind everything. Dots are the default the
+// board has always had; the plain and grid options are for when the dots fight
+// with what's on top, and paper is for boards that get exported.
+const BOARD_SURFACES = [
+  { id: "dots", label: "Dots", ink: "#EDEBE3", paper: "var(--panel)", image: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", size: "22px 22px" },
+  { id: "grid", label: "Grid", ink: "#EDEBE3", paper: "var(--panel)", image: "linear-gradient(rgba(237,235,227,0.055) 1px, transparent 1px), linear-gradient(90deg, rgba(237,235,227,0.055) 1px, transparent 1px)", size: "44px 44px" },
+  { id: "plain", label: "Plain", ink: "#EDEBE3", paper: "var(--panel)", image: "none", size: "auto" },
+  { id: "paper", label: "Paper", ink: "#22232b", paper: "#F4F1E8", image: "none", size: "auto" },
+  { id: "slate", label: "Slate", ink: "#EDEBE3", paper: "#1B2430", image: "none", size: "auto" },
+];
+const surfaceOf = (id) => BOARD_SURFACES.find((sf) => sf.id === id) || BOARD_SURFACES[0];
 
 // Three of these were already being loaded for the app's own chrome, so only
 // the last two cost anything. Each is a different job: something to read,
@@ -2989,8 +3009,10 @@ function IdeaBank({ data, saveData, profile }) {
     open();
   };
   const getZoom = () => zoomRef.current;
-  const folderDrag = useDraggable(saveFolderPos, (id, ev) => tapToOpen("folder", id, ev), onDragSignal, getZoom);
-  const ideaDrag = useDraggable(saveIdeaPos, (id, ev) => tapToOpen("idea", id, ev), onDragSignal, getZoom);
+  const snapRef = useRef(null);
+  const snapVia = (...args) => (snapRef.current ? snapRef.current(...args) : null);
+  const folderDrag = useDraggable(saveFolderPos, (id, ev) => tapToOpen("folder", id, ev), onDragSignal, getZoom, snapVia);
+  const ideaDrag = useDraggable(saveIdeaPos, (id, ev) => tapToOpen("idea", id, ev), onDragSignal, getZoom, snapVia);
 
   const addFolder = () => {
     if (!folderName.trim()) return;
@@ -3523,6 +3545,84 @@ function IdeaBank({ data, saveData, profile }) {
     if (next) edit(next);
   };
 
+  // The team's own colours, kept on the board rather than per person, because a
+  // brand palette is a thing everyone should be reaching into.
+  const palette = data.boardPalette || [];
+  const rememberColour = (hex) => {
+    if (!hex || palette.includes(hex)) return;
+    // Newest first, and capped — a swatch row nobody can scan is no use.
+    edit({ ...data, boardPalette: [hex, ...palette].slice(0, 12) });
+  };
+  const forgetColour = (hex) => edit({ ...data, boardPalette: palette.filter((c) => c !== hex) });
+
+  // Chrome hands over a real eyedropper; on browsers without one the button
+  // simply isn't offered rather than pretending and failing.
+  const canDrop = typeof window !== "undefined" && "EyeDropper" in window;
+  const pickFromScreen = async () => {
+    if (!canDrop) return;
+    try {
+      const result = await new window.EyeDropper().open();
+      if (result && result.sRGBHex) { applyStyle({ color: result.sRGBHex }); rememberColour(result.sRGBHex); }
+    } catch { /* cancelled with Escape — nothing to do */ }
+  };
+
+  // Whatever is picked takes the colour, whichever kind it is: a shape's
+  // stroke, a text box's letters, an idea card's face.
+  const recolourSelection = (hex) => {
+    if (!selection.length) return;
+    const next = changeSelection((el, kind) => (kind === "shape" ? { ...el, color: hex } : { ...el, color: hex }));
+    if (next) edit(next);
+  };
+
+  const boardKey = openFolderId || "main";
+  const surface = surfaceOf((data.boardSurfaces || {})[boardKey]);
+  const setSurface = (id) => edit({ ...data, boardSurfaces: { ...(data.boardSurfaces || {}), [boardKey]: id } });
+
+  // Lines other things already sit on: their two edges and their middle, in
+  // both directions. Something dragged near one of those gets pulled onto it.
+  const [guides, setGuides] = useState(null);
+  const SNAP_PX = 7;
+
+  const snapTo = (id, x, y, size) => {
+    if (id === null) { setGuides(null); return null; }
+    const w = (size && size.w ? size.w / (zoomRef.current || 1) : 0);
+    const h = (size && size.h ? size.h / (zoomRef.current || 1) : 0);
+
+    const verticals = [];
+    const horizontals = [];
+    for (const el of [...boardItems, ...boardIdeas, ...(currentFolder ? [] : folders)]) {
+      if (el.id === id) continue;
+      const b = boundsOf(el);
+      verticals.push(b.x, b.x + b.w / 2, b.x + b.w);
+      horizontals.push(b.y, b.y + b.h / 2, b.y + b.h);
+    }
+    // The board's own middle and edges count too, for centring something on it.
+    verticals.push(0, BOARD_W / 2, BOARD_W);
+    horizontals.push(0, BOARD_H / 2, BOARD_H);
+
+    // Each of the dragged thing's own three lines can be the one that catches.
+    const tryAxis = (lines, mine) => {
+      let best = null;
+      for (const line of lines) {
+        for (const [which, at] of mine) {
+          const gap = Math.abs(line - at);
+          if (gap <= SNAP_PX && (!best || gap < best.gap)) best = { gap, line, shift: line - at, which };
+        }
+      }
+      return best;
+    };
+    const vx = tryAxis(verticals, [["left", x], ["centre", x + w / 2], ["right", x + w]]);
+    const hy = tryAxis(horizontals, [["top", y], ["middle", y + h / 2], ["bottom", y + h]]);
+
+    setGuides({ x: vx ? vx.line : null, y: hy ? hy.line : null });
+    return {
+      x: Math.max(0, Math.round(x + (vx ? vx.shift : 0))),
+      y: Math.max(0, Math.round(y + (hy ? hy.shift : 0))),
+    };
+  };
+
+  snapRef.current = snapTo;
+
   const ZOOM_STEPS = [0.25, 0.4, 0.55, 0.75, 1, 1.25, 1.5, 2, 3];
   // Keeps whatever is in the middle of the view in the middle afterwards,
   // rather than throwing you to the top-left corner every time.
@@ -3782,7 +3882,7 @@ function IdeaBank({ data, saveData, profile }) {
     if (!item) return;
     if (tool === "erase") return removeBoardItem(id);
     tapToOpen("item", id, ev);
-  }, onDragSignal, getZoom);
+  }, onDragSignal, getZoom, snapVia);
 
   // What "open" means depends on what it is: a text box starts editing, a
   // picture goes full screen.
@@ -4235,7 +4335,7 @@ function IdeaBank({ data, saveData, profile }) {
           }}
           onMouseDown={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
           onTouchStart={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
-          style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px", cursor: drawingMode && tool !== "erase" ? "crosshair" : "default", touchAction: drawingMode ? "none" : "auto", transform: zoom === 1 ? undefined : `scale(${zoom})`, transformOrigin: "0 0" }}
+          style={{ position: "relative", width: BOARD_W, height: BOARD_H, background: surface.paper, backgroundImage: surface.image, backgroundSize: surface.size, color: surface.ink, cursor: drawingMode && tool !== "erase" ? "crosshair" : "default", touchAction: drawingMode ? "none" : "auto", transform: zoom === 1 ? undefined : `scale(${zoom})`, transformOrigin: "0 0" }}
         >
           <svg
             width={BOARD_W}
@@ -4347,7 +4447,9 @@ function IdeaBank({ data, saveData, profile }) {
                   <div
                     style={{
                       whiteSpace: "pre-wrap", wordBreak: "break-word",
-                      color: b.color || "var(--text)",
+                      // Text with no colour of its own follows the board, so
+                      // switching to a pale surface doesn't leave it invisible.
+                      color: b.color || surface.ink,
                       ...textStyleOf(b),
                       padding: b.bg ? "11px 12px" : "6px 8px",
                       background: b.bg || "transparent",
@@ -4355,7 +4457,7 @@ function IdeaBank({ data, saveData, profile }) {
                       boxShadow: b.bg ? "0 6px 14px rgba(0,0,0,0.38)" : "none",
                       // A shadow behind loose text keeps it readable over a
                       // photo; on a sticky note the note itself does that job.
-                      textShadow: b.bg ? "none" : "0 1px 3px rgba(0,0,0,0.5)",
+                      textShadow: b.bg || surface.ink !== "#EDEBE3" ? "none" : "0 1px 3px rgba(0,0,0,0.5)",
                       minHeight: b.bg ? 60 : 0,
                     }}
                   >
@@ -4383,6 +4485,17 @@ function IdeaBank({ data, saveData, profile }) {
               </span>
             </div>
           ))}
+
+          {guides && (guides.x !== null || guides.y !== null) && (
+            <>
+              {guides.x !== null && (
+                <div style={{ position: "absolute", left: guides.x, top: 0, width: 1, height: BOARD_H, background: "var(--teal)", opacity: 0.9, pointerEvents: "none", zIndex: 940 }} />
+              )}
+              {guides.y !== null && (
+                <div style={{ position: "absolute", top: guides.y, left: 0, height: 1, width: BOARD_W, background: "var(--teal)", opacity: 0.9, pointerEvents: "none", zIndex: 940 }} />
+              )}
+            </>
+          )}
 
           {pins.map((c) => {
             const open = openPinId === c.id;
@@ -4542,6 +4655,7 @@ function IdeaBank({ data, saveData, profile }) {
               <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 }}>
                 Click something to pick it up, double-click to open it, Shift-click for several.
                 Drag pictures straight onto the board, or paste a screenshot with Ctrl+V.
+                Things snap to line up with their neighbours — hold Alt while dragging to ignore that.
                 The settings below apply to whatever you draw next.
               </div>
             )}
@@ -4666,7 +4780,32 @@ function IdeaBank({ data, saveData, profile }) {
                   title="Any other colour"
                   style={{ width: 26, height: 24, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
                 />
+                {canDrop && (
+                  <button className="btn" style={PANEL_BTN} onClick={pickFromScreen} title="Take a colour from anywhere on screen"><Pipette size={11} /></button>
+                )}
+                <button className="btn" style={PANEL_BTN} onClick={() => rememberColour(styleNow.color)} title="Keep this colour for the team">Save</button>
               </div>
+              {palette.length > 0 && (
+                <>
+                  <div style={{ fontSize: 10, color: "var(--muted)", margin: "9px 0 5px" }}>Your colours · right-click to drop one</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                    {palette.map((c) => (
+                      <button
+                        key={c} onClick={() => applyStyle({ color: c })}
+                        onContextMenu={(e) => { e.preventDefault(); forgetColour(c); }}
+                        title={`${c} — right-click to remove`}
+                        style={{ width: 22, height: 22, borderRadius: 5, background: c, border: styleNow.color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer", padding: 0 }}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+              {picked && selection.length > 1 && (
+                <button
+                  className="btn" style={{ ...PANEL_BTN, marginTop: 9, width: "100%", justifyContent: "center" }}
+                  onClick={() => recolourSelection(styleNow.color)}
+                >Colour all {selection.length}</button>
+              )}
             </PanelSection>
           )}
 
@@ -4845,6 +4984,21 @@ function IdeaBank({ data, saveData, profile }) {
               )}
             </PanelSection>
           )}
+
+          <PanelSection title="Board surface">
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {BOARD_SURFACES.map((sf) => {
+                const on = surface.id === sf.id;
+                return (
+                  <button
+                    key={sf.id} className="btn"
+                    style={{ ...PANEL_BTN, ...(on ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }}
+                    onClick={() => setSurface(sf.id)}
+                  >{sf.label}</button>
+                );
+              })}
+            </div>
+          </PanelSection>
 
           {drawings.length > 0 && (
             <PanelSection title="Board">
@@ -6882,6 +7036,8 @@ function normalizeBoard(raw) {
   const board = { ...(raw || {}) };
   for (const key of BOARD_LISTS) if (!Array.isArray(board[key])) board[key] = [];
   board.ideas = board.ideas.map(withVoteList);
+  if (!Array.isArray(board.boardPalette)) board.boardPalette = [];
+  if (!board.boardSurfaces || typeof board.boardSurfaces !== "object" || Array.isArray(board.boardSurfaces)) board.boardSurfaces = {};
   if (typeof board.adminCode !== "string") board.adminCode = "";
   if (!board.goals || typeof board.goals !== "object" || Array.isArray(board.goals)) board.goals = {};
   if (!board.goals.individualTargets || typeof board.goals.individualTargets !== "object") {
