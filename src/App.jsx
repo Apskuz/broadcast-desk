@@ -153,27 +153,59 @@ const CONTENT_STATUS = [
   { id: "published", label: "Published", color: "var(--good)" },
 ];
 const CAL_STATUS = [
+  // Comes first because it's the earliest a thing can be: the time is spoken
+  // for, but what happens in it hasn't been decided yet.
+  { id: "toplan", label: "Not planned yet", color: "var(--muted)", unplanned: true },
   { id: "planned", label: "Planned", color: "var(--muted)" },
   { id: "ready", label: "Ready to post", color: "var(--gold)" },
   { id: "posted", label: "Done / posted", color: "var(--good)", done: true },
   { id: "skipped", label: "Skipped", color: "var(--alert)", dismissed: true },
 ];
-const calStatus = (e) => CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS[0];
+// Named rather than "the first one", so adding a status ahead of it can't
+// silently reclassify every event that predates the field.
+const CAL_STATUS_FALLBACK = CAL_STATUS.find((s) => s.id === "planned");
+const calStatus = (e) => CAL_STATUS.find((s) => s.id === e.status) || CAL_STATUS_FALLBACK;
 
 // The status used to be a 6px dot, which told you there was a status but not
 // which one unless you remembered what each colour meant. Something finished
 // now gets a tick and fades back; something skipped gets a cross and is struck
 // through. Both stay in place rather than disappearing, so the day still reads
 // as what was planned for it.
-function EventMark({ status, size = 12 }) {
-  if (status.done) return <Check size={size} strokeWidth={3.5} style={{ flexShrink: 0 }} />;
-  if (status.dismissed) return <X size={size - 1} strokeWidth={3} style={{ flexShrink: 0 }} />;
-  return <span className="evt-dot" style={{ background: status.color, width: 6, height: 6 }} />;
+function EventMark({ status, size = 12, onToggle }) {
+  const mark = status.done ? (
+    <Check size={size} strokeWidth={3.5} style={{ flexShrink: 0 }} />
+  ) : status.dismissed ? (
+    <X size={size - 1} strokeWidth={3} style={{ flexShrink: 0 }} />
+  ) : status.unplanned ? (
+    // A hollow ring: something is pencilled in here, but nothing is decided.
+    <span style={{ width: 7, height: 7, borderRadius: "50%", border: "1.5px solid currentColor", opacity: 0.65, flexShrink: 0, display: "inline-block" }} />
+  ) : (
+    <span className="evt-dot" style={{ background: status.color, width: 6, height: 6 }} />
+  );
+  if (!onToggle) return mark;
+  // Ticking something off was three taps — open it, change the dropdown, save —
+  // which is enough friction that nobody does it and the marks stay meaningless.
+  // The mark itself is the button. The padding/negative-margin pair buys a
+  // finger-sized hit area without moving anything around it.
+  return (
+    <button
+      type="button"
+      title={status.done ? "Mark as not done" : "Mark as done"}
+      aria-label={status.done ? "Mark as not done" : "Mark as done"}
+      onClick={(ev) => { ev.stopPropagation(); onToggle(); }}
+      onMouseDown={(ev) => ev.stopPropagation()}
+      style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 7, margin: -7, display: "inline-flex", alignItems: "center", flexShrink: 0 }}
+    >
+      {mark}
+    </button>
+  );
 }
-// Finished work shouldn't shout as loudly as what's still to do.
+// Finished work shouldn't shout as loudly as what's still to do, and something
+// with nothing planned in it yet shouldn't read as a commitment.
 const doneStyle = (status) => ({
   opacity: status.done ? 0.72 : status.dismissed ? 0.5 : 1,
   textDecoration: status.dismissed ? "line-through" : "none",
+  fontStyle: status.unplanned ? "italic" : "normal",
 });
 const TASK_TYPES = [
   { id: "film", label: "Film", verb: "Film", icon: Video, color: "var(--gold)" },
@@ -1041,6 +1073,7 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
   const [localTitle, setLocalTitle] = useState(task ? task.title : "");
   const [localDescription, setLocalDescription] = useState(task ? task.description || "" : "");
   const [newProjectName, setNewProjectName] = useState("");
+  const [calTime, setCalTime] = useState("09:00");
 
   useEffect(() => {
     setLocalTitle(task ? task.title : "");
@@ -1051,6 +1084,27 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
     saveData({ ...data, tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, ...patch } : t)) });
   };
   const debouncedUpdateTask = useDebouncedCallback(updateTask, 500);
+
+  // A duty already knows its date and its owner, so putting it on the calendar
+  // only needs the time of day. The event keeps the duty's id, which is what
+  // stops a second tap adding it twice and lets it be taken off again.
+  const scheduled = (data.calendarEvents || []).find((e) => e.taskId === taskId);
+  const addToCalendar = () => {
+    if (scheduled || !task) return;
+    saveData({
+      ...data,
+      calendarEvents: [...data.calendarEvents, {
+        id: uid(), taskId: task.id, title: task.title,
+        date: task.dueDate || todayISO(), time: calTime, endTime: "",
+        type: "deadline", assignee: task.assignee || "", status: "planned",
+        notes: "Added from Duties",
+      }],
+    });
+  };
+  const removeFromCalendar = () => {
+    if (!scheduled) return;
+    saveData({ ...data, calendarEvents: data.calendarEvents.filter((e) => e.id !== scheduled.id) });
+  };
 
   if (!task) return null;
 
@@ -1184,6 +1238,29 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
         </div>
       )}
 
+      <div className="section-title" style={{ fontSize: 13 }}><CalendarDays size={14} color="var(--gold)" /> Calendar</div>
+      {scheduled ? (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 12.5, background: "var(--panel-raised)", borderRadius: 7, padding: "8px 10px", marginBottom: 18 }}>
+          <span>On the calendar — {fmtDate(scheduled.date)}{scheduled.time ? ` at ${scheduled.time}` : ""}</span>
+          <button className="btn" style={{ padding: "4px 9px", fontSize: 10.5 }} onClick={removeFromCalendar}>Take off</button>
+        </div>
+      ) : (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.4 }}>
+            {task.dueDate
+              ? `Puts this on ${fmtDate(task.dueDate)} — its due date — so it shows up alongside everything else that day.`
+              : "This duty has no due date yet, so it'd land on today. Set a due date above to place it properly."}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              type="time" value={calTime} onChange={(e) => setCalTime(e.target.value)}
+              style={{ background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 6, padding: "7px 9px", fontSize: 12.5, color: "var(--text)", outline: "none" }}
+            />
+            <button className="btn" onClick={addToCalendar}><Plus size={13} /> Add to calendar</button>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div className="section-title" style={{ fontSize: 13, marginBottom: 0 }}><ListChecks size={14} color="var(--gold)" /> Checklist · {stepsDone}/{steps.length}</div>
         <button className="btn" style={{ padding: "4px 9px", fontSize: 10.5 }} onClick={reloadSteps} title="Replace the checklist with the default for this format"><RotateCw size={11} /> Reset for format</button>
@@ -1285,6 +1362,9 @@ function Duties({ data, saveData, profile }) {
     saveData({
       ...data,
       tasks: data.tasks.filter((t) => t.id !== id),
+      // A duty put on the calendar leaves an event behind pointing at a duty
+      // that no longer exists; take it with the duty rather than stranding it.
+      calendarEvents: (data.calendarEvents || []).filter((e) => e.taskId !== id),
       deletedTasks: [{ ...task, deletedBy: profile || "Unknown", deletedAt: todayISO() }, ...(data.deletedTasks || [])],
     });
   };
@@ -1510,6 +1590,13 @@ function isoOf(d) {
 }
 
 function Calendar({ data, saveData, profile }) {
+  // Tapping the mark flips just that event between done and planned. Going
+  // back lands on "Planned" rather than whatever it was before — the previous
+  // status isn't recorded anywhere, and guessing would be worse than saying so.
+  const toggleDone = (event) => {
+    const next = calStatus(event).done ? "planned" : "posted";
+    saveData({ ...data, calendarEvents: data.calendarEvents.map((x) => (x.id === event.id ? { ...x, status: next } : x)) });
+  };
   const isNarrow = useIsNarrow();
   const hourHeight = isNarrow ? HOUR_HEIGHT_NARROW : HOUR_HEIGHT;
   const minEventHeight = isNarrow ? MIN_EVENT_HEIGHT_NARROW : MIN_EVENT_HEIGHT;
@@ -1640,7 +1727,7 @@ function Calendar({ data, saveData, profile }) {
                         onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
                         style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 4px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 6, padding: "5px 8px", fontSize: 11.5, fontWeight: 600, overflow: "hidden", cursor: "pointer", zIndex: 2, ...doneStyle(st) }}
                       >
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 4, verticalAlign: "-2px" }}><EventMark status={st} /></span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 4, verticalAlign: "-2px" }}><EventMark status={st} onToggle={() => toggleDone(e)} /></span>
                         {e.time}{e.endTime ? `–${e.endTime}` : ""} {e.title}
                         {e.assignee && <div style={{ fontSize: 10, fontWeight: 500, opacity: 0.75 }}>{e.assignee}</div>}
                       </div>
@@ -1680,7 +1767,7 @@ function Calendar({ data, saveData, profile }) {
                       style={{ borderLeftColor: personColor(e.assignee, data.profiles), borderLeftWidth: 3, background: st.done ? "var(--good-soft)" : undefined, ...doneStyle(st) }}
                       onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
                     >
-                      <EventMark status={st} size={10} />
+                      <EventMark status={st} size={10} onToggle={() => toggleDone(e)} />
                       <span className="evt-text">
                         {e.time ? `${e.time}${e.endTime ? `–${e.endTime}` : ""} · ` : ""}{e.title}
                       </span>
@@ -1743,7 +1830,7 @@ function Calendar({ data, saveData, profile }) {
                         onClick={(ev) => { ev.stopPropagation(); openEdit(e); }}
                         style={{ position: "absolute", top, height, left: `${e.col * widthPct}%`, width: `calc(${widthPct}% - 3px)`, background: personColor(e.assignee, data.profiles), color: "#171812", borderRadius: 5, padding: "2px 5px", fontSize: 9.5, fontWeight: 700, lineHeight: 1.3, overflow: "hidden", cursor: "pointer", zIndex: 2, ...doneStyle(st) }}
                       >
-                        <span style={{ display: "inline-flex", alignItems: "center", marginRight: 3, verticalAlign: "-2px" }}><EventMark status={st} size={10} /></span>
+                        <span style={{ display: "inline-flex", alignItems: "center", marginRight: 3, verticalAlign: "-2px" }}><EventMark status={st} size={10} onToggle={() => toggleDone(e)} /></span>
                         {e.time} {e.title}
                       </div>
                     );
@@ -3988,6 +4075,9 @@ function MyDuties({ data, saveData, profile }) {
     saveData({
       ...data,
       tasks: data.tasks.filter((t) => t.id !== id),
+      // A duty put on the calendar leaves an event behind pointing at a duty
+      // that no longer exists; take it with the duty rather than stranding it.
+      calendarEvents: (data.calendarEvents || []).filter((e) => e.taskId !== id),
       deletedTasks: [{ ...task, deletedBy: profile || "Unknown", deletedAt: todayISO() }, ...(data.deletedTasks || [])],
     });
   };
