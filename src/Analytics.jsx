@@ -12,7 +12,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import { supabase } from "./supabaseClient";
 import {
   Instagram, RefreshCw, ArrowUpRight, ArrowDownRight, ExternalLink,
-  AlertTriangle, Eye, Users, Play, Table2, BarChart3,
+  AlertTriangle, Check, Eye, Users, Play, Table2, BarChart3,
 } from "lucide-react";
 import "./analytics.css";
 
@@ -381,6 +381,26 @@ export default function Analytics({ profile }) {
       .catch(() => setStatus({ configured: false, reason: "Couldn't reach the server." }));
   }, []);
 
+  // The OAuth callback can only talk back through the URL it redirects to, so
+  // whatever Facebook or the callback had to say arrives as ?ig=. Without this
+  // a failed connect looks identical to never having pressed the button --
+  // the reason sits unread in the address bar.
+  const [connectResult, setConnectResult] = useState(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("ig");
+    if (!outcome) return;
+    setConnectResult(
+      outcome === "connected"
+        ? { ok: true, text: `Connected ${params.get("name") || "your account"}. Run a sync to pull the numbers.` }
+        : { ok: false, text: params.get("why") || "Instagram couldn't be connected." }
+    );
+    // Clear the params so a refresh does not re-announce a stale result.
+    const url = new URL(window.location.href);
+    url.search = "";
+    window.history.replaceState({}, "", url);
+  }, []);
+
   const connected = status?.accounts?.[0];
 
   const runSync = async () => {
@@ -481,6 +501,7 @@ export default function Analytics({ profile }) {
     return (
       <div className="ig-root">
         <Header />
+        <ConnectNote />
         <div className="ig-setup">
           <AlertTriangle size={18} />
           <div>
@@ -500,6 +521,7 @@ export default function Analytics({ profile }) {
     return (
       <div className="ig-root">
         <Header />
+        <ConnectNote />
         <div className="ig-connect">
           <Instagram size={28} strokeWidth={1.5} />
           <h3 className="display">Connect your Instagram account</h3>
@@ -516,6 +538,19 @@ export default function Analytics({ profile }) {
             <Instagram size={15} /> Connect Instagram
           </a>
         </div>
+      </div>
+    );
+  }
+
+  // Declared as a function so it hoists above the early returns below, which
+  // need it too: a failed connect lands on the "not connected yet" screen, and
+  // that is exactly where the reason has to be readable.
+  function ConnectNote() {
+    if (!connectResult) return null;
+    return (
+      <div className={`ig-note${connectResult.ok ? "" : " ig-note-bad"}`}>
+        {connectResult.ok ? <Check size={14} /> : <AlertTriangle size={14} />}
+        {connectResult.text}
       </div>
     );
   }
@@ -547,6 +582,7 @@ export default function Analytics({ profile }) {
   return (
     <div className="ig-root">
       <Header />
+        <ConnectNote />
 
       {syncNote ? <div className="ig-note">{syncNote}</div> : null}
       {error ? <div className="ig-note ig-note-bad"><AlertTriangle size={14} /> {error}</div> : null}
