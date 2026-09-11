@@ -5614,11 +5614,16 @@ function IdeaBank({ data, saveData, profile }) {
       )}
 
       {developing && (
-        // The develop room works from the biggest preview Drive will give us
-        // rather than the board thumbnail — you cannot judge sharpening on an
-        // 800px copy, and the original bytes are never touched either way.
+        // The develop room works from the original file, not a preview. It used
+        // to take Drive's 1600px copy, which is enough to judge a grade on a
+        // picture shown whole and not enough for anything else: removing
+        // something had only 1600px of material to copy from, and zooming in
+        // showed the preview's softness rather than the photograph's. The
+        // original bytes are still never written to — everything here is a copy.
+        // Drive can't decode every format, so the preview stays as a fallback.
         <PhotoEditor
-          src={driveThumbSrc(developing.fileId, "s1600")}
+          src={driveMediaSrc(developing.fileId)}
+          fallbackSrc={driveThumbSrc(developing.fileId, "s1600")}
           name={developing.name}
           look={lookOf(developing)}
           crop={developing.crop}

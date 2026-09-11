@@ -608,6 +608,106 @@ function seamPlane(base) {
   return plane;
 }
 
+// A plane gets the overall level right and cannot do any more than that. Where
+// the join runs through something that is itself changing -- a sky going pale
+// towards the horizon, mist thinning across the frame -- the true correction is
+// not a plane, and what is left over shows up as a hard straight edge exactly
+// along the line where the fill starts.
+//
+// So the leftover is diffused instead. Every pixel on the join knows how far out
+// it still is once the plane has had its say; that figure is held fixed there
+// and averaged inward over the rest of the hole until it dies away. It is the
+// membrane a soap film makes across a bent wire, and it is the classic way of
+// hiding a seam: smooth everywhere inside, exactly right at the edge.
+//
+// Solving it needs no accuracy in the usual sense. The answer is smooth by
+// definition, so a few hundred passes of averaging at the map's resolution --
+// starting from the plane, which has already taken out the part that carries
+// furthest -- lands close enough that nothing is visible.
+const SEAM_PASSES = 320;
+
+function seamField(base, plane) {
+  const { w, h, hole, rgb } = base;
+  const n = w * h;
+  const at = (p, x, y) => (plane ? p[0] + p[1] * x + p[2] * y : 0);
+
+  let cur = new Float32Array(n * 3);
+  const fixed = new Uint8Array(n);
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!hole[i]) continue;
+      let sr = 0, sg = 0, sb = 0, c = 0;
+      const look = (j) => {
+        if (hole[j]) return;
+        sr += rgb[j * 3] - rgb[i * 3];
+        sg += rgb[j * 3 + 1] - rgb[i * 3 + 1];
+        sb += rgb[j * 3 + 2] - rgb[i * 3 + 2];
+        c++;
+      };
+      if (x > 0) look(i - 1);
+      if (x < w - 1) look(i + 1);
+      if (y > 0) look(i - w);
+      if (y < h - 1) look(i + w);
+      if (!c) continue;
+      // What the plane did not already account for.
+      cur[i * 3] = sr / c - at(plane ? plane[0] : null, x, y);
+      cur[i * 3 + 1] = sg / c - at(plane ? plane[1] : null, x, y);
+      cur[i * 3 + 2] = sb / c - at(plane ? plane[2] : null, x, y);
+      fixed[i] = 1;
+    }
+  }
+
+  // Only the inside of the hole ever changes. Walking the whole frame 320 times
+  // over, and copying the whole field each time, costs several hundred million
+  // operations for a few thousand pixels of answer — so the pixels that move
+  // are listed once and only they are touched. Everything else is identical in
+  // both buffers, so it needs copying once rather than every pass.
+  const loose = [];
+  for (let i = 0; i < n; i++) if (hole[i] && !fixed[i]) loose.push(i);
+
+  let next = new Float32Array(n * 3);
+  next.set(cur);
+  if (loose.length) {
+    for (let pass = 0; pass < SEAM_PASSES; pass++) {
+      for (let k = 0; k < loose.length; k++) {
+        const i = loose[k], x = i % w, y = (i / w) | 0;
+        let r = 0, g = 0, b = 0, c = 0;
+        if (x > 0 && hole[i - 1]) { const j = i - 1; r += cur[j * 3]; g += cur[j * 3 + 1]; b += cur[j * 3 + 2]; c++; }
+        if (x < w - 1 && hole[i + 1]) { const j = i + 1; r += cur[j * 3]; g += cur[j * 3 + 1]; b += cur[j * 3 + 2]; c++; }
+        if (y > 0 && hole[i - w]) { const j = i - w; r += cur[j * 3]; g += cur[j * 3 + 1]; b += cur[j * 3 + 2]; c++; }
+        if (y < h - 1 && hole[i + w]) { const j = i + w; r += cur[j * 3]; g += cur[j * 3 + 1]; b += cur[j * 3 + 2]; c++; }
+        if (!c) continue;
+        next[i * 3] = r / c; next[i * 3 + 1] = g / c; next[i * 3 + 2] = b / c;
+      }
+      const swap = cur; cur = next; next = swap;
+    }
+  }
+
+  // One ring outside the hole carries its neighbour's value, so reading the
+  // field smoothly at full resolution does not fade it away right at the join,
+  // which is the one place it has to be exactly right.
+  const out = cur;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (hole[i]) continue;
+      let r = 0, g = 0, b = 0, c = 0;
+      const take = (j) => {
+        if (!hole[j]) return;
+        r += out[j * 3]; g += out[j * 3 + 1]; b += out[j * 3 + 2]; c++;
+      };
+      if (x > 0) take(i - 1);
+      if (x < w - 1) take(i + 1);
+      if (y > 0) take(i - w);
+      if (y < h - 1) take(i + w);
+      if (c) { out[i * 3] = r / c; out[i * 3 + 1] = g / c; out[i * 3 + 2] = b / c; }
+    }
+  }
+  return out;
+}
+
 /* ---------------------------- the full-size copy --------------------------- */
 
 // The map says, for each pixel of the hole, which part of the photograph its
@@ -628,12 +728,27 @@ function synthesize(image, mask, region, base, iw, ih) {
   const rw = Math.max(1, Math.round(region.w * fine)), rh = Math.max(1, Math.round(region.h * fine));
   const k = rw / w;                       // fine pixels per map pixel
 
-  // How far off the level is where the fill meets the photograph, as a plane.
+  // How far off the level is where the fill meets the photograph: the plane for
+  // the part that carries right across, the membrane for everything left over.
+  // Both are smooth, so they can be read at full resolution without softening
+  // anything — which is the whole reason the correction is done this way round
+  // rather than by blurring the join.
   const plane = seamPlane(base);
+  const field = seamField(base, plane);
+
   const shift = (ch, mxf, myf) => {
-    if (!plane) return 0;
-    const p = plane[ch];
-    return clamp(p[0] + p[1] * mxf + p[2] * myf, -SEAM_LIMIT, SEAM_LIMIT);
+    const p = plane ? plane[ch] : null;
+    const flat = p ? p[0] + p[1] * mxf + p[2] * myf : 0;
+
+    const x0 = Math.floor(mxf), y0 = Math.floor(myf);
+    const fx = mxf - x0, fy = myf - y0;
+    const ax = clamp(x0, 0, w - 1), bx = clamp(x0 + 1, 0, w - 1);
+    const ay = clamp(y0, 0, h - 1), by = clamp(y0 + 1, 0, h - 1);
+    const g = (xx, yy) => field[(yy * w + xx) * 3 + ch];
+    const local = g(ax, ay) * (1 - fx) * (1 - fy) + g(bx, ay) * fx * (1 - fy)
+      + g(ax, by) * (1 - fx) * fy + g(bx, by) * fx * fy;
+
+    return clamp(flat + local, -SEAM_LIMIT, SEAM_LIMIT);
   };
 
   const srcCanvas = document.createElement("canvas");

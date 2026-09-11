@@ -840,7 +840,14 @@ function buildBrushTexture(masks, aspect) {
  * Returns false if WebGL could not do it, which is the caller's cue to fall
  * back to the CSS approximation.
  */
-export function renderPhoto({ image, look, crop, out, maxSize = 1600, showMask = false, preview = null }) {
+// `minSize` keeps the output from coming back smaller than the panel it is
+// about to be shown in. Normally the size follows the crop, which is right: a
+// small crop has few pixels and there is no sense drawing more of them than
+// exist. Zoomed right in, though, that means the canvas gets smaller than the
+// space it sits in, and the picture appears to shrink as you lean towards it.
+// Past 100% something has to be magnified; this at least magnifies it in the
+// right place.
+export function renderPhoto({ image, look, crop, out, maxSize = 1600, minSize = 0, showMask = false, preview = null }) {
   const ctx = setup();
   if (!ctx) return false;
   const { gl } = ctx;
@@ -858,7 +865,7 @@ export function renderPhoto({ image, look, crop, out, maxSize = 1600, showMask =
   // rather than merely the wrong shape.
   const turned = devAspect !== iw / ih;
   const devW = turned ? ih : iw, devH = turned ? iw : ih;
-  const longEdge = Math.min(maxSize, Math.max(32, Math.max(c.w * devW, c.h * devH)));
+  const longEdge = Math.min(maxSize, Math.max(32, minSize, Math.max(c.w * devW, c.h * devH)));
   const w = Math.max(8, Math.round(aspect >= 1 ? longEdge : longEdge * aspect));
   const h = Math.max(8, Math.round(aspect >= 1 ? longEdge / aspect : longEdge));
 

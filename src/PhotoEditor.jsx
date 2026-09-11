@@ -87,6 +87,13 @@ const BTN = {
   display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
 };
 const BTN_ON = { ...BTN, borderColor: GOLD, color: GOLD, background: "var(--gold-soft)" };
+// Sits on the picture rather than in a panel, so it reads against whatever the
+// photograph happens to be behind it.
+const ZBTN = {
+  padding: "3px 7px", fontSize: 11, borderRadius: 4, cursor: "pointer",
+  background: "transparent", color: "#fff", border: "none",
+  display: "inline-flex", alignItems: "center", justifyContent: "center",
+};
 
 /* --------------------------------- curve ---------------------------------- */
 
@@ -331,7 +338,29 @@ function Histogram({ hist }) {
 
 /* --------------------------------- editor --------------------------------- */
 
-export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, onCopyLook, onExport, onClose }) {
+// A WebGL texture has a size limit, and on a fair amount of hardware it is
+// 4096. The original off a camera is often wider than that, so it comes down to
+// this once on the way in rather than failing to upload as a texture — which
+// the renderer can only report as a blank frame.
+const MAX_EDGE = 4096;
+
+// The crop the renderer should actually draw: the one the picture is cropped
+// to, narrowed to the part being looked at. `view` is in the crop's own units,
+// so this composes rather than replaces — zooming inside a crop stays inside it.
+// At fit, it hands back exactly what it was given, so nothing changes anywhere
+// that never zooms.
+function viewCrop(base, view) {
+  if (!view || view.w >= 1) return base;
+  const c = base || { x: 0, y: 0, w: 1, h: 1 };
+  return {
+    x: c.x + view.x * c.w,
+    y: c.y + view.y * c.h,
+    w: c.w * view.w,
+    h: c.h * view.h,
+  };
+}
+
+export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookClip, onSave, onCopyLook, onExport, onClose }) {
   const [edit, setEdit] = useState(() => fullEdit(look));
   const [cropBox, setCropBox] = useState(() => crop || { x: 0, y: 0, w: 1, h: 1 });
   const [ratio, setRatio] = useState("free");
@@ -365,17 +394,50 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
   const supported = useMemo(() => rendererAvailable(), []);
 
   /* ---- load the picture once; every frame after that is the shader's ---- */
+  //
+  // This room asks Drive for the original file, not the board thumbnail. It
+  // used to work from a 1600px preview, which is fine for judging a grade on a
+  // picture shown whole, and hopeless for anything you lean in on: a removal
+  // had only 1600px of material to copy from however good the matching was, and
+  // zooming in showed the preview's own softness rather than the photograph's.
+  //
+  // Drive cannot preview every format, and some files only ever existed as
+  // something the browser can't decode — so if the original won't load, the
+  // preview is still there to fall back on and the room opens either way.
   useEffect(() => {
     let alive = true;
+    let usingFallback = false;
+
     // Spelled out rather than `new Image()`, to match App.jsx — where an icon
     // of that name shadows the global constructor. Same spelling everywhere
     // means moving this code cannot quietly break it.
     const img = document.createElement("img");
-    img.onload = () => { if (alive) setImage(img); };
-    img.onerror = () => { if (alive) setFailed(true); };
+
+    img.onload = () => {
+      if (!alive) return;
+      const w = img.naturalWidth, h = img.naturalHeight;
+      const long = Math.max(w, h);
+      if (!long) { setFailed(true); return; }
+      if (long <= MAX_EDGE) { setImage(img); return; }
+      // Down to something the GPU will take, once, here — rather than at every
+      // frame or, worse, not at all.
+      const s = MAX_EDGE / long;
+      const fit = document.createElement("canvas");
+      fit.width = Math.max(1, Math.round(w * s));
+      fit.height = Math.max(1, Math.round(h * s));
+      fit.getContext("2d").drawImage(img, 0, 0, fit.width, fit.height);
+      setImage(fit);
+    };
+
+    img.onerror = () => {
+      if (!alive) return;
+      if (!usingFallback && fallbackSrc) { usingFallback = true; img.src = fallbackSrc; return; }
+      setFailed(true);
+    };
+
     img.src = src;
     return () => { alive = false; };
-  }, [src]);
+  }, [src, fallbackSrc]);
 
   useEffect(() => {
     const onResize = () => setNarrow(window.innerWidth < 900);
@@ -409,6 +471,46 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
   // picture" and every slider, mask and curve applies on top of it as usual.
   const source = healed || image;
 
+  /* -------------------------------- zooming -------------------------------- */
+  // Zooming is not a magnifying glass over the finished frame — it changes what
+  // the renderer is asked for. `renderPhoto` sizes its output from the crop it
+  // is given, so handing it a quarter of the picture makes it draw that quarter
+  // at the resolution the quarter actually has. Leaning in shows more of the
+  // photograph, not bigger pixels.
+  //
+  // The rectangle is kept square in the picture's own units, so its shape never
+  // changes and the panel underneath never jumps about as you zoom.
+  const [zoom, setZoom] = useState(1);
+  const [centre, setCentre] = useState({ x: 0.5, y: 0.5 });
+  const panFrom = useRef(null);
+
+  // Cropping needs the whole frame in view to make any sense of the rectangle.
+  const zoomable = mode !== "crop";
+  const z = zoomable ? zoom : 1;
+
+  const view = useMemo(() => {
+    const s = 1 / z, half = s / 2;
+    const cx = Math.max(half, Math.min(1 - half, centre.x));
+    const cy = Math.max(half, Math.min(1 - half, centre.y));
+    return { x: cx - half, y: cy - half, w: s, h: s };
+  }, [z, centre]);
+
+  // Back to fit whenever the picture or the job changes — coming back to a room
+  // still zoomed into a corner of something else is disorienting.
+  useEffect(() => { setZoom(1); setCentre({ x: 0.5, y: 0.5 }); }, [src]);
+  useEffect(() => { if (!zoomable) { setZoom(1); setCentre({ x: 0.5, y: 0.5 }); } }, [zoomable]);
+
+  const zoomTo = useCallback((next, at) => {
+    const clamped = Math.max(1, Math.min(12, next));
+    setZoom(clamped);
+    if (clamped <= 1) { setCentre({ x: 0.5, y: 0.5 }); return; }
+    // Keep whatever is under the pointer under the pointer.
+    if (at) {
+      const s = 1 / clamped;
+      setCentre({ x: at.picture.x + s * (0.5 - at.frac.x), y: at.picture.y + s * (0.5 - at.frac.y) });
+    }
+  }, []);
+
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !source) return;
@@ -426,9 +528,15 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
       // picture is drawn and the rectangle sits over it. Removing works on the
       // original too — undeveloped and uncropped — so that where you brush is
       // exactly where the pixels are, with no geometry to invert.
-      crop: mode === "crop" || mode === "remove" ? null : cropBox,
+      crop: viewCrop(mode === "crop" || mode === "remove" ? null : cropBox, view),
       out: canvas,
+      // Zoomed in, the window is a slice of the picture and wants every pixel
+      // that slice has; the cap is what stops a whole 4000px frame being drawn
+      // at full size just to be shown 900px wide. Once past the point where the
+      // slice has fewer pixels than the panel, the panel size wins — otherwise
+      // the picture shrinks on screen the further in you go.
       maxSize: narrow ? 1100 : 1600,
+      minSize: z > 1 ? (narrow ? 1100 : 1600) : 0,
       showMask: showMask && mode === "mask" && activeMask != null,
     });
     if (!ok) return;
@@ -441,7 +549,7 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
       histAt.current = now;
       setHist(histogramOf(canvas));
     }
-  }, [source, edit, cropBox, peek, showMask, mode, activeMask, narrow]);
+  }, [source, edit, cropBox, peek, showMask, mode, activeMask, narrow, view, z]);
 
   useEffect(() => {
     if (!supported || !source) return;
@@ -592,7 +700,8 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
 
   // Dragging on the picture while a mask is picked: the middle of a radial, the
   // two ends of a linear, or a brush stroke.
-  const stagePoint = (e) => {
+  // Where the pointer is on the canvas, 0..1 of the panel as drawn.
+  const stageFrac = (e) => {
     const canvas = canvasRef.current;
     const r = canvas.getBoundingClientRect();
     const pt = e.touches ? e.touches[0] : e;
@@ -601,6 +710,57 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
       y: Math.max(0, Math.min(1, (pt.clientY - r.top) / r.height)),
     };
   };
+
+  // Where that is in the picture. Zoomed in, the panel is only showing `view`,
+  // so a brush dab has to be put back where the photograph actually is — at
+  // fit this is the identity and behaves exactly as it always did.
+  const stagePoint = (e) => {
+    const f = stageFrac(e);
+    return { x: view.x + f.x * view.w, y: view.y + f.y * view.h };
+  };
+
+  // Dragging the picture about, once there is more of it than fits. Held on the
+  // window rather than the canvas so the drag survives the pointer leaving the
+  // panel, which is exactly when you are pushing towards an edge.
+  const startPan = (e) => {
+    if (z <= 1) return false;
+    e.preventDefault();
+    const start = stageFrac(e);
+    const from = { ...centre };
+    const span = { w: view.w, h: view.h };          // fixed for the length of a drag
+    const move = (ev) => {
+      const p = stageFrac(ev);
+      setCentre({
+        x: from.x - (p.x - start.x) * span.w,
+        y: from.y - (p.y - start.y) * span.h,
+      });
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    return true;
+  };
+
+  // Wheel to zoom. Attached by hand because React listens for wheel passively,
+  // and a passive listener cannot stop the page scrolling behind the picture.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !zoomable) return undefined;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const frac = stageFrac(e);
+      const picture = { x: view.x + frac.x * view.w, y: view.y + frac.y * view.h };
+      zoomTo(zoom * Math.exp(-e.deltaY * 0.0018), { frac, picture });
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+    // `source` is in here because the canvas does not exist until the picture
+    // has loaded. Without it this runs once against nothing, and then never
+    // again — nothing else in the list changes when the photograph turns up.
+  }, [zoomable, zoom, view, zoomTo, source]);
 
   const startMaskDrag = (e, grab) => {
     e.preventDefault();
@@ -801,28 +961,55 @@ export default function PhotoEditor({ src, name, look, crop, lookClip, onSave, o
         <div style={{ position: "relative", maxWidth: "100%", maxHeight: "100%", lineHeight: 0 }}>
           <canvas
             ref={canvasRef}
-            onPointerDown={
-              picking ? undefined
-                : mode === "remove" ? paintHeal
-                : mode === "mask" && mask && mask.type === "brush" ? startBrush
-                : undefined
-            }
+            onPointerDown={(e) => {
+              // The middle button always pans, and so does a plain drag when
+              // there is no tool for a drag to belong to. A brush keeps the
+              // left button in every mode that has one.
+              const panning = z > 1 && !picking
+                && (e.button === 1 || mode === "adjust");
+              if (panning && startPan(e)) return;
+              if (picking) return;
+              if (mode === "remove") { paintHeal(e); return; }
+              if (mode === "mask" && mask && mask.type === "brush") startBrush(e);
+            }}
             onClick={picking ? pickWhite : undefined}
             style={{
               maxWidth: "100%", maxHeight: narrow ? "46vh" : "78vh", display: "block", borderRadius: 4,
               cursor: picking ? "crosshair"
                 : mode === "remove" || (mode === "mask" && mask && mask.type === "brush") ? "cell"
+                : z > 1 ? "grab"
                 : "default",
               touchAction: "none",
             }}
           />
 
+          {/* ---- how far in we are ---- */}
+          {zoomable && (
+            <div style={{
+              position: "absolute", right: 8, bottom: 8, display: "flex", alignItems: "center", gap: 3,
+              background: "rgba(0,0,0,0.55)", borderRadius: 6, padding: 3, lineHeight: 1,
+            }}>
+              <button style={ZBTN} disabled={z <= 1} title="Zoom out"
+                onClick={() => zoomTo(z / 1.6)}>−</button>
+              <button style={{ ...ZBTN, minWidth: 48, fontVariantNumeric: "tabular-nums" }}
+                title={z <= 1 ? "The whole picture" : "Back to the whole picture"}
+                onClick={() => zoomTo(1)}>{z <= 1 ? "Fit" : `${Math.round(z * 100)}%`}</button>
+              <button style={ZBTN} disabled={z >= 12} title="Zoom in — or scroll on the picture"
+                onClick={() => zoomTo(z * 1.6, { frac: { x: 0.5, y: 0.5 }, picture: { x: centre.x, y: centre.y } })}>+</button>
+            </div>
+          )}
+
           {/* ---- what is about to be removed ---- */}
           {mode === "remove" && healStrokes.length > 0 && (
             <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
               {healStrokes.map((s, i) => (
+                // Held in the picture's own units, drawn in the panel's — so a
+                // dab stays on the thing it was put on while you zoom around.
                 <circle
-                  key={i} cx={`${s.x * 100}%`} cy={`${s.y * 100}%`} r={`${s.r * 100}%`}
+                  key={i}
+                  cx={`${((s.x - view.x) / view.w) * 100}%`}
+                  cy={`${((s.y - view.y) / view.h) * 100}%`}
+                  r={`${(s.r / view.w) * 100}%`}
                   fill="rgba(217,86,75,0.45)" stroke="rgba(217,86,75,0.9)" strokeWidth="1"
                 />
               ))}
