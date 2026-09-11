@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { mergeState, deepEqual } from "./syncState";
 import { useLiveBoard } from "./livePresence";
 import Analytics, { AnalyticsIcon } from "./Analytics";
+import PhotoEditor from "./PhotoEditor";
+import {
+  EDIT_DEFAULTS, ALL_PRESETS, fullEdit, hasEdit, trimEdit, migrateLook, editSummary,
+} from "./photoEdit";
+import { renderPhoto, rendererAvailable } from "./photoRender";
 // Only pulled in when someone actually exports, so the 200KB doesn't sit in
 // the bundle everyone downloads just to look at the board.
 const loadHtml2Canvas = () => import("html2canvas").then((m) => m.default || m);
@@ -16,7 +21,7 @@ import {
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
   Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
-  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette, Search, Play as PlayIcon, Maximize2, Scissors, PenTool
+  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette, Search, Play as PlayIcon, Maximize2, Scissors, PenTool, Sliders
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -188,25 +193,34 @@ const STICKER_GROUPS = [
 const TEXT_DEFAULTS = { fontSize: 15, font: "sans", align: "left", bold: false, italic: false };
 
 // Photo adjustment, the same way crop works: numbers recorded against the
-// picture, never a change to the file in Drive. The browser does the work with
-// CSS filters, which costs nothing, applies instantly and can be taken off
-// again — and because it is only numbers, one photo's look can be copied onto
-// another, and it all rides through undo like any other edit.
-const PHOTO_DEFAULTS = { exposure: 0, contrast: 0, saturation: 0, warmth: 0, blur: 0, spin: 0 };
+// picture, never a change to the file in Drive. Because it is only numbers, one
+// photo's look can be copied onto another, and it all rides through undo like
+// any other edit.
+//
+// The panel on the board is the quick version — the handful of controls you
+// reach for without stopping to think. Everything else (curves, colour mixing,
+// grading, detail, optics, geometry, masks) is in the develop room, which works
+// on exactly the same numbers: see photoEdit.js and PhotoEditor.jsx.
 const PHOTO_SLIDERS = [
-  { key: "exposure", label: "Exposure", min: -60, max: 60 },
-  { key: "contrast", label: "Contrast", min: -60, max: 60 },
-  { key: "saturation", label: "Saturation", min: -100, max: 100 },
-  { key: "warmth", label: "Warmth", min: -60, max: 60 },
-  { key: "blur", label: "Blur", min: 0, max: 12 },
+  { key: "exposure", label: "Exposure", min: -5, max: 5, step: 0.01 },
+  { key: "contrast", label: "Contrast", min: -100, max: 100, step: 1 },
+  { key: "highlights", label: "Highlights", min: -100, max: 100, step: 1 },
+  { key: "shadows", label: "Shadows", min: -100, max: 100, step: 1 },
+  { key: "temp", label: "Warmth", min: -100, max: 100, step: 1 },
+  { key: "vibrance", label: "Vibrance", min: -100, max: 100, step: 1 },
+  { key: "saturation", label: "Saturation", min: -100, max: 100, step: 1 },
+  { key: "blur", label: "Blur", min: 0, max: 12, step: 0.5 },
 ];
+// A short row that fits the side panel; the rest are one click away in the
+// develop room rather than crammed in here.
 const PHOTO_PRESETS = [
-  { id: "none", label: "Original", look: {} },
-  { id: "bw", label: "B&W", look: { saturation: -100, contrast: 12 } },
-  { id: "faded", label: "Faded", look: { contrast: -22, saturation: -25, exposure: 10 } },
-  { id: "punchy", label: "Punchy", look: { contrast: 28, saturation: 30 } },
-  { id: "warm", label: "Warm", look: { warmth: 34, exposure: 6, saturation: 10 } },
-  { id: "cold", label: "Cold", look: { warmth: -34, saturation: -8, contrast: 8 } },
+  ALL_PRESETS.find((p) => p.id === "none"),
+  ALL_PRESETS.find((p) => p.id === "auto-punch"),
+  ALL_PRESETS.find((p) => p.id === "soft"),
+  ALL_PRESETS.find((p) => p.id === "bw-neutral"),
+  ALL_PRESETS.find((p) => p.id === "portra"),
+  ALL_PRESETS.find((p) => p.id === "fade"),
+  ALL_PRESETS.find((p) => p.id === "cine"),
 ];
 
 // How an element sits against what's behind it. Multiply darkens through,
@@ -249,6 +263,33 @@ const curveThrough = (pts) => {
   }
   return d;
 };
+// A drawing so small it reads as a speck of dust rather than a mark: a tap that
+// wobbled a couple of pixels, or a line dragged nowhere. Measuring the whole
+// stroke rather than counting its points matters — a pen stroke with two points
+// three pixels apart passes any test based on how many points it has, and then
+// sits on the board as a dot nobody can remember making.
+const SPECK_PX = 6;
+const isSpeck = (s) => {
+  if (!s) return false;
+  if (s.tool === "pen") {
+    const pts = s.points || [];
+    if (pts.length < 4) return true;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (let i = 0; i < pts.length; i += 2) {
+      minX = Math.min(minX, pts[i]); maxX = Math.max(maxX, pts[i]);
+      minY = Math.min(minY, pts[i + 1]); maxY = Math.max(maxY, pts[i + 1]);
+    }
+    return maxX - minX < SPECK_PX && maxY - minY < SPECK_PX;
+  }
+  if (s.tool === "curve") {
+    const pts = s.curve || [];
+    if (pts.length < 2) return true;
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    return Math.max(...xs) - Math.min(...xs) < SPECK_PX && Math.max(...ys) - Math.min(...ys) < SPECK_PX;
+  }
+  return Math.abs(s.x2 - s.x1) < SPECK_PX && Math.abs(s.y2 - s.y1) < SPECK_PX;
+};
+
 const SHADOWS = [
   { id: "none", label: "None", css: "none" },
   { id: "soft", label: "Soft", css: "drop-shadow(0 6px 14px rgba(0,0,0,0.45))" },
@@ -258,23 +299,26 @@ const SHADOWS = [
 ];
 const shadowCss = (id) => (SHADOWS.find((sh) => sh.id === id) || SHADOWS[0]).css;
 
-const photoLook = (b) => ({ ...PHOTO_DEFAULTS, ...(b && b.look ? b.look : {}) });
-const hasLook = (b) => {
-  const look = photoLook(b);
-  return PHOTO_SLIDERS.some(({ key }) => look[key] !== PHOTO_DEFAULTS[key]);
-};
-// Percentages rather than raw filter values, so a slider at zero is genuinely
-// "leave it alone" and the numbers mean something when read back.
+// A picture's saved look, read back through the defaults — and through the
+// translation from the five CSS-filter sliders this panel started life with, so
+// a photo somebody set up before any of this existed still looks the same.
+const lookOf = (b) => migrateLook(b && b.look);
+const photoLook = (b) => fullEdit(lookOf(b));
+const hasLook = (b) => hasEdit(lookOf(b));
+
+// The fallback, for a browser that won't give us WebGL. Nothing subtle survives
+// the trip — a curve and a mask have no CSS equivalent — but the picture still
+// reads roughly right rather than showing up untouched.
 const photoFilter = (b) => {
   const l = photoLook(b);
   const parts = [];
-  if (l.exposure) parts.push(`brightness(${1 + l.exposure / 100})`);
+  if (l.exposure) parts.push(`brightness(${Math.pow(2, l.exposure).toFixed(3)})`);
   if (l.contrast) parts.push(`contrast(${1 + l.contrast / 100})`);
-  if (l.saturation) parts.push(`saturate(${Math.max(0, 1 + l.saturation / 100)})`);
+  if (l.saturation || l.vibrance) parts.push(`saturate(${Math.max(0, 1 + (l.saturation + l.vibrance * 0.6) / 100)})`);
   // Warmth has no filter of its own: a little hue rotation plus sepia leans an
-  // image warm or cold convincingly enough for a mood board.
-  if (l.warmth > 0) parts.push(`sepia(${l.warmth / 160}) saturate(${1 + l.warmth / 200})`);
-  if (l.warmth < 0) parts.push(`hue-rotate(${l.warmth / 6}deg) saturate(${1 + -l.warmth / 300})`);
+  // image warm or cold convincingly enough for a thumbnail.
+  if (l.temp > 0) parts.push(`sepia(${l.temp / 160}) saturate(${1 + l.temp / 200})`);
+  if (l.temp < 0) parts.push(`hue-rotate(${l.temp / 6}deg) saturate(${1 + -l.temp / 300})`);
   if (l.blur) parts.push(`blur(${l.blur / 4}px)`);
   return parts.length ? parts.join(" ") : "none";
 };
@@ -2316,6 +2360,74 @@ const driveThumbSrc = (fileId, size = "s400") => `/api/drive-stream?fileId=${fil
 // what is underneath (a dark tile, a play badge) reads fine on its own.
 const hideBrokenThumb = (e) => { e.currentTarget.style.visibility = "hidden"; };
 
+/**
+ * A picture on the board, developed.
+ *
+ * A photo with nothing done to it is a plain <img>, exactly as it always was —
+ * no canvas, no shader, no cost. The moment it has a crop or a look, it becomes
+ * a canvas painted by the shared WebGL context in photoRender.js. One context
+ * for the whole app matters: browsers stop handing them out at about a dozen,
+ * and a board can easily hold fifty pictures.
+ *
+ * The <img> stays in charge of layout until the first frame lands, so the board
+ * doesn't jump about while pictures arrive.
+ */
+function BoardPhoto({ fileId, name, look, crop, peek, style, className, onError }) {
+  const canvasRef = useRef(null);
+  const [image, setImage] = useState(null);
+  const [painted, setPainted] = useState(false);
+  // Holding the before/after button shows the original, but still framed the
+  // way you framed it — you want to compare the look, not the crop.
+  const effective = peek ? null : migrateLook(look);
+  const wanted = !!crop || hasEdit(effective);
+  const canPaint = wanted && rendererAvailable();
+  const src = driveThumbSrc(fileId, "s800");
+
+  useEffect(() => {
+    if (!canPaint) { setImage(null); setPainted(false); return undefined; }
+    let alive = true;
+    const img = new Image();
+    img.onload = () => { if (alive) setImage(img); };
+    img.onerror = () => { if (alive) { setImage(null); setPainted(false); } };
+    img.src = src;
+    return () => { alive = false; };
+  }, [src, canPaint]);
+
+  // The look is a deep object, so compare what it serialises to rather than its
+  // identity — otherwise every board render would repaint every picture.
+  const signature = JSON.stringify([effective || null, crop || null]);
+  useEffect(() => {
+    if (!canPaint || !image || !canvasRef.current) return;
+    const done = renderPhoto({ image, look: effective, crop, out: canvasRef.current, maxSize: 900 });
+    setPainted(!!done);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [image, signature, canPaint]);
+
+  // The canvas node itself is never swapped out while it is in use — React
+  // would unmount it and the painted frame would go with it — so it is hidden
+  // rather than removed until the first frame lands.
+  return (
+    <>
+      {canPaint && (
+        // A canvas with width and height attributes scales to its own
+        // proportions under width:100%, so the developed shape — including a
+        // quarter turn — drives the layout without anyone working out an aspect.
+        <canvas
+          ref={canvasRef} className={className}
+          style={painted ? { width: "100%", height: "auto", display: "block", ...style } : { display: "none" }}
+        />
+      )}
+      {!(canPaint && painted) && (
+        <img
+          src={src} onError={onError} alt={name || ""} draggable={false}
+          className={className}
+          style={{ width: "100%", display: "block", filter: peek ? "none" : photoFilter({ look }), ...style }}
+        />
+      )}
+    </>
+  );
+}
+
 // Fire-and-forget cleanup so an abandoned or deleted upload doesn't sit in
 // Drive forever taking up the team's space.
 function deleteDriveFile(fileIdOrLink) {
@@ -3206,6 +3318,7 @@ function IdeaBank({ data, saveData, profile }) {
   const [showStickers, setShowStickers] = useState(false);
   const [linkDraft, setLinkDraft] = useState(null); // the url being typed, or null
   const [cropping, setCropping] = useState(null);   // the picture being reframed
+  const [developing, setDeveloping] = useState(null); // the picture open in the develop room
   const [openPinId, setOpenPinId] = useState(null); // the pin whose thread is showing
   const [peeking, setPeeking] = useState(false);    // holding the before/after button
   const [history, setHistory] = useState(null);     // null until the list is fetched
@@ -3305,10 +3418,7 @@ function IdeaBank({ data, saveData, profile }) {
       setDraft(null);
       live.stop();
       if (!shapeToSave) return;
-      const isDot = shapeToSave.tool === "pen"
-        ? shapeToSave.points.length < 4
-        : Math.abs(shapeToSave.x2 - shapeToSave.x1) < 4 && Math.abs(shapeToSave.y2 - shapeToSave.y1) < 4;
-      if (isDot) return; // a stray tap shouldn't leave a speck behind
+      if (isSpeck(shapeToSave)) return;   // a stray tap shouldn't leave a mark behind
       edit({ ...data, ideaDrawings: [...(data.ideaDrawings || []), { id: uid(), folderId: openFolderId || null, ...shapeToSave }] });
     };
     window.addEventListener("mousemove", move);
@@ -3340,6 +3450,14 @@ function IdeaBank({ data, saveData, profile }) {
   };
 
   const eraseShape = (id) => edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => d.id !== id) });
+  // Specks from before the guard above existed, and specks somebody else's
+  // browser let through. A dot two pixels across is nearly impossible to hit
+  // with the eraser, so there has to be a way to sweep them up.
+  const specksHere = drawings.filter(isSpeck);
+  const sweepSpecks = () => {
+    const ids = new Set(specksHere.map((d) => d.id));
+    edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => !ids.has(d.id)) });
+  };
   const clearDrawings = () => edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId !== openFolderId : !!d.folderId)) });
 
   const renderShape = (s, key, isDraft) => {
@@ -3514,29 +3632,75 @@ function IdeaBank({ data, saveData, profile }) {
 
   // Every adjustment goes through here so it lands as one change per move of a
   // slider — which keeps undo meaning "put that back how it was".
+  // Only what has actually been moved is written down — the develop model has
+  // some two hundred numbers in it, and saving three hundred zeroes per picture
+  // would bloat every save of a board that holds fifty.
+  const setLookOn = (id, look) =>
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, look: trimEdit(fullEdit(look)) } : b)) });
+
   const applyLook = (patch) => {
     if (!pickedPhoto) return;
-    const next = { ...photoLook(pickedPhoto), ...patch };
-    // Nothing worth storing once it's all back at zero.
-    const clean = PHOTO_SLIDERS.some(({ key }) => next[key] !== PHOTO_DEFAULTS[key]) || next.spin ? next : null;
-    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === pickedPhoto.id ? { ...b, look: clean } : b)) });
+    setLookOn(pickedPhoto.id, { ...photoLook(pickedPhoto), ...patch });
   };
   const usePreset = (preset) => {
     if (!pickedPhoto) return;
-    const spin = photoLook(pickedPhoto).spin;   // turning it is framing, not a look
-    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === pickedPhoto.id ? { ...b, look: Object.keys(preset.look).length ? { ...PHOTO_DEFAULTS, ...preset.look, spin } : (spin ? { ...PHOTO_DEFAULTS, spin } : null) } : b)) });
+    // A preset replaces the look but never the framing: which way up a picture
+    // is, and which bit of it you chose, are decisions about this picture.
+    const now = photoLook(pickedPhoto);
+    setLookOn(pickedPhoto.id, {
+      ...fullEdit(preset.look),
+      spin: now.spin, straighten: now.straighten, flipH: now.flipH, flipV: now.flipV,
+      masks: now.masks,
+    });
   };
   const spinPhoto = () => {
     if (!pickedPhoto) return;
-    const look = { ...photoLook(pickedPhoto), spin: (photoLook(pickedPhoto).spin + 90) % 360 };
-    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === pickedPhoto.id ? { ...b, look } : b)) });
+    applyLook({ spin: (photoLook(pickedPhoto).spin + 90) % 360 });
   };
   // Lightroom's best trick: get one photo right, then put that look on the rest.
-  const copyLook = () => { if (pickedPhoto) setLookClip(photoLook(pickedPhoto)); };
+  const copyLook = (look) => setLookClip(look || trimEdit(photoLook(pickedPhoto)));
   const pasteLook = () => {
     if (!lookClip || !selection.length) return;
     const targets = new Set(selection.filter((sel) => sel.kind === "item").map((sel) => sel.id));
-    edit({ ...data, boardItems: allBoardItems.map((b) => (targets.has(b.id) && b.type === "image" ? { ...b, look: { ...lookClip, spin: photoLook(b).spin } } : b)) });
+    edit({
+      ...data,
+      boardItems: allBoardItems.map((b) => {
+        if (!targets.has(b.id) || b.type !== "image") return b;
+        const now = photoLook(b);
+        return {
+          ...b,
+          look: trimEdit({
+            ...fullEdit(lookClip),
+            spin: now.spin, straighten: now.straighten, flipH: now.flipH, flipV: now.flipV,
+          }),
+        };
+      }),
+    });
+  };
+
+  // The develop room saves the look and the crop together, because in there
+  // they are one decision — you frame while you are grading.
+  const saveDevelop = (id) => (look, crop, imgAspect) => {
+    edit({
+      ...data,
+      boardItems: allBoardItems.map((b) => (b.id === id
+        ? { ...b, look, crop, imgAspect: imgAspect || b.imgAspect }
+        : b)),
+    });
+    setDeveloping(null);
+  };
+
+  // "Save a copy to Drive": the developed pixels as a real file, for when the
+  // picture has to leave the board and go somewhere that can't read our numbers.
+  const exportDeveloped = (item) => async (blob) => {
+    const base = (item.name || "picture").replace(/\.[^.]+$/, "");
+    const file = new File([blob], `${base}-edited.jpg`, { type: "image/jpeg" });
+    const result = await uploadToDrive(file, () => {}, profile);
+    const box = boundsOf(item);
+    addBoardItem({
+      type: "image", fileId: driveFileId(result.link), kind: "image", name: result.name,
+      x: Math.round(box.x + 26), y: Math.round(box.y + 26), w: item.w || 260, z: topStack() + 1,
+    });
   };
 
   // One place for anything that sets a plain field on everything picked.
@@ -4168,6 +4332,11 @@ function IdeaBank({ data, saveData, profile }) {
   // picture goes full screen.
   const openBoardItem = (item) => () => {
     if (item.type === "text") { setEditingTextId(item.id); setEditingText(item.text || ""); live.signal({ kind: "write", itemId: item.id }); }
+    // A picture opens in the develop room rather than the lightbox: it is the
+    // bigger view of the two, and it is the only one that shows the photo as
+    // you have actually graded it. Video has nothing to develop, so it still
+    // goes to the lightbox.
+    else if (item.kind === "image" && rendererAvailable()) setDeveloping(item);
     else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
   };
 
@@ -4759,30 +4928,12 @@ function IdeaBank({ data, saveData, profile }) {
                 )}
                 {b.type === "image" ? (
                   <div style={{ position: "relative" }}>
-                    {b.crop ? (
-                      // The whole picture is still the thing being drawn; the
-                      // window in front of it decides how much shows. Height
-                      // comes from the crop's share of the picture, which is
-                      // why the picture's own proportions are remembered.
-                      <div style={{ position: "relative", width: "100%", paddingTop: `${(b.crop.h / b.crop.w) * (100 / (b.imgAspect || 1))}%`, overflow: "hidden", borderRadius: 8, boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}>
-                        <img
-                          src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
-                          alt={b.name || ""} draggable={false}
-                          style={{ position: "absolute", top: 0, left: 0, width: `${100 / b.crop.w}%`, maxWidth: "none", transform: `translate(${-b.crop.x * 100 / b.crop.w}%, ${-b.crop.y * 100 / b.crop.h}%)`, display: "block", filter: peeking && pickedPhoto && pickedPhoto.id === b.id ? "none" : photoFilter(b) }}
-                        />
-                      </div>
-                    ) : (
-                      <img
-                        src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
-                        alt={b.name || ""}
-                        draggable={false}
-                        style={{
-                          width: "100%", borderRadius: 8, display: "block", boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)",
-                          filter: peeking && pickedPhoto && pickedPhoto.id === b.id ? "none" : photoFilter(b),
-                          transform: photoLook(b).spin ? `rotate(${photoLook(b).spin}deg)` : undefined,
-                        }}
-                      />
-                    )}
+                    <BoardPhoto
+                      fileId={b.fileId} name={b.name} look={b.look} crop={b.crop}
+                      peek={peeking && pickedPhoto && pickedPhoto.id === b.id}
+                      onError={hideBrokenThumb}
+                      style={{ borderRadius: 8, boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}
+                    />
                     {b.kind !== "image" && (
                       <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
                         <span style={{ width: 44, height: 44, borderRadius: "50%", background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -5099,22 +5250,34 @@ function IdeaBank({ data, saveData, profile }) {
 
           {pickedPhoto && (
             <PanelSection title="Picture">
+              <button
+                className="btn"
+                style={{ ...PANEL_BTN, width: "100%", justifyContent: "center", marginBottom: 10, borderColor: "var(--gold)", color: "var(--gold)" }}
+                onClick={() => setDeveloping(pickedPhoto)}
+                title="Curves, colour mixing, grading, detail, geometry, masks — the lot"
+              ><Sliders size={11} /> Edit this picture…</button>
+              {hasLook(pickedPhoto) && (
+                <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 9, lineHeight: 1.4 }}>
+                  {editSummary(pickedPhoto.look)}
+                </div>
+              )}
               <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
                 {PHOTO_PRESETS.map((pre) => (
                   <button key={pre.id} className="btn" style={PANEL_BTN} onClick={() => usePreset(pre)}>{pre.label}</button>
                 ))}
               </div>
-              {PHOTO_SLIDERS.map(({ key, label, min, max }) => {
+              {PHOTO_SLIDERS.map(({ key, label, min, max, step }) => {
                 const value = photoLook(pickedPhoto)[key];
+                const shown = step < 1 ? Math.round(value * 100) / 100 : Math.round(value);
                 return (
                   <div key={key} style={{ marginBottom: 7 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>
-                      <span>{label}</span><span>{value > 0 ? "+" : ""}{value}</span>
+                      <span>{label}</span><span>{value > 0 && min < 0 ? "+" : ""}{shown}</span>
                     </div>
                     <input
-                      type="range" min={min} max={max} step="1" value={value}
+                      type="range" min={min} max={max} step={step} value={value}
                       onChange={(e) => applyLook({ [key]: Number(e.target.value) })}
-                      onDoubleClick={() => applyLook({ [key]: PHOTO_DEFAULTS[key] })}
+                      onDoubleClick={() => applyLook({ [key]: EDIT_DEFAULTS[key] })}
                       title="Double-click to put this one back"
                       style={{ width: "100%", accentColor: "var(--gold)" }}
                     />
@@ -5130,7 +5293,7 @@ function IdeaBank({ data, saveData, profile }) {
                   title="Hold to see it without the edit"
                   disabled={!hasLook(pickedPhoto)}
                 >Before</button>
-                <button className="btn" style={PANEL_BTN} onClick={copyLook} disabled={!hasLook(pickedPhoto)} title="Copy this look">Copy look</button>
+                <button className="btn" style={PANEL_BTN} onClick={() => copyLook()} disabled={!hasLook(pickedPhoto)} title="Copy this look">Copy look</button>
                 <button
                   className="btn" style={PANEL_BTN} onClick={() => removeBackgroundFrom(pickedPhoto)} disabled={!!cutting}
                   title="Cuts the subject out and puts the result beside the original"
@@ -5387,6 +5550,18 @@ function IdeaBank({ data, saveData, profile }) {
               <button className="btn" style={{ ...PANEL_BTN, width: "100%", justifyContent: "center" }} onClick={clearDrawings}>
                 Clear the drawing on this board
               </button>
+              {specksHere.length > 0 && (
+                // Only offered when there is something to sweep, so the board
+                // panel doesn't carry a button that usually does nothing.
+                <button
+                  className="btn"
+                  style={{ ...PANEL_BTN, width: "100%", justifyContent: "center", marginTop: 6 }}
+                  onClick={sweepSpecks}
+                  title="Stray dots too small to hit with the eraser"
+                >
+                  Sweep up {specksHere.length} speck{specksHere.length > 1 ? "s" : ""}
+                </button>
+              )}
             </PanelSection>
           )}
         </div>
@@ -5394,6 +5569,23 @@ function IdeaBank({ data, saveData, profile }) {
 
       {cropping && (
         <CropModal item={cropping} onCancel={() => setCropping(null)} onSave={saveCrop} />
+      )}
+
+      {developing && (
+        // The develop room works from the biggest preview Drive will give us
+        // rather than the board thumbnail — you cannot judge sharpening on an
+        // 800px copy, and the original bytes are never touched either way.
+        <PhotoEditor
+          src={driveThumbSrc(developing.fileId, "s1600")}
+          name={developing.name}
+          look={lookOf(developing)}
+          crop={developing.crop}
+          lookClip={lookClip}
+          onSave={saveDevelop(developing.id)}
+          onCopyLook={copyLook}
+          onExport={exportDeveloped(developing)}
+          onClose={() => setDeveloping(null)}
+        />
       )}
 
       {presenting !== null && (
