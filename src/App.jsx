@@ -11,7 +11,7 @@ import {
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
   Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
-  Minus, ArrowRight, Square, Circle, Triangle, Star, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, Scissors
+  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -212,24 +212,6 @@ const shapeBox = (s) => ({
   left: Math.min(s.x1, s.x2), top: Math.min(s.y1, s.y2),
   w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1),
 });
-
-const trianglePoints = (s) => {
-  const { left, top, w, h } = shapeBox(s);
-  return `${left + w / 2},${top} ${left + w},${top + h} ${left},${top + h}`;
-};
-
-// A five-pointed star inscribed in the box, starting at the top point.
-const starPoints = (s) => {
-  const { left, top, w, h } = shapeBox(s);
-  const cx = left + w / 2, cy = top + h / 2, rx = w / 2, ry = h / 2;
-  const pts = [];
-  for (let i = 0; i < 10; i++) {
-    const scale = i % 2 === 0 ? 1 : 0.4;
-    const angle = (Math.PI / 5) * i - Math.PI / 2;
-    pts.push(`${cx + Math.cos(angle) * rx * scale},${cy + Math.sin(angle) * ry * scale}`);
-  }
-  return pts.join(" ");
-};
 
 // Body plus a tail hanging off the bottom-left, the way a comment bubble reads.
 const bubblePath = (s) => {
@@ -3064,6 +3046,9 @@ function IdeaBank({ data, saveData, profile }) {
   const [exporting, setExporting] = useState("");
   const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
   const boardRef = useRef(null);
+  // Last place the pointer was over the board, so a paste lands there rather
+  // than always in the corner.
+  const pointerRef = useRef({ x: 60, y: 60 });
   const draftRef = useRef(null);
   const drawingMode = tool !== "move";
 
@@ -3188,10 +3173,6 @@ function IdeaBank({ data, saveData, profile }) {
       layer("rect", { x: b.left, y: b.top, width: b.w, height: b.h, rx: 4 });
     } else if (s.tool === "circle") {
       layer("ellipse", { cx: (s.x1 + s.x2) / 2, cy: (s.y1 + s.y2) / 2, rx: Math.abs(s.x2 - s.x1) / 2, ry: Math.abs(s.y2 - s.y1) / 2 });
-    } else if (s.tool === "triangle") {
-      layer("polygon", { points: trianglePoints(s) });
-    } else if (s.tool === "star") {
-      layer("polygon", { points: starPoints(s) });
     } else if (s.tool === "bubble") {
       layer("path", { d: bubblePath(s) });
     }
@@ -3207,15 +3188,13 @@ function IdeaBank({ data, saveData, profile }) {
     { id: "arrow", label: "Arrow", icon: ArrowRight },
     { id: "rect", label: "Box", icon: Square },
     { id: "circle", label: "Circle", icon: Circle },
-    { id: "triangle", label: "Triangle", icon: Triangle },
-    { id: "star", label: "Star", icon: Star },
     { id: "bubble", label: "Bubble", icon: MessageSquare },
     { id: "pin", label: "Comment", icon: MessageSquare },
     { id: "erase", label: "Erase", icon: Trash2 },
   ];
   // Which tools draw a shape that can be filled — a pen line and an arrow have
   // no inside to fill.
-  const FILLABLE = ["rect", "circle", "triangle", "star", "bubble"];
+  const FILLABLE = ["rect", "circle", "bubble"];
 
   // ---- loose pictures and text placed straight on the board ----
   // Separate from idea cards: these are for laying out a case — a wall of
@@ -3395,6 +3374,70 @@ function IdeaBank({ data, saveData, profile }) {
 
   // Copies of several things keep their arrangement relative to each other, and
   // stay grouped together as a new group if they were one.
+  // A clipboard of its own rather than the system one. What's being copied is
+  // a set of board records — position, style, crop, link, which Drive file —
+  // and none of that survives a trip through text/plain. Kept in localStorage
+  // so it lasts a reload and carries between folders and boards.
+  const CLIP_KEY = "ideabank-clipboard";
+  const readClipboard = () => {
+    try { const raw = localStorage.getItem(CLIP_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
+  };
+  const [clipHas, setClipHas] = useState(() => { const c = readClipboard(); return c ? c.count : 0; });
+
+  const copySelection = () => {
+    if (!selection.length) return;
+    const payload = { count: selection.length, groups: {} };
+    for (const kind of ["item", "idea", "folder", "shape"]) {
+      const mine = selection.filter((sel) => sel.kind === kind);
+      if (!mine.length) continue;
+      payload.groups[kind] = listFor(kind).filter((el) => mine.some((sel) => sel.id === el.id));
+    }
+    try { localStorage.setItem(CLIP_KEY, JSON.stringify(payload)); setClipHas(payload.count); } catch { /* full or blocked — copy simply doesn't take */ }
+  };
+
+  const cutSelection = () => { copySelection(); deleteSelected(); };
+
+  const pasteClipboard = () => {
+    const clip = readClipboard();
+    if (!clip || !clip.groups) return;
+    // Land where the pointer last was, keeping the copied things in the same
+    // arrangement relative to each other rather than stacking them all up.
+    let minX = Infinity, minY = Infinity;
+    const cornerOf = (el) => (el.points ? { x: Math.min(...el.points.filter((_, i) => i % 2 === 0)), y: Math.min(...el.points.filter((_, i) => i % 2 === 1)) }
+      : typeof el.x1 === "number" ? { x: Math.min(el.x1, el.x2), y: Math.min(el.y1, el.y2) }
+      : { x: el.x || 0, y: el.y || 0 });
+    for (const list of Object.values(clip.groups)) for (const el of list) { const c = cornerOf(el); minX = Math.min(minX, c.x); minY = Math.min(minY, c.y); }
+    if (!Number.isFinite(minX)) return;
+    // Not clamped to zero: the offset is often negative, because pasting to the
+    // left of what you copied is the normal case. The leftmost thing lands
+    // exactly on the pointer, which is already inside the board, so nothing can
+    // end up off the edge.
+    const dx = Math.round(pointerRef.current.x - minX);
+    const dy = Math.round(pointerRef.current.y - minY);
+
+    const next = { ...data };
+    const landed = [];
+    const newGroup = clip.count > 1 ? uid() : null;
+    const top = topStack();
+    let n = 0;
+    for (const [kind, list] of Object.entries(clip.groups)) {
+      const key = listKeyFor[kind];
+      const copies = list.map((el) => {
+        const copy = { ...el, id: uid(), folderId: openFolderId || null, z: top + 1 + n++ };
+        if (newGroup) copy.groupId = newGroup; else delete copy.groupId;
+        if (el.points) copy.points = el.points.map((v, i) => v + (i % 2 === 0 ? dx : dy));
+        else if (typeof el.x1 === "number") { copy.x1 = el.x1 + dx; copy.y1 = el.y1 + dy; copy.x2 = el.x2 + dx; copy.y2 = el.y2 + dy; }
+        else { copy.x = (el.x || 0) + dx; copy.y = (el.y || 0) + dy; }
+        if (kind === "idea") copy.votes = [];
+        landed.push({ kind, id: copy.id });
+        return copy;
+      });
+      next[key] = [...listFor(kind), ...copies];
+    }
+    edit(next);
+    setSelection(landed);
+  };
+
   const duplicateMany = () => {
     const nudge = 18;
     const newGroup = uid();
@@ -3622,6 +3665,9 @@ function IdeaBank({ data, saveData, profile }) {
       if (meta && ev.key.toLowerCase() === "z") { ev.preventDefault(); return ev.shiftKey ? redo() : undo(); }
       if (meta && ev.key.toLowerCase() === "y") { ev.preventDefault(); return redo(); }
       if (meta && ev.key.toLowerCase() === "d") { ev.preventDefault(); return duplicateSelected(); }
+      if (meta && ev.key.toLowerCase() === "c") { ev.preventDefault(); return copySelection(); }
+      if (meta && ev.key.toLowerCase() === "x") { ev.preventDefault(); return cutSelection(); }
+      if (meta && ev.key.toLowerCase() === "v") { ev.preventDefault(); return pasteClipboard(); }
       if (ev.key === "Delete" || ev.key === "Backspace") { if (selected) { ev.preventDefault(); deleteSelected(); } return; }
       if (meta && ev.key.toLowerCase() === "a") {
         ev.preventDefault();
@@ -3765,6 +3811,12 @@ function IdeaBank({ data, saveData, profile }) {
           className="btn" style={{ padding: "6px 10px", fontSize: 12 }}
           onClick={redo} disabled={historyDepth.future === 0} title="Redo (Ctrl+Shift+Z)"
         ><RotateCw size={13} /> Redo</button>
+        {clipHas > 0 && (
+          <button
+            className="btn" style={{ padding: "6px 10px", fontSize: 12 }}
+            onClick={pasteClipboard} title="Paste (Ctrl+V) — lands where your pointer is"
+          ><ClipboardPaste size={13} /> Paste{clipHas > 1 ? ` ${clipHas}` : ""}</button>
+        )}
         <span style={{ width: 1, height: 20, background: "var(--hair)", margin: "0 2px" }} />
         {TOOLS.map((t) => {
           const TIcon = t.icon;
@@ -3922,6 +3974,7 @@ function IdeaBank({ data, saveData, profile }) {
             <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={openSelected}><ExternalLink size={12} /> Open</button>
           )}
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={duplicateSelected} title="Duplicate (Ctrl+D)"><Copy size={12} /> Duplicate</button>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={copySelection} title="Copy (Ctrl+C)"><Copy size={12} /> Copy</button>
           {selection.length === 1 && selected.kind === "item" && (
             linkDraft === null ? (
               <button
@@ -3958,6 +4011,10 @@ function IdeaBank({ data, saveData, profile }) {
       <div style={{ position: "relative", width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}>
         <div
           ref={boardRef}
+          onMouseMove={(e) => {
+            const rect = boardRef.current && boardRef.current.getBoundingClientRect();
+            if (rect) pointerRef.current = { x: Math.round(e.clientX - rect.left), y: Math.round(e.clientY - rect.top) };
+          }}
           onMouseDown={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
           onTouchStart={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
           style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px", cursor: drawingMode && tool !== "erase" ? "crosshair" : "default", touchAction: drawingMode ? "none" : "auto" }}
