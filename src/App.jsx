@@ -2888,14 +2888,25 @@ function IdeaBank({ data, saveData, profile }) {
     const base = moved || data;
     edit({ ...base, ideas: (base.ideas || ideas).map((i) => (i.id === id ? { ...i, x, y } : i)) });
   };
-  // Opening happens on the second tap of something that is the only thing
-  // picked — with several picked, a tap is still about the selection.
-  const tapToOpen = (kind, id, ev, open) => {
-    if (selection.length === 1 && isPicked(kind, id) && !(ev && (ev.shiftKey || ev.ctrlKey || ev.metaKey))) return open();
-    pickElement(kind, id, ev);
+  // A single tap only ever picks something up. Opening is a double-click, or
+  // the Open button — never a second single click.
+  //
+  // It used to open on the second tap, which turned out to be dangerous rather
+  // than merely surprising: picking something up makes the toolbar appear, and
+  // while that toolbar pushed the board down, the second click of a
+  // double-click landed wherever the first row of buttons had just slid to.
+  // On a folder that was Delete. The toolbar no longer moves anything (it has
+  // a reserved row of its own below), and a second click no longer acts.
+  const tapToOpen = (kind, id, ev) => { pickElement(kind, id, ev); };
+  // Double-click opens, and picks the thing up first so the toolbar is showing
+  // the thing you just opened.
+  const openOnDouble = (kind, id, open) => (ev) => {
+    if (ev) ev.stopPropagation();
+    setSelected({ kind, id });
+    open();
   };
-  const folderDrag = useDraggable(saveFolderPos, (id, ev) => tapToOpen("folder", id, ev, () => setOpenFolderId(id)), onDragSignal);
-  const ideaDrag = useDraggable(saveIdeaPos, (id, ev) => tapToOpen("idea", id, ev, () => setOpenIdeaId(id)), onDragSignal);
+  const folderDrag = useDraggable(saveFolderPos, (id, ev) => tapToOpen("folder", id, ev), onDragSignal);
+  const ideaDrag = useDraggable(saveIdeaPos, (id, ev) => tapToOpen("idea", id, ev), onDragSignal);
 
   const addFolder = () => {
     if (!folderName.trim()) return;
@@ -3473,11 +3484,15 @@ function IdeaBank({ data, saveData, profile }) {
     const item = allBoardItems.find((b) => b.id === id);
     if (!item) return;
     if (tool === "erase") return removeBoardItem(id);
-    tapToOpen("item", id, ev, () => {
-      if (item.type === "text") { setEditingTextId(id); setEditingText(item.text || ""); live.signal({ kind: "write", itemId: id }); }
-      else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
-    });
+    tapToOpen("item", id, ev);
   }, onDragSignal);
+
+  // What "open" means depends on what it is: a text box starts editing, a
+  // picture goes full screen.
+  const openBoardItem = (item) => () => {
+    if (item.type === "text") { setEditingTextId(item.id); setEditingText(item.text || ""); live.signal({ kind: "write", itemId: item.id }); }
+    else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
+  };
 
   // A template drops into whatever you have open — the main board or a folder —
   // and adds to it rather than replacing it, so running one on a board with
@@ -3950,9 +3965,18 @@ function IdeaBank({ data, saveData, profile }) {
       </div>
 
       {/* A bar rather than a popover floating by the element: it can't fall off
-          the edge of a phone screen, and it doesn't cover what you just picked. */}
+          the edge of a phone screen, and it doesn't cover what you just picked.
+          Its row is always here, holding the hint when nothing is picked — an
+          empty row costs 40px, and the alternative was the board jumping down
+          the moment you picked something, which put Delete under the cursor
+          just in time for the second click of a double-click. */}
+      {!(selected && pickedElement()) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, padding: "7px 10px", background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 9, fontSize: 11.5, color: "var(--muted)", minHeight: 40, boxSizing: "border-box" }}>
+          Click something to pick it up · double-click to open it · Shift-click to pick several
+        </div>
+      )}
       {selected && pickedElement() && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "7px 10px", background: "var(--gold-soft)", border: "1px solid var(--gold)", borderRadius: 9 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "7px 10px", background: "var(--gold-soft)", border: "1px solid var(--gold)", borderRadius: 9, minHeight: 40, boxSizing: "border-box" }}>
           <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--gold)", marginRight: 2 }}>
             {selection.length > 1 ? `${selection.length} picked`
               : `${selected.kind === "idea" ? "Idea"
@@ -4003,8 +4027,10 @@ function IdeaBank({ data, saveData, profile }) {
           )}
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={bringToFront} title="Bring to front"><ChevronUp size={12} /> Front</button>
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={sendToBack} title="Send to back"><ChevronDown size={12} /> Back</button>
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, borderColor: "var(--alert)", color: "var(--alert)" }} onClick={deleteSelected} title="Delete (Del)"><Trash2 size={12} /> Delete</button>
+          {/* Pushed to the far end, away from the buttons people actually aim
+              for, since it's the one that can't be taken back by aiming again. */}
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, marginLeft: "auto" }} onClick={() => setSelected(null)}>Done</button>
+          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5, borderColor: "var(--alert)", color: "var(--alert)" }} onClick={deleteSelected} title="Delete (Del)"><Trash2 size={12} /> Delete</button>
         </div>
       )}
 
@@ -4042,6 +4068,7 @@ function IdeaBank({ data, saveData, profile }) {
                 key={b.id}
                 onMouseDown={(e) => { if (!drawingMode && !isEditing) boardItemDrag.startDrag(e, b.id, b.x, b.y); }}
                 onTouchStart={(e) => { if (!drawingMode && !isEditing) boardItemDrag.startDrag(e, b.id, b.x, b.y); }}
+                onDoubleClick={isEditing ? undefined : openOnDouble("item", b.id, openBoardItem(b))}
                 style={{
                   position: "absolute", left: pos.x, top: pos.y, width,
                   pointerEvents: drawingMode && tool !== "erase" ? "none" : "auto",
@@ -4233,6 +4260,7 @@ function IdeaBank({ data, saveData, profile }) {
                 key={f.id}
                 onMouseDown={(e) => { if (!drawingMode) folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0); }}
                 onTouchStart={(e) => { if (!drawingMode) folderDrag.startDrag(e, f.id, f.x || 0, f.y || 0); }}
+                onDoubleClick={openOnDouble("folder", f.id, () => setOpenFolderId(f.id))}
                 style={{ position: "absolute", left: pos.x, top: pos.y, width: 116, cursor: "grab", userSelect: "none", touchAction: "none", pointerEvents: drawingMode ? "none" : "auto", textAlign: "center", zIndex: 2 + stackOf(f), ...pickedRing("folder", f.id) }}
               >
                 <div style={{ width: 62, height: 50, margin: "0 auto 6px", borderRadius: 8, background: f.color || IDEA_COLORS[0], display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 10px rgba(0,0,0,0.35)" }}>
@@ -4251,6 +4279,7 @@ function IdeaBank({ data, saveData, profile }) {
                 key={i.id}
                 onMouseDown={(e) => { if (!drawingMode) ideaDrag.startDrag(e, i.id, i.x, i.y); }}
                 onTouchStart={(e) => { if (!drawingMode) ideaDrag.startDrag(e, i.id, i.x, i.y); }}
+                onDoubleClick={openOnDouble("idea", i.id, () => setOpenIdeaId(i.id))}
                 style={{ position: "absolute", left: pos.x, top: pos.y, width: 152, minHeight: 88, pointerEvents: drawingMode ? "none" : "auto", background: i.color, borderRadius: 8, padding: "10px 11px", boxShadow: "0 4px 10px rgba(0,0,0,0.35)", cursor: "grab", userSelect: "none", touchAction: "none", zIndex: 2 + stackOf(i), ...pickedRing("idea", i.id) }}
               >
                 {i.attachments && i.attachments.length > 0 && (
