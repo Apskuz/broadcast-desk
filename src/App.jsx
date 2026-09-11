@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { mergeState, deepEqual } from "./syncState";
 import { useLiveBoard } from "./livePresence";
+import Analytics, { AnalyticsIcon } from "./Analytics";
 // Only pulled in when someone actually exports, so the 200KB doesn't sit in
 // the bundle everyone downloads just to look at the board.
 const loadHtml2Canvas = () => import("html2canvas").then((m) => m.default || m);
@@ -39,7 +40,7 @@ function useDebouncedCallback(callback, delay) {
 // onDragMove, if given, is called with every position while the drag is live
 // and with null when it ends. Nothing is saved from it — it exists so other
 // people's screens can show the thing moving as it moves.
-function useDraggable(onDragEnd, onClick, onDragMove) {
+function useDraggable(onDragEnd, onClick, onDragMove, getScale) {
   const [dragging, setDragging] = useState(null); // { id, x, y }
   const posRef = useRef(null);
   const movedRef = useRef(false);
@@ -64,10 +65,15 @@ function useDraggable(onDragEnd, onClick, onDragMove) {
 
     const move = (ev) => {
       const p = ev.touches ? ev.touches[0] : ev;
-      const dx = p.clientX - startX;
-      const dy = p.clientY - startY;
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) movedRef.current = true;
-      const next = { id, x: Math.max(0, origX + dx), y: Math.max(0, origY + dy) };
+      // Once the board can be zoomed, a hundred pixels of mouse movement is no
+      // longer a hundred pixels of board. Everything stored is in board
+      // coordinates, so the screen distance is divided back down here — one
+      // place, rather than at every call site.
+      const scale = getScale ? getScale() || 1 : 1;
+      const dx = (p.clientX - startX) / scale;
+      const dy = (p.clientY - startY) / scale;
+      if (Math.abs(dx * scale) > 4 || Math.abs(dy * scale) > 4) movedRef.current = true;
+      const next = { id, x: Math.max(0, Math.round(origX + dx)), y: Math.max(0, Math.round(origY + dy)) };
       posRef.current = next;
       setDragging(next);
       if (onDragMove) onDragMove({ id, x: next.x, y: next.y, ...(size || {}) });
@@ -2982,8 +2988,9 @@ function IdeaBank({ data, saveData, profile }) {
     setSelected({ kind, id });
     open();
   };
-  const folderDrag = useDraggable(saveFolderPos, (id, ev) => tapToOpen("folder", id, ev), onDragSignal);
-  const ideaDrag = useDraggable(saveIdeaPos, (id, ev) => tapToOpen("idea", id, ev), onDragSignal);
+  const getZoom = () => zoomRef.current;
+  const folderDrag = useDraggable(saveFolderPos, (id, ev) => tapToOpen("folder", id, ev), onDragSignal, getZoom);
+  const ideaDrag = useDraggable(saveIdeaPos, (id, ev) => tapToOpen("idea", id, ev), onDragSignal, getZoom);
 
   const addFolder = () => {
     if (!folderName.trim()) return;
@@ -3131,6 +3138,12 @@ function IdeaBank({ data, saveData, profile }) {
   const [cropping, setCropping] = useState(null);   // the picture being reframed
   const [openPinId, setOpenPinId] = useState(null); // the pin whose thread is showing
   const [peeking, setPeeking] = useState(false);    // holding the before/after button
+  // Panning is the scroll container doing its job — there's no second set of
+  // coordinates to keep in step, and the scrollbars say where you are.
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
+  const scrollRef = useRef(null);
   const [lookClip, setLookClip] = useState(null);   // a copied look, waiting to be pasted
   const [pinDraft, setPinDraft] = useState("");
   const [exporting, setExporting] = useState("");
@@ -3142,10 +3155,15 @@ function IdeaBank({ data, saveData, profile }) {
   const draftRef = useRef(null);
   const drawingMode = tool !== "move";
 
+  // The board's rect is its on-screen size, so at 2x a point halfway across the
+  // screen is a quarter of the way across the board. Divide it back.
   const pointOn = (e) => {
     const rect = boardRef.current.getBoundingClientRect();
     const p = e.touches ? e.touches[0] : e;
-    return { x: Math.round(p.clientX - rect.left), y: Math.round(p.clientY - rect.top) };
+    return {
+      x: Math.round((p.clientX - rect.left) / zoomRef.current),
+      y: Math.round((p.clientY - rect.top) / zoomRef.current),
+    };
   };
 
   const startDraw = (e) => {
@@ -3505,6 +3523,32 @@ function IdeaBank({ data, saveData, profile }) {
     if (next) edit(next);
   };
 
+  const ZOOM_STEPS = [0.25, 0.4, 0.55, 0.75, 1, 1.25, 1.5, 2, 3];
+  // Keeps whatever is in the middle of the view in the middle afterwards,
+  // rather than throwing you to the top-left corner every time.
+  const zoomTo = (next) => {
+    const target = Math.max(0.25, Math.min(3, next));
+    const box = scrollRef.current;
+    if (!box) return setZoom(target);
+    const midX = (box.scrollLeft + box.clientWidth / 2) / zoomRef.current;
+    const midY = (box.scrollTop + box.clientHeight / 2) / zoomRef.current;
+    setZoom(target);
+    requestAnimationFrame(() => {
+      if (!scrollRef.current) return;
+      scrollRef.current.scrollLeft = midX * target - box.clientWidth / 2;
+      scrollRef.current.scrollTop = midY * target - box.clientHeight / 2;
+    });
+  };
+  const zoomStep = (dir) => {
+    const i = ZOOM_STEPS.findIndex((z) => z >= zoomRef.current - 0.001);
+    zoomTo(ZOOM_STEPS[Math.max(0, Math.min(ZOOM_STEPS.length - 1, (i < 0 ? 4 : i) + dir))]);
+  };
+  const zoomToFit = () => {
+    const box = scrollRef.current;
+    if (!box) return;
+    zoomTo(Math.min(1, (box.clientWidth - 8) / BOARD_W));
+  };
+
   const saveCrop = (crop, imgAspect) => {
     if (!cropping) return;
     edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === cropping.id ? { ...b, crop, imgAspect: imgAspect || b.imgAspect } : b)) });
@@ -3701,7 +3745,7 @@ function IdeaBank({ data, saveData, profile }) {
     if (!item) return;
     if (tool === "erase") return removeBoardItem(id);
     tapToOpen("item", id, ev);
-  }, onDragSignal);
+  }, onDragSignal, getZoom);
 
   // What "open" means depends on what it is: a text box starts editing, a
   // picture goes full screen.
@@ -3965,7 +4009,7 @@ function IdeaBank({ data, saveData, profile }) {
     let latest = startW;
     const move = (ev) => {
       const q = ev.touches ? ev.touches[0] : ev;
-      latest = Math.max(80, Math.min(900, Math.round(startW + (q.clientX - startX))));
+      latest = Math.max(80, Math.min(900, Math.round(startW + (q.clientX - startX) / zoomRef.current)));
       setResizing({ id: item.id, w: latest });
     };
     const end = () => {
@@ -4048,6 +4092,15 @@ function IdeaBank({ data, saveData, profile }) {
           className="btn" style={{ padding: "6px 10px", fontSize: 12 }}
           onClick={redo} disabled={historyDepth.future === 0} title="Redo (Ctrl+Shift+Z)"
         ><RotateCw size={13} /> Redo</button>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, marginRight: 2 }}>
+          <button className="btn" style={{ padding: "6px 9px", fontSize: 12 }} onClick={() => zoomStep(-1)} title="Zoom out (Ctrl+scroll)"><Minus size={13} /></button>
+          <button
+            className="btn" style={{ padding: "6px 8px", fontSize: 11, minWidth: 48 }}
+            onClick={() => zoomTo(1)} title="Back to actual size"
+          >{Math.round(zoom * 100)}%</button>
+          <button className="btn" style={{ padding: "6px 9px", fontSize: 12 }} onClick={() => zoomStep(1)} title="Zoom in (Ctrl+scroll)"><Plus size={13} /></button>
+          <button className="btn" style={{ padding: "6px 9px", fontSize: 11 }} onClick={zoomToFit} title="Fit the whole board">Fit</button>
+        </span>
         {clipHas > 0 && (
           <button
             className="btn" style={{ padding: "6px 10px", fontSize: 12 }}
@@ -4086,16 +4139,30 @@ function IdeaBank({ data, saveData, profile }) {
           something up never moves the board — that shift is what once put
           Delete under a double-click. */}
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexDirection: isNarrow ? "column" : "row" }}>
-        <div style={{ position: "relative", flex: "1 1 auto", minWidth: 0, width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}>
+        <div
+          ref={scrollRef}
+          onWheel={(e) => {
+            // Ctrl+wheel is the zoom gesture everywhere else, and it's what a
+            // trackpad pinch arrives as. Plain wheel still scrolls.
+            if (!(e.ctrlKey || e.metaKey)) return;
+            e.preventDefault();
+            zoomTo(zoomRef.current * (e.deltaY < 0 ? 1.12 : 0.89));
+          }}
+          style={{ position: "relative", flex: "1 1 auto", minWidth: 0, width: "100%", overflow: "auto", border: "1px solid var(--hair)", borderRadius: 12, background: "var(--panel)" }}
+        >
+        {/* A shim at the zoomed size, because a transform doesn't change how
+            much room something takes up — without it the scrollbars would still
+            think the board was its original size. */}
+        <div style={{ width: BOARD_W * zoom, height: BOARD_H * zoom, position: "relative" }}>
         <div
           ref={boardRef}
           onMouseMove={(e) => {
             const rect = boardRef.current && boardRef.current.getBoundingClientRect();
-            if (rect) pointerRef.current = { x: Math.round(e.clientX - rect.left), y: Math.round(e.clientY - rect.top) };
+            if (rect) pointerRef.current = { x: Math.round((e.clientX - rect.left) / zoomRef.current), y: Math.round((e.clientY - rect.top) / zoomRef.current) };
           }}
           onMouseDown={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
           onTouchStart={(e) => { if (e.target === e.currentTarget) setSelected(null); startDraw(e); }}
-          style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px", cursor: drawingMode && tool !== "erase" ? "crosshair" : "default", touchAction: drawingMode ? "none" : "auto" }}
+          style={{ position: "relative", width: BOARD_W, height: BOARD_H, backgroundImage: "radial-gradient(rgba(237,235,227,0.06) 1px, transparent 1px)", backgroundSize: "22px 22px", cursor: drawingMode && tool !== "erase" ? "crosshair" : "default", touchAction: drawingMode ? "none" : "auto", transform: zoom === 1 ? undefined : `scale(${zoom})`, transformOrigin: "0 0" }}
         >
           <svg
             width={BOARD_W}
@@ -4378,6 +4445,7 @@ function IdeaBank({ data, saveData, profile }) {
               Nothing in this folder yet.
             </div>
           )}
+        </div>
         </div>
         </div>
         {/* ---- properties panel: only ever shows controls for what's picked ---- */}
@@ -6699,6 +6767,7 @@ const NAV = [
   { id: "approved", label: "Approved", icon: CheckCircle2 },
   { id: "ideas", label: "Idea Bank", icon: Lightbulb },
   { id: "guidelines", label: "Guidelines", icon: BookOpen },
+  { id: "analytics", label: "Analytics", icon: AnalyticsIcon },
   { id: "team", label: "Team", icon: Shield },
 ];
 
@@ -7071,6 +7140,7 @@ export default function TeamHub() {
     approved: <ApprovedQueue data={data} saveData={saveData} profile={profile} />,
     ideas: <IdeaBank data={data} saveData={saveData} profile={profile} />,
     guidelines: <Guidelines data={data} saveData={saveData} profile={profile} />,
+    analytics: <Analytics profile={profile} />,
     team: <TeamManage data={data} saveData={saveData} />,
   }[view];
 
