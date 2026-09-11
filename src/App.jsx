@@ -3,6 +3,9 @@ import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { mergeState, deepEqual } from "./syncState";
 import { useLiveBoard } from "./livePresence";
+// Only pulled in when someone actually exports, so the 200KB doesn't sit in
+// the bundle everyone downloads just to look at the board.
+const loadHtml2Canvas = () => import("html2canvas").then((m) => m.default || m);
 import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
@@ -118,6 +121,69 @@ const BOARD_FONTS = [
 const fontStack = (id) => (BOARD_FONTS.find((f) => f.id === id) || BOARD_FONTS[0]).stack;
 const TEXT_SIZES = [13, 16, 22, 30, 44];
 const TEXT_DEFAULTS = { fontSize: 15, font: "sans", align: "left", bold: false, italic: false };
+
+// Starter layouts. Each returns plain board items and shapes — nothing a
+// person couldn't have placed by hand — so a template can be rearranged,
+// restyled and undone like anything else rather than being a special object
+// with its own rules.
+const heading = (text, x, y, size = 30) => ({ type: "text", x, y, w: 320, text, font: "poster", fontSize: size, color: "#EDEBE3", align: "left" });
+const note = (text, x, y, bg) => ({ type: "text", x, y, w: 170, text, bg, color: "#22232b", font: "hand", fontSize: 17, align: "left" });
+const label = (text, x, y) => ({ type: "text", x, y, w: 200, text, font: "sans", fontSize: 16, bold: true, color: "#EDEBE3", align: "left" });
+const frame = (x, y, w, h, color) => ({ tool: "rect", x1: x, y1: y, x2: x + w, y2: y + h, color, width: 2, fill: "none", opacity: 0.9 });
+
+const BOARD_TEMPLATES = [
+  {
+    id: "mood", name: "Mood board", blurb: "Three panels to drop reference shots into, with room for notes.",
+    build: () => ({
+      items: [
+        heading("MOOD", 40, 30),
+        label("Look", 60, 110), label("Colour", 500, 110), label("Type", 940, 110),
+        note("What feeling are we after?", 60, 470, IDEA_COLORS[0]),
+        note("What are we avoiding?", 260, 470, IDEA_COLORS[2]),
+      ],
+      shapes: [frame(50, 140, 400, 300, IDEA_COLORS[4]), frame(490, 140, 400, 300, IDEA_COLORS[5]), frame(930, 140, 400, 300, IDEA_COLORS[3])],
+    }),
+  },
+  {
+    id: "storyboard", name: "Storyboard", blurb: "Six frames in a row of three, each with a line for the beat.",
+    build: () => {
+      const items = [heading("STORYBOARD", 40, 30)];
+      const shapes = [];
+      for (let i = 0; i < 6; i++) {
+        const x = 50 + (i % 3) * 440, y = 120 + Math.floor(i / 3) * 350;
+        shapes.push(frame(x, y, 400, 225, IDEA_COLORS[4]));
+        items.push({ type: "text", x, y: y + 235, w: 400, text: `${i + 1}. `, font: "sans", fontSize: 15, color: "#EDEBE3", align: "left" });
+      }
+      return { items, shapes };
+    },
+  },
+  {
+    id: "campaign", name: "Campaign plan", blurb: "Idea to posted, as four columns you move notes across.",
+    build: () => {
+      const cols = ["IDEA", "SHOOT", "EDIT", "POST"];
+      const items = [heading("CAMPAIGN", 40, 30)];
+      const shapes = [];
+      cols.forEach((c, i) => {
+        const x = 50 + i * 330;
+        items.push(label(c, x + 12, 115));
+        shapes.push(frame(x, 105, 300, 680, IDEA_COLORS[i % IDEA_COLORS.length]));
+      });
+      items.push(note("Drag notes across as they move along", 62, 160, IDEA_COLORS[0]));
+      return { items, shapes };
+    },
+  },
+  {
+    id: "shotlist", name: "Shot list", blurb: "A numbered column to fill in before a shoot day.",
+    build: () => {
+      const items = [heading("SHOT LIST", 40, 30), label("Shot", 60, 110), label("Who / where", 420, 110)];
+      for (let i = 0; i < 6; i++) {
+        items.push(note(`${i + 1}.`, 60, 150 + i * 105, IDEA_COLORS[i % IDEA_COLORS.length]));
+        items.push({ type: "text", x: 420, y: 160 + i * 105, w: 300, text: "", font: "sans", fontSize: 15, color: "#EDEBE3", align: "left" });
+      }
+      return { items, shapes: [] };
+    },
+  },
+];
 
 // Everything a text box needs to look the same while you're editing it as it
 // does when you're done — used by both the textarea and the finished box, so
@@ -2933,6 +2999,8 @@ function IdeaBank({ data, saveData, profile }) {
   const [textBold, setTextBold] = useState(false);
   const [textItalic, setTextItalic] = useState(false);
   const [textAlign, setTextAlign] = useState(TEXT_DEFAULTS.align);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [exporting, setExporting] = useState("");
   const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
   const boardRef = useRef(null);
   const draftRef = useRef(null);
@@ -3203,6 +3271,64 @@ function IdeaBank({ data, saveData, profile }) {
     else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
   }, onDragSignal);
 
+  // A template drops into whatever you have open — the main board or a folder —
+  // and adds to it rather than replacing it, so running one on a board with
+  // work already on it can't destroy anything. Undo takes the whole thing back
+  // in one step, because it goes in as a single change.
+  const applyTemplate = (template) => {
+    const { items, shapes } = template.build();
+    const base = topStack();
+    edit({
+      ...data,
+      boardItems: [...allBoardItems, ...items.map((it, i) => ({ ...it, id: uid(), folderId: openFolderId || null, z: base + 1 + i }))],
+      ideaDrawings: [...(data.ideaDrawings || []), ...shapes.map((sh) => ({ ...sh, id: uid(), folderId: openFolderId || null }))],
+    });
+    setShowTemplates(false);
+    setSelected(null);
+  };
+
+  // Export renders the board element itself rather than redrawing it from the
+  // saved data, so what lands in the picture is exactly what's on screen —
+  // fonts, photos, strokes and all — with nothing to keep in sync.
+  const exportBoard = async (mode) => {
+    if (!boardRef.current) return;
+    setSelected(null);            // no gold ring in the exported picture
+    setExporting(mode);
+    try {
+      const html2canvas = await loadHtml2Canvas();
+      await new Promise((r) => setTimeout(r, 60));   // let the ring clear first
+      const canvas = await html2canvas(boardRef.current, {
+        backgroundColor: "#12141B",
+        scale: 2,                 // readable when zoomed into, still a sane size
+        useCORS: true,
+        logging: false,
+        width: BOARD_W, height: BOARD_H, windowWidth: BOARD_W, windowHeight: BOARD_H,
+      });
+      const name = `${currentFolder ? currentFolder.name : "idea-board"}-${todayISO()}`;
+      if (mode === "png") {
+        const link = document.createElement("a");
+        link.download = `${name}.png`;
+        link.href = canvas.toDataURL("image/png");
+        link.click();
+      } else {
+        // No PDF library: hand the picture to the browser's own print dialog,
+        // where "Save as PDF" is a destination on every platform including
+        // phones. One less dependency to keep alive for a button used rarely.
+        const win = window.open("", "_blank");
+        if (!win) { setExporting(""); return; }
+        win.document.write(
+          `<title>${name}</title><style>@page{size:landscape;margin:10mm}body{margin:0}img{width:100%}</style>` +
+          `<img src="${canvas.toDataURL("image/png")}" onload="window.focus();window.print()">`
+        );
+        win.document.close();
+      }
+    } catch {
+      // Nothing partial is left behind — the button simply does nothing and
+      // can be pressed again.
+    }
+    setExporting("");
+  };
+
   const addBoardItem = (item) => {
     const created = { id: uid(), folderId: openFolderId || null, ...item };
     edit({ ...data, boardItems: [...allBoardItems, created] });
@@ -3343,6 +3469,13 @@ function IdeaBank({ data, saveData, profile }) {
           ) : (
             <button className="btn" onClick={() => setShowFolderForm(true)}><Folder size={15} /> New folder</button>
           )}
+          <button className="btn" onClick={() => setShowTemplates(true)}><Layers size={15} /> Templates</button>
+          <button className="btn" onClick={() => exportBoard("png")} disabled={!!exporting}>
+            <Upload size={15} /> {exporting === "png" ? "Saving…" : "PNG"}
+          </button>
+          <button className="btn" onClick={() => exportBoard("print")} disabled={!!exporting}>
+            <BookOpen size={15} /> {exporting === "print" ? "Preparing…" : "PDF"}
+          </button>
           <button className="btn btn-gold" onClick={() => { setForm((f) => ({ ...f, color: IDEA_COLORS[boardIdeas.length % IDEA_COLORS.length] })); setShowForm(true); live.signal({ kind: "write", label: "writing a new idea" }); }}><Plus size={15} /> Add idea</button>
         </div>
       </div>
@@ -3726,18 +3859,37 @@ function IdeaBank({ data, saveData, profile }) {
             );
           })}
 
-          {!currentFolder && folders.length === 0 && boardIdeas.length === 0 && (
+          {!currentFolder && folders.length === 0 && boardIdeas.length === 0 && boardItems.length === 0 && drawings.length === 0 && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 13, padding: 20, textAlign: "center" }}>
               Nothing here yet — add an idea or a folder to get started.
             </div>
           )}
-          {currentFolder && boardIdeas.length === 0 && (
+          {currentFolder && boardIdeas.length === 0 && boardItems.length === 0 && drawings.length === 0 && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 13 }}>
               Nothing in this folder yet.
             </div>
           )}
         </div>
       </div>
+
+      {showTemplates && (
+        <Modal title="Start from a template" onClose={() => setShowTemplates(false)}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Adds a starting layout to {currentFolder ? `"${currentFolder.name}"` : "this board"} — it only ever adds, so
+            nothing already here is touched, and Undo takes the whole thing back in one go.
+          </div>
+          {BOARD_TEMPLATES.map((t) => (
+            <button
+              key={t.id} onClick={() => applyTemplate(t)}
+              style={{ display: "block", width: "100%", textAlign: "left", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 9, padding: "11px 13px", marginBottom: 9, cursor: "pointer" }}
+            >
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", marginBottom: 3 }}>{t.name}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45 }}>{t.blurb}</div>
+            </button>
+          ))}
+          <div className="modal-actions"><button className="btn" onClick={() => setShowTemplates(false)}>Cancel</button></div>
+        </Modal>
+      )}
 
       {showFolderForm && (
         <Modal title="New folder" onClose={() => setShowFolderForm(false)}>
