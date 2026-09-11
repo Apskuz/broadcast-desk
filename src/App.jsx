@@ -82,8 +82,8 @@ function useDraggable(onDragEnd, onClick, onDragMove) {
     };
     const end = () => {
       detach();
-      if (movedRef.current && posRef.current) onDragEnd(posRef.current.id, posRef.current.x, posRef.current.y);
-      else if (!movedRef.current && onClick) onClick(id);
+      if (movedRef.current && posRef.current) onDragEnd(posRef.current.id, posRef.current.x, posRef.current.y, posRef.current.x - origX, posRef.current.y - origY);
+      else if (!movedRef.current && onClick) onClick(id, e);
       posRef.current = null;
       setDragging(null);
       if (onDragMove) onDragMove(null);
@@ -2829,8 +2829,40 @@ function IdeaBank({ data, saveData, profile }) {
 
   // What's picked, so the toolbar knows what it's acting on. One at a time —
   // multi-select is a bigger job and isn't in this batch.
-  const [selected, setSelected] = useState(null); // { kind: "item" | "idea" | "folder", id }
-  const isPicked = (kind, id) => !!selected && selected.kind === kind && selected.id === id;
+  // A list rather than one thing. Everything written before multi-select acts
+  // on the first entry, so `selected` and `setSelected` still mean what they
+  // did and only the actions that genuinely work on many had to learn about it.
+  const [selection, setSelection] = useState([]); // [{ kind, id }]
+  const selected = selection[0] || null;
+  const setSelected = (one) => setSelection(one ? [one] : []);
+  const isPicked = (kind, id) => selection.some((sel) => sel.kind === kind && sel.id === id);
+
+  // Grouped things are picked together: that's the whole point of grouping.
+  const groupMatesOf = (kind, id) => {
+    const el = listFor(kind).find((x) => x.id === id);
+    if (!el || !el.groupId) return [{ kind, id }];
+    const mates = [];
+    for (const k of ["item", "idea", "folder", "shape"]) {
+      for (const x of listFor(k)) if (x.groupId === el.groupId) mates.push({ kind: k, id: x.id });
+    }
+    return mates.length ? mates : [{ kind, id }];
+  };
+
+  // Tap replaces the selection; tap with Shift or Ctrl adds to it or takes it
+  // back out, which is the gesture everything else on a computer uses.
+  const pickElement = (kind, id, ev) => {
+    const additive = ev && (ev.shiftKey || ev.ctrlKey || ev.metaKey);
+    const mates = groupMatesOf(kind, id);
+    setSelection((current) => {
+      if (!additive) return mates;
+      const alreadyIn = current.some((sel) => sel.kind === kind && sel.id === id);
+      if (alreadyIn) return current.filter((sel) => !mates.some((m) => m.kind === sel.kind && m.id === sel.id));
+      const merged = [...current];
+      for (const m of mates) if (!merged.some((sel) => sel.kind === m.kind && sel.id === m.id)) merged.push(m);
+      return merged;
+    });
+    return true;
+  };
   // Drawn outside the element's own box so it never covers the content, and
   // via outline rather than border so nothing shifts by 2px when picked.
   const pickedRing = (kind, id) => (isPicked(kind, id)
@@ -2864,10 +2896,24 @@ function IdeaBank({ data, saveData, profile }) {
   const boardIdeas = positioned.filter((i) => (openFolderId ? i.folderId === openFolderId : !i.folderId));
   const currentFolder = openFolderId ? folders.find((f) => f.id === openFolderId) : null;
 
-  const saveFolderPos = (id, x, y) => edit({ ...data, ideaFolders: folders.map((f) => (f.id === id ? { ...f, x, y } : f)) });
-  const saveIdeaPos = (id, x, y) => edit({ ...data, ideas: ideas.map((i) => (i.id === id ? { ...i, x, y } : i)) });
-  const folderDrag = useDraggable(saveFolderPos, (id) => (isPicked("folder", id) ? setOpenFolderId(id) : setSelected({ kind: "folder", id })), onDragSignal);
-  const ideaDrag = useDraggable(saveIdeaPos, (id) => (isPicked("idea", id) ? setOpenIdeaId(id) : setSelected({ kind: "idea", id })), onDragSignal);
+  const saveFolderPos = (id, x, y, dx, dy) => {
+    const moved = dragSelectionBy("folder", id, dx || 0, dy || 0);
+    const base = moved || data;
+    edit({ ...base, ideaFolders: (base.ideaFolders || folders).map((f) => (f.id === id ? { ...f, x, y } : f)) });
+  };
+  const saveIdeaPos = (id, x, y, dx, dy) => {
+    const moved = dragSelectionBy("idea", id, dx || 0, dy || 0);
+    const base = moved || data;
+    edit({ ...base, ideas: (base.ideas || ideas).map((i) => (i.id === id ? { ...i, x, y } : i)) });
+  };
+  // Opening happens on the second tap of something that is the only thing
+  // picked — with several picked, a tap is still about the selection.
+  const tapToOpen = (kind, id, ev, open) => {
+    if (selection.length === 1 && isPicked(kind, id) && !(ev && (ev.shiftKey || ev.ctrlKey || ev.metaKey))) return open();
+    pickElement(kind, id, ev);
+  };
+  const folderDrag = useDraggable(saveFolderPos, (id, ev) => tapToOpen("folder", id, ev, () => setOpenFolderId(id)), onDragSignal);
+  const ideaDrag = useDraggable(saveIdeaPos, (id, ev) => tapToOpen("idea", id, ev, () => setOpenIdeaId(id)), onDragSignal);
 
   const addFolder = () => {
     if (!folderName.trim()) return;
@@ -3013,6 +3059,8 @@ function IdeaBank({ data, saveData, profile }) {
   const [showStickers, setShowStickers] = useState(false);
   const [linkDraft, setLinkDraft] = useState(null); // the url being typed, or null
   const [cropping, setCropping] = useState(null);   // the picture being reframed
+  const [openPinId, setOpenPinId] = useState(null); // the pin whose thread is showing
+  const [pinDraft, setPinDraft] = useState("");
   const [exporting, setExporting] = useState("");
   const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
   const boardRef = useRef(null);
@@ -3029,6 +3077,7 @@ function IdeaBank({ data, saveData, profile }) {
     if (!drawingMode || tool === "erase") return;
     e.preventDefault();
     const { x, y } = pointOn(e);
+    if (tool === "pin") { addPin(x, y); return; }
     if (tool === "text" || tool === "note") {
       // A sticky note is a text box with a background — same dragging, same
       // editing, same everything, so it doesn't need a type of its own.
@@ -3108,7 +3157,7 @@ function IdeaBank({ data, saveData, profile }) {
     // something anybody can hit with a finger.
     const hit = isDraft ? null
       : tool === "erase" ? { stroke: "transparent", strokeWidth: Math.max(18, width + 14), fill: "none", style: { cursor: "pointer", pointerEvents: "stroke" }, onClick: () => eraseShape(s.id) }
-      : tool === "move" ? { stroke: "transparent", strokeWidth: Math.max(18, width + 14), fill: "none", style: { cursor: "pointer", pointerEvents: "stroke" }, onClick: (ev) => { ev.stopPropagation(); setSelected({ kind: "shape", id: s.id }); } }
+      : tool === "move" ? { stroke: "transparent", strokeWidth: Math.max(18, width + 14), fill: "none", style: { cursor: "pointer", pointerEvents: "stroke" }, onClick: (ev) => { ev.stopPropagation(); pickElement("shape", s.id, ev); } }
       : null;
     // A halo rather than a colour change, so what's picked is obvious without
     // hiding what the shape actually looks like.
@@ -3161,6 +3210,7 @@ function IdeaBank({ data, saveData, profile }) {
     { id: "triangle", label: "Triangle", icon: Triangle },
     { id: "star", label: "Star", icon: Star },
     { id: "bubble", label: "Bubble", icon: MessageSquare },
+    { id: "pin", label: "Comment", icon: MessageSquare },
     { id: "erase", label: "Erase", icon: Trash2 },
   ];
   // Which tools draw a shape that can be filled — a pen line and an arrow have
@@ -3202,8 +3252,55 @@ function IdeaBank({ data, saveData, profile }) {
   // ever relative to each other — front and back mean something different
   // there than they do for a picture.
   const stackPeers = () => (selected && selected.kind === "shape" ? (data.ideaDrawings || []) : allPlaced());
-  const bringToFront = () => restack(stackPeers().reduce((m, el) => Math.max(m, stackOf(el)), 0) + 1);
-  const sendToBack = () => restack(stackPeers().reduce((m, el) => Math.min(m, stackOf(el)), 0) - 1);
+  const bringToFront = () => restackAll(1);
+  const sendToBack = () => restackAll(-1);
+
+  // Applies one change across every list the selection touches, in a single
+  // save — so ten things moving to the front is one step to undo, not ten.
+  const changeSelection = (transform) => {
+    if (!selection.length) return null;
+    const next = { ...data };
+    for (const kind of ["item", "idea", "folder", "shape"]) {
+      const picked = selection.filter((sel) => sel.kind === kind);
+      if (!picked.length) continue;
+      const key = listKeyFor[kind];
+      next[key] = listFor(kind).map((el) => (picked.some((sel) => sel.id === el.id) ? transform(el, kind) : el));
+    }
+    return next;
+  };
+
+  const restackAll = (direction) => {
+    const peers = allPlaced().concat(data.ideaDrawings || []);
+    const edge = direction > 0
+      ? peers.reduce((m, el) => Math.max(m, stackOf(el)), 0) + 1
+      : peers.reduce((m, el) => Math.min(m, stackOf(el)), 0) - 1;
+    const next = changeSelection((el) => ({ ...el, z: edge }));
+    if (next) edit(next);
+  };
+
+  // Grouping is a shared id rather than a container, so a group can be undone,
+  // merged with another, or broken up without anything being moved or rebuilt.
+  const groupSelection = () => {
+    const id = uid();
+    const next = changeSelection((el) => ({ ...el, groupId: id }));
+    if (next) edit(next);
+  };
+  const ungroupSelection = () => {
+    const next = changeSelection((el) => { const { groupId, ...rest } = el; return rest; });
+    if (next) edit(next);
+  };
+
+  // Dragging one of several moves the rest with it, by the same distance.
+  const dragSelectionBy = (draggedKind, draggedId, dx, dy) => {
+    if (selection.length < 2 || !selection.some((sel) => sel.kind === draggedKind && sel.id === draggedId)) return null;
+    const shift = (el, kind) => {
+      if (kind === draggedKind && el.id === draggedId) return el;   // already placed
+      if (el.points) return { ...el, points: el.points.map((n, i) => n + (i % 2 === 0 ? dx : dy)) };
+      if (typeof el.x1 === "number") return { ...el, x1: el.x1 + dx, y1: el.y1 + dy, x2: el.x2 + dx, y2: el.y2 + dy };
+      return { ...el, x: Math.max(0, (el.x || 0) + dx), y: Math.max(0, (el.y || 0) + dy) };
+    };
+    return changeSelection(shift);
+  };
 
   // Anything on the board can point somewhere — a reference shot at the Canva
   // design it came from, a note at the brief. Only http(s) is ever stored, so
@@ -3227,6 +3324,7 @@ function IdeaBank({ data, saveData, profile }) {
   };
 
   const duplicateSelected = () => {
+    if (selection.length > 1) return duplicateMany();
     const el = pickedElement();
     if (!el) return;
     const key = listKeyFor[selected.kind];
@@ -3295,14 +3393,47 @@ function IdeaBank({ data, saveData, profile }) {
     opacity: pickedShape && typeof pickedShape.opacity === "number" ? pickedShape.opacity : drawOpacity,
   };
 
-  const saveBoardItemPos = (id, x, y) => edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
-  const boardItemDrag = useDraggable(saveBoardItemPos, (id) => {
+  // Copies of several things keep their arrangement relative to each other, and
+  // stay grouped together as a new group if they were one.
+  const duplicateMany = () => {
+    const nudge = 18;
+    const newGroup = uid();
+    const next = { ...data };
+    const picked = [];
+    for (const kind of ["item", "idea", "folder", "shape"]) {
+      const mine = selection.filter((sel) => sel.kind === kind);
+      if (!mine.length) continue;
+      const key = listKeyFor[kind];
+      const copies = listFor(kind)
+        .filter((el) => mine.some((sel) => sel.id === el.id))
+        .map((el) => {
+          const copy = { ...el, id: uid(), groupId: newGroup };
+          if (el.points) copy.points = el.points.map((n, i) => n + nudge);
+          else if (typeof el.x1 === "number") { copy.x1 = el.x1 + nudge; copy.y1 = el.y1 + nudge; copy.x2 = el.x2 + nudge; copy.y2 = el.y2 + nudge; }
+          else { copy.x = (el.x || 0) + nudge; copy.y = (el.y || 0) + nudge; }
+          if (kind === "idea") copy.votes = [];
+          picked.push({ kind, id: copy.id });
+          return copy;
+        });
+      next[key] = [...listFor(kind), ...copies];
+    }
+    edit(next);
+    setSelection(picked);
+  };
+
+  const saveBoardItemPos = (id, x, y, dx, dy) => {
+    const moved = dragSelectionBy("item", id, dx || 0, dy || 0);
+    if (moved) return edit({ ...moved, boardItems: moved.boardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
+  };
+  const boardItemDrag = useDraggable(saveBoardItemPos, (id, ev) => {
     const item = allBoardItems.find((b) => b.id === id);
     if (!item) return;
     if (tool === "erase") return removeBoardItem(id);
-    if (!isPicked("item", id)) return setSelected({ kind: "item", id });
-    if (item.type === "text") { setEditingTextId(id); setEditingText(item.text || ""); live.signal({ kind: "write", itemId: id }); }
-    else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
+    tapToOpen("item", id, ev, () => {
+      if (item.type === "text") { setEditingTextId(id); setEditingText(item.text || ""); live.signal({ kind: "write", itemId: id }); }
+      else setLightbox({ fileId: item.fileId, kind: item.kind, name: item.name });
+    });
   }, onDragSignal);
 
   // A template drops into whatever you have open — the main board or a folder —
@@ -3365,6 +3496,33 @@ function IdeaBank({ data, saveData, profile }) {
 
   // A sticker is a text box holding one emoji at a large size — same dragging,
   // resizing, stacking and undo as everything else, and nothing new to store.
+  // Feedback that points at something. A pin sits at a spot on the board rather
+  // than being attached to an element, so it can mark a gap, a arrangement or
+  // the join between two things — none of which are an element you could hang a
+  // comment off.
+  const pins = (data.boardComments || []).filter((c) => (c.folderId || null) === (openFolderId || null));
+  const addPin = (x, y) => {
+    const pin = { id: uid(), folderId: openFolderId || null, x, y, author: profile || "Someone", date: todayISO(), text: "", replies: [], resolved: false };
+    edit({ ...data, boardComments: [...(data.boardComments || []), pin] });
+    setOpenPinId(pin.id);
+    setPinDraft("");
+    setTool("move");
+  };
+  const updatePin = (id, patch) => edit({ ...data, boardComments: (data.boardComments || []).map((c) => (c.id === id ? { ...c, ...patch } : c)) });
+  const removePin = (id) => {
+    edit({ ...data, boardComments: (data.boardComments || []).filter((c) => c.id !== id) });
+    if (openPinId === id) setOpenPinId(null);
+  };
+  const sayOnPin = (pin) => {
+    const said = pinDraft.trim();
+    if (!said) return;
+    setPinDraft("");
+    // The first thing said is the comment itself; everything after is a reply,
+    // so an unanswered pin reads as one remark rather than an empty thread.
+    if (!pin.text) return updatePin(pin.id, { text: said, author: profile || "Someone", date: todayISO() });
+    updatePin(pin.id, { replies: [...(pin.replies || []), { id: uid(), author: profile || "Someone", text: said, date: todayISO() }] });
+  };
+
   const addSticker = (emoji) => {
     const count = boardItems.filter((b) => b.sticker).length;
     addBoardItem({
@@ -3398,13 +3556,47 @@ function IdeaBank({ data, saveData, profile }) {
   // Delete routes back through each kind's own remover so the side effects
   // still happen — a picture's Drive file goes with it, a folder asks first.
   const deleteSelected = () => {
-    if (!selected) return;
-    const { kind, id } = selected;
-    setSelected(null);
-    if (kind === "shape") return eraseShape(id);
-    if (kind === "item") return removeBoardItem(id);
-    if (kind === "idea") return removeIdea(id);
-    if (kind === "folder") return removeFolder(id);
+    if (!selection.length) return;
+    // Deliberately not a loop over the single-item removers. Each of those
+    // builds its change from the board as this render saw it, so calling them
+    // one after another has every call start from the same board and only the
+    // last one survive — three things picked, one thing deleted. It also has to
+    // be a single change so that one press of undo brings all of them back.
+    const going = { item: new Set(), idea: new Set(), folder: new Set(), shape: new Set() };
+    for (const sel of selection) going[sel.kind].add(sel.id);
+
+    // A folder asks before turning its contents loose, and the answer has to
+    // come before anything is removed.
+    for (const id of going.folder) {
+      const folder = folders.find((f) => f.id === id);
+      const inside = ideas.filter((i) => i.folderId === id).length + allBoardItems.filter((b) => b.folderId === id).length;
+      if (inside > 0 && !window.confirm(`"${folder ? folder.name : "This folder"}" has ${inside} thing${inside === 1 ? "" : "s"} inside. They'll move back out to the main board, and anything drawn in here is removed. Delete the folder?`)) return;
+    }
+
+    const survivingItems = allBoardItems.filter((b) => !going.item.has(b.id));
+    const survivingIdeas = ideas.filter((i) => !going.idea.has(i.id));
+    // Same rule as before, judged against everything that survives at once: a
+    // file in Drive only goes when nothing left on the board points at it.
+    const stillUsed = (fileId) =>
+      !fileId ||
+      survivingItems.some((b) => b.fileId === fileId) ||
+      survivingIdeas.some((i) => (i.attachments || []).some((a) => a.fileId === fileId));
+    for (const b of allBoardItems) if (going.item.has(b.id) && b.fileId && !stillUsed(b.fileId)) deleteDriveFile(b.fileId);
+    for (const i of ideas) if (going.idea.has(i.id)) for (const a of i.attachments || []) if (!stillUsed(a.fileId)) deleteDriveFile(a.fileId);
+
+    setSelection([]);
+    if (going.item.has(editingTextId)) setEditingTextId(null);
+    if (going.idea.size) setOpenIdeaId(null);
+    if (going.folder.has(openFolderId)) setOpenFolderId(null);
+
+    edit({
+      ...data,
+      boardItems: survivingItems.map((b) => (going.folder.has(b.folderId) ? { ...b, folderId: null } : b)),
+      ideas: survivingIdeas.map((i) => (going.folder.has(i.folderId) ? { ...i, folderId: null } : i)),
+      ideaFolders: folders.filter((f) => !going.folder.has(f.id)),
+      ideaDrawings: (data.ideaDrawings || []).filter((dr) => !going.shape.has(dr.id) && !going.folder.has(dr.folderId)),
+      boardComments: (data.boardComments || []).filter((c) => !going.folder.has(c.folderId)),
+    });
   };
 
   // Opening is the second tap on something already picked, or the toolbar
@@ -3431,6 +3623,14 @@ function IdeaBank({ data, saveData, profile }) {
       if (meta && ev.key.toLowerCase() === "y") { ev.preventDefault(); return redo(); }
       if (meta && ev.key.toLowerCase() === "d") { ev.preventDefault(); return duplicateSelected(); }
       if (ev.key === "Delete" || ev.key === "Backspace") { if (selected) { ev.preventDefault(); deleteSelected(); } return; }
+      if (meta && ev.key.toLowerCase() === "a") {
+        ev.preventDefault();
+        const everything = [];
+        for (const [kind, list] of [["item", boardItems], ["idea", boardIdeas], ["folder", currentFolder ? [] : folders], ["shape", drawings]]) {
+          for (const el of list) everything.push({ kind, id: el.id });
+        }
+        return setSelection(everything);
+      }
       if (ev.key === "Escape") setSelected(null);
     };
     window.addEventListener("keydown", onKey);
@@ -3702,16 +3902,27 @@ function IdeaBank({ data, saveData, profile }) {
       {selected && pickedElement() && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "7px 10px", background: "var(--gold-soft)", border: "1px solid var(--gold)", borderRadius: 9 }}>
           <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--gold)", marginRight: 2 }}>
-            {selected.kind === "idea" ? "Idea"
-              : selected.kind === "folder" ? "Folder"
-              : selected.kind === "shape" ? "Shape"
-              : pickedElement().type === "text" ? "Text" : "Picture"} picked
+            {selection.length > 1 ? `${selection.length} picked`
+              : `${selected.kind === "idea" ? "Idea"
+                : selected.kind === "folder" ? "Folder"
+                : selected.kind === "shape" ? "Shape"
+                : pickedElement().type === "text" ? "Text" : "Picture"} picked`}
           </span>
-          {selected.kind !== "shape" && (
+          {selection.length > 1 && (
+            <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={groupSelection} title="Keep these together">
+              <Layers size={12} /> Group
+            </button>
+          )}
+          {selection.some((sel) => (listFor(sel.kind).find((el) => el.id === sel.id) || {}).groupId) && (
+            <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={ungroupSelection} title="Let these move apart again">
+              Ungroup
+            </button>
+          )}
+          {selection.length === 1 && selected.kind !== "shape" && (
             <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={openSelected}><ExternalLink size={12} /> Open</button>
           )}
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={duplicateSelected} title="Duplicate (Ctrl+D)"><Copy size={12} /> Duplicate</button>
-          {selected.kind === "item" && (
+          {selection.length === 1 && selected.kind === "item" && (
             linkDraft === null ? (
               <button
                 className="btn" style={{ padding: "5px 9px", fontSize: 11.5, ...(pickedElement().link ? { borderColor: "var(--teal)", color: "var(--teal)" } : {}) }}
@@ -3731,7 +3942,7 @@ function IdeaBank({ data, saveData, profile }) {
               </span>
             )
           )}
-          {selected.kind === "item" && pickedElement().type === "image" && pickedElement().kind === "image" && (
+          {selection.length === 1 && selected.kind === "item" && pickedElement().type === "image" && pickedElement().kind === "image" && (
             <button
               className="btn" style={{ padding: "5px 9px", fontSize: 11.5, ...(pickedElement().crop ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }}
               onClick={() => setCropping(pickedElement())} title="Choose what part of the picture to show"
@@ -3888,6 +4099,60 @@ function IdeaBank({ data, saveData, profile }) {
               </span>
             </div>
           ))}
+
+          {pins.map((c) => {
+            const open = openPinId === c.id;
+            return (
+              <div key={c.id} style={{ position: "absolute", left: c.x, top: c.y, zIndex: 950 }}>
+                <button
+                  onClick={(ev) => { ev.stopPropagation(); setOpenPinId(open ? null : c.id); setPinDraft(""); }}
+                  onMouseDown={(ev) => ev.stopPropagation()}
+                  title={c.text || "Empty note"}
+                  style={{
+                    width: 26, height: 26, borderRadius: "50% 50% 50% 2px",
+                    background: c.resolved ? "var(--good)" : "var(--gold)", color: "#171812",
+                    border: "2px solid var(--panel)", cursor: "pointer", fontSize: 11, fontWeight: 700,
+                    display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 3px 10px rgba(0,0,0,0.45)",
+                  }}
+                >{c.resolved ? <Check size={13} strokeWidth={3} /> : (c.replies || []).length + (c.text ? 1 : 0) || <MessageSquare size={12} />}</button>
+
+                {open && (
+                  <div
+                    onMouseDown={(ev) => ev.stopPropagation()}
+                    style={{ position: "absolute", left: 32, top: 0, width: 250, background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 10, padding: 11, boxShadow: "0 10px 28px rgba(0,0,0,0.5)", zIndex: 960 }}
+                  >
+                    {c.text ? (
+                      <>
+                        <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.45, marginBottom: 3 }}><Linkify text={c.text} /></div>
+                        <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 9 }}>{c.author} · {fmtDate(c.date)}</div>
+                      </>
+                    ) : (
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 9 }}>What did you want to say about this spot?</div>
+                    )}
+                    {(c.replies || []).map((rep) => (
+                      <div key={rep.id} style={{ borderTop: "1px solid var(--hair)", paddingTop: 7, marginBottom: 7 }}>
+                        <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.4 }}><Linkify text={rep.text} /></div>
+                        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{rep.author}</div>
+                      </div>
+                    ))}
+                    <textarea
+                      value={pinDraft} onChange={(ev) => setPinDraft(ev.target.value)}
+                      onKeyDown={(ev) => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); sayOnPin(c); } }}
+                      placeholder={c.text ? "Reply…" : "Say something…"}
+                      style={{ width: "100%", minHeight: 46, background: "var(--panel)", border: "1px solid var(--hair)", borderRadius: 6, color: "var(--text)", fontSize: 12, padding: "6px 8px", resize: "none", outline: "none", marginBottom: 7 }}
+                    />
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button className="btn" style={{ padding: "4px 9px", fontSize: 11 }} onClick={() => sayOnPin(c)}>Post</button>
+                      <button className="btn" style={{ padding: "4px 9px", fontSize: 11 }} onClick={() => updatePin(c.id, { resolved: !c.resolved })}>
+                        {c.resolved ? "Reopen" : "Resolve"}
+                      </button>
+                      <button className="btn" style={{ padding: "4px 9px", fontSize: 11, borderColor: "var(--alert)", color: "var(--alert)", marginLeft: "auto" }} onClick={() => removePin(c.id)}>Delete</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
 
           {/* "…is writing" over the box they're typing in. */}
           {writersHere.filter((a) => a.itemId).map((a) => {
@@ -5975,7 +6240,7 @@ const BOARD_LISTS = [
   "profiles", "tasks", "deletedTasks", "projects", "calendarEvents", "notes",
   "content", "ideas", "resources", "messages", "notifications", "moodboard",
   "approvedOrder", "meetingItems", "announcements", "ideaFolders",
-  "ideaDrawings", "boardItems",
+  "ideaDrawings", "boardItems", "boardComments",
 ];
 
 function normalizeBoard(raw) {
