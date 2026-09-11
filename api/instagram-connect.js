@@ -1,13 +1,27 @@
-// Step 1 of connecting an Instagram account: bounce the person to Instagram's
-// consent screen. Same principle as the Drive functions -- the app secret only
-// ever exists here on the server, never in the bundle.
+// Step 1 of connecting an Instagram account: bounce the person to Facebook's
+// consent screen. The app secret only ever exists here on the server, never in
+// the bundle -- same principle as the Drive functions.
 //
-// This endpoint is safe to leave open. While the Meta app is in development
-// mode, Instagram itself refuses to authorize anyone who is not added as a
-// tester on the app, so a stranger who finds this URL just gets bounced by
-// Meta's own login. If you ever take the app live, gate this.
+// WHY FACEBOOK AND NOT INSTAGRAM LOGIN: Meta splits Instagram access in two.
+// "Instagram login" is simpler but only exposes per-post insights. Account-level
+// numbers -- follower count over time, daily reach, profile views, audience
+// demographics -- are only available through "Facebook login", which reaches
+// the Instagram account via the Facebook Page it is linked to. Meta says as
+// much on the Instagram login setup page: "if you want to be able to track
+// hashtags and insights, switch to the API setup with Facebook login."
+//
+// This endpoint is safe to leave open. While the app is in development mode,
+// Facebook only authorizes people with a role on the app, so a stranger who
+// finds this URL gets refused by Meta's own login.
 
-const SCOPES = ["instagram_business_basic", "instagram_business_manage_insights"];
+export const GRAPH_VERSION = process.env.IG_GRAPH_VERSION || "v26.0";
+
+const SCOPES = [
+  "instagram_basic",             // read the IG account and its media
+  "instagram_manage_insights",   // the actual analytics, post and account level
+  "pages_show_list",             // find which Page the IG account hangs off
+  "pages_read_engagement",       // read that Page
+];
 
 // The redirect_uri has to match what is registered in the Meta app byte for
 // byte. Deriving it from the incoming request keeps preview deploys working
@@ -20,21 +34,21 @@ export function redirectUri(req) {
 }
 
 export default async function handler(req, res) {
-  const appId = process.env.IG_APP_ID;
-  if (!appId || !process.env.IG_APP_SECRET) {
+  const appId = process.env.FB_APP_ID;
+  if (!appId || !process.env.FB_APP_SECRET) {
     return res.status(500).send(
-      "Instagram isn't connected yet - the server is missing IG_APP_ID / IG_APP_SECRET."
+      "Instagram isn't connected yet - the server is missing FB_APP_ID / FB_APP_SECRET."
     );
   }
 
   // Who clicked connect, so the account can be attributed in the UI. Carried
-  // through OAuth in `state`, which Instagram hands back to the callback.
+  // through OAuth in `state`, which Facebook hands back to the callback.
   const profile = typeof req.query.profile === "string" ? req.query.profile.slice(0, 60) : "";
   const state = Buffer.from(JSON.stringify({ profile, n: Math.random().toString(36).slice(2) }))
     .toString("base64url");
 
   const url =
-    "https://www.instagram.com/oauth/authorize" +
+    `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth` +
     `?client_id=${encodeURIComponent(appId)}` +
     `&redirect_uri=${encodeURIComponent(redirectUri(req))}` +
     "&response_type=code" +

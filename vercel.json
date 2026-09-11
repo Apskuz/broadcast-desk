@@ -1,5 +1,6 @@
 {
   "crons": [
-    { "path": "/api/daily-reminders", "schedule": "0 7 * * *" }
+    { "path": "/api/daily-reminders", "schedule": "0 7 * * *" },
+    { "path": "/api/instagram-sync", "schedule": "0 3 * * *" }
   ]
 }

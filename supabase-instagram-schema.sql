@@ -14,8 +14,18 @@ create table if not exists ig_accounts (
   ig_user_id     text primary key,
   username       text,
   account_type   text,
+  -- The token every sync call actually uses. This is the PAGE token: Facebook
+  -- derives it from a long-lived user token and it does not carry its own
+  -- expiry, which is why this route survives better than the Instagram-login
+  -- one (that one dies hard at 60 days if a refresh is ever missed).
   access_token   text not null,
+  -- Kept so the connection can renew itself without a human reconnecting:
+  -- the user token is the thing that can be re-extended, and a fresh page
+  -- token is then re-read from it.
+  user_token     text,
   token_expires  timestamptz,
+  page_id        text,
+  page_name      text,
   connected_by   text,
   connected_at   timestamptz not null default now(),
   last_synced_at timestamptz,
@@ -64,8 +74,14 @@ create table if not exists ig_media_snapshots (
 );
 
 -- One snapshot per post per day is plenty; this makes re-runs idempotent.
+-- Plain columns rather than an expression on purpose, for two reasons: an
+-- index on (captured_at::date) is rejected outright, because casting a
+-- timestamptz to a date depends on the session timezone and so is not
+-- immutable; and the sync upserts with on_conflict=media_id,captured_at, which
+-- needs a unique index on exactly those columns to resolve against. The daily
+-- guarantee still holds because the sync writes a fixed T12:00:00Z per day.
 create unique index if not exists ig_media_snapshot_daily
-  on ig_media_snapshots (media_id, (captured_at::date));
+  on ig_media_snapshots (media_id, captured_at);
 
 create index if not exists ig_media_snapshots_lookup
   on ig_media_snapshots (media_id, captured_at desc);
@@ -110,9 +126,16 @@ alter table ig_media_snapshots enable row level security;
 alter table ig_account_snapshots enable row level security;
 alter table ig_demographics enable row level security;
 
+-- Dropped first so this whole file stays safe to re-run: create policy has no
+-- "if not exists" form, and a half-finished earlier run would otherwise make
+-- every later attempt fail on the first policy that already landed.
+drop policy if exists "anon can read ig_media" on ig_media;
 create policy "anon can read ig_media" on ig_media for select using (true);
+drop policy if exists "anon can read ig_media_snapshots" on ig_media_snapshots;
 create policy "anon can read ig_media_snapshots" on ig_media_snapshots for select using (true);
+drop policy if exists "anon can read ig_account_snapshots" on ig_account_snapshots;
 create policy "anon can read ig_account_snapshots" on ig_account_snapshots for select using (true);
+drop policy if exists "anon can read ig_demographics" on ig_demographics;
 create policy "anon can read ig_demographics" on ig_demographics for select using (true);
 
 -- A convenience view: each post with its most recent numbers attached, so the
@@ -127,3 +150,18 @@ select distinct on (m.id)
 from ig_media m
 left join ig_media_snapshots s on s.media_id = m.id
 order by m.id, s.captured_at desc;
+
+-- Supabase usually grants these automatically for new tables, but being
+-- explicit avoids a confusing "permission denied" on the very first load.
+-- Note what is NOT here: ig_accounts. The anon role gets nothing on that table,
+-- which is the whole point of keeping the access token in its own table.
+grant select on ig_media to anon, authenticated;
+grant select on ig_media_snapshots to anon, authenticated;
+grant select on ig_account_snapshots to anon, authenticated;
+grant select on ig_demographics to anon, authenticated;
+grant select on ig_media_latest to anon, authenticated;
+
+-- The view reads the tables above, all of which allow anon SELECT anyway, so
+-- run it as the caller rather than the owner. Without this the view would
+-- bypass their row-level security instead of respecting it.
+alter view ig_media_latest set (security_invoker = on);
