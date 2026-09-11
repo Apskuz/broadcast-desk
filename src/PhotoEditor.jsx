@@ -566,20 +566,42 @@ export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookCl
   const [depth, setDepth] = useState({ past: 0, future: 0 });
   const noteDepth = () => setDepth({ past: history.current.past.length, future: history.current.future.length });
 
+  // A removal belongs in here too. It used to be left out entirely, so Ctrl+Z
+  // after removing something silently did nothing — or worse, stepped back over
+  // a slider change from before it, leaving the removal in place and making it
+  // look as though undo had gone wrong. The one edit in this room that cannot
+  // be expressed as numbers was the one the history did not know about.
+  //
+  // A healed picture is a whole canvas at the photograph's own size, so keeping
+  // sixty of them would be hundreds of megabytes. Only the last few removals
+  // stay undoable; everything older is dropped, which is the usual bargain.
+  const HEALS_KEPT = 3;
+
+  const capHeals = (h) => {
+    const seen = [];
+    for (let i = h.past.length - 1; i >= 0; i--) {
+      const c = h.past[i].healed;
+      if (c && !seen.includes(c)) seen.push(c);
+      if (seen.length > HEALS_KEPT) { h.past.splice(0, i + 1); return; }
+    }
+  };
+
   useEffect(() => {
     const h = history.current;
-    if (h.last === null) { h.last = { edit, cropBox }; return undefined; }   // first render
-    if (h.replaying) { h.replaying = false; h.last = { edit, cropBox }; noteDepth(); return undefined; }
+    const now = { edit, cropBox, healed };
+    if (h.last === null) { h.last = now; return undefined; }                 // first render
+    if (h.replaying) { h.replaying = false; h.last = now; noteDepth(); return undefined; }
     const timer = setTimeout(() => {
-      if (h.last.edit === edit && h.last.cropBox === cropBox) return;
+      if (h.last.edit === edit && h.last.cropBox === cropBox && h.last.healed === healed) return;
       h.past.push(h.last);
       if (h.past.length > 60) h.past.shift();
+      capHeals(h);
       h.future = [];
-      h.last = { edit, cropBox };
+      h.last = { edit, cropBox, healed };
       noteDepth();
     }, 350);
     return () => clearTimeout(timer);
-  }, [edit, cropBox]);
+  }, [edit, cropBox, healed]);
 
   const step = (from, to) => {
     const h = history.current;
@@ -590,6 +612,8 @@ export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookCl
     h.last = entry;
     setEdit(entry.edit);
     setCropBox(entry.cropBox);
+    // Stepping over a removal puts the pixels back as well as the numbers.
+    setHealed(entry.healed ?? null);
     noteDepth();
   };
   const undo = () => step(history.current.past, history.current.future);

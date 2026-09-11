@@ -2358,7 +2358,33 @@ const driveThumbSrc = (fileId, size = "s400") => `/api/drive-stream?fileId=${fil
 // Drive can take a moment to generate a preview after an upload, and some files
 // never get one. Hide the broken image rather than showing a torn-page icon —
 // what is underneath (a dark tile, a play badge) reads fine on its own.
-const hideBrokenThumb = (e) => { e.currentTarget.style.visibility = "hidden"; };
+//
+// The moment matters more than it sounds. A picture you have just added often
+// has no preview yet, /api/drive-stream answers 404 because there is nothing to
+// serve, and the old version of this hid it there and then — for good. The file
+// was in Drive the whole time and the board simply never asked again, which is
+// why adding a picture sometimes appeared to lose it. So it now asks again, a
+// few times, backing off to about half a minute in total, and only gives up
+// after that. A retry costs one request against a file id that is immutable and
+// cached hard, so the ones that were never coming back cost almost nothing.
+const THUMB_TRIES = 6;
+
+const hideBrokenThumb = (e) => {
+  const el = e.currentTarget;
+  const tries = Number(el.dataset.thumbTry || 0);
+  el.style.visibility = "hidden";
+  if (tries >= THUMB_TRIES) return;
+
+  const base = (el.getAttribute("src") || "").split("&retry=")[0];
+  if (!base) return;
+  el.dataset.thumbTry = String(tries + 1);
+
+  window.setTimeout(() => {
+    if (!el.isConnected) return;                 // scrolled away, or the board changed
+    el.addEventListener("load", () => { el.style.visibility = "visible"; }, { once: true });
+    el.setAttribute("src", `${base}&retry=${tries + 1}`);
+  }, Math.round(900 * Math.pow(1.8, tries)));
+};
 
 /**
  * A picture on the board, developed.
@@ -2382,7 +2408,22 @@ function BoardPhoto({ fileId, name, look, crop, peek, style, className }) {
   const effective = peek ? null : migrateLook(look);
   const wanted = !!crop || hasEdit(effective);
   const canPaint = wanted && rendererAvailable();
-  const src = driveThumbSrc(fileId, "s800");
+  // Same story as hideBrokenThumb: a picture added a moment ago may have no
+  // preview in Drive yet, and giving up on the first 404 is what made a new
+  // photo look as though it had vanished. Asking again a few times costs
+  // nothing and covers the gap.
+  const [attempt, setAttempt] = useState(0);
+  const attemptRef = useRef(0);
+  const src = driveThumbSrc(fileId, "s800") + (attempt ? `&retry=${attempt}` : "");
+
+  const askAgain = () => {
+    const n = attemptRef.current;
+    if (n >= THUMB_TRIES) { setBroken(true); return; }
+    attemptRef.current = n + 1;
+    window.setTimeout(() => setAttempt(n + 1), Math.round(900 * Math.pow(1.8, n)));
+  };
+
+  useEffect(() => { attemptRef.current = 0; setAttempt(0); setBroken(false); }, [fileId]);
 
   useEffect(() => {
     setBroken(false);                    // a new file deserves a fresh try
@@ -2394,7 +2435,7 @@ function BoardPhoto({ fileId, name, look, crop, peek, style, className }) {
     // a picture. It throws, and it takes the whole Idea Bank down with it.
     const img = document.createElement("img");
     img.onload = () => { if (alive) setImage(img); };
-    img.onerror = () => { if (alive) { setImage(null); setPainted(false); setBroken(true); } };
+    img.onerror = () => { if (alive) { setImage(null); setPainted(false); askAgain(); } };
     img.src = src;
     return () => { alive = false; };
   }, [src, canPaint]);
@@ -2448,7 +2489,7 @@ function BoardPhoto({ fileId, name, look, crop, peek, style, className }) {
       )}
       {!(canPaint && painted) && (
         <img
-          src={src} onError={() => setBroken(true)} alt={name || ""} draggable={false}
+          src={src} onError={askAgain} alt={name || ""} draggable={false}
           className={className}
           style={{ width: "100%", display: "block", filter: peek ? "none" : photoFilter({ look }), ...style }}
         />
