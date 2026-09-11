@@ -154,6 +154,36 @@ const PHOTO_PRESETS = [
   { id: "cold", label: "Cold", look: { warmth: -34, saturation: -8, contrast: 8 } },
 ];
 
+// How an element sits against what's behind it. Multiply darkens through,
+// screen lightens through, overlay does both — the three that actually get used
+// for laying a texture or a colour wash over a photo.
+const BLEND_MODES = [
+  { id: "normal", label: "Normal" },
+  { id: "multiply", label: "Multiply" },
+  { id: "screen", label: "Screen" },
+  { id: "overlay", label: "Overlay" },
+  { id: "soft-light", label: "Soft light" },
+  { id: "difference", label: "Difference" },
+];
+// Cutting a picture to a shape without touching the file: the browser clips it.
+const MASK_SHAPES = [
+  { id: "none", label: "Square", css: null },
+  { id: "circle", label: "Circle", css: "circle(50% at 50% 50%)" },
+  { id: "rounded", label: "Rounded", css: "inset(0 round 18px)" },
+  { id: "bubble", label: "Bubble", css: "inset(0 round 40% 40% 40% 8px)" },
+  { id: "diamond", label: "Diamond", css: "polygon(50% 0, 100% 50%, 50% 100%, 0 50%)" },
+  { id: "arch", label: "Arch", css: "inset(0 round 50% 50% 6px 6px)" },
+];
+const maskCss = (id) => (MASK_SHAPES.find((m) => m.id === id) || MASK_SHAPES[0]).css;
+const SHADOWS = [
+  { id: "none", label: "None", css: "none" },
+  { id: "soft", label: "Soft", css: "drop-shadow(0 6px 14px rgba(0,0,0,0.45))" },
+  { id: "hard", label: "Hard", css: "drop-shadow(5px 5px 0 rgba(0,0,0,0.65))" },
+  { id: "glow", label: "Glow", css: "drop-shadow(0 0 12px rgba(255,255,255,0.55))" },
+  { id: "outline", label: "Outline", css: "drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000)" },
+];
+const shadowCss = (id) => (SHADOWS.find((sh) => sh.id === id) || SHADOWS[0]).css;
+
 const photoLook = (b) => ({ ...PHOTO_DEFAULTS, ...(b && b.look ? b.look : {}) });
 const hasLook = (b) => {
   const look = photoLook(b);
@@ -2924,11 +2954,13 @@ function IdeaBank({ data, saveData, profile }) {
   const currentFolder = openFolderId ? folders.find((f) => f.id === openFolderId) : null;
 
   const saveFolderPos = (id, x, y, dx, dy) => {
+    if (isLocked("folder", id)) return;
     const moved = dragSelectionBy("folder", id, dx || 0, dy || 0);
     const base = moved || data;
     edit({ ...base, ideaFolders: (base.ideaFolders || folders).map((f) => (f.id === id ? { ...f, x, y } : f)) });
   };
   const saveIdeaPos = (id, x, y, dx, dy) => {
+    if (isLocked("idea", id)) return;
     const moved = dragSelectionBy("idea", id, dx || 0, dy || 0);
     const base = moved || data;
     edit({ ...base, ideas: (base.ideas || ideas).map((i) => (i.id === id ? { ...i, x, y } : i)) });
@@ -3381,6 +3413,98 @@ function IdeaBank({ data, saveData, profile }) {
     edit({ ...data, boardItems: allBoardItems.map((b) => (targets.has(b.id) && b.type === "image" ? { ...b, look: { ...lookClip, spin: photoLook(b).spin } } : b)) });
   };
 
+  // One place for anything that sets a plain field on everything picked.
+  const setOnSelection = (patch) => {
+    const next = changeSelection((el) => ({ ...el, ...patch }));
+    if (next) edit(next);
+  };
+
+  // Where each picked thing is and how big, so they can be lined up. A shape is
+  // its bounding box; everything else is its corner and its width.
+  const boundsOf = (el) => {
+    if (el.points) {
+      const xs = el.points.filter((_, i) => i % 2 === 0), ys = el.points.filter((_, i) => i % 2 === 1);
+      return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    }
+    if (typeof el.x1 === "number") return { x: Math.min(el.x1, el.x2), y: Math.min(el.y1, el.y2), w: Math.abs(el.x2 - el.x1), h: Math.abs(el.y2 - el.y1) };
+    return { x: el.x || 0, y: el.y || 0, w: el.w || 152, h: el.h || 88 };
+  };
+  const moveElBy = (el, dx, dy) => {
+    if (el.points) return { ...el, points: el.points.map((n, i) => n + (i % 2 === 0 ? dx : dy)) };
+    if (typeof el.x1 === "number") return { ...el, x1: el.x1 + dx, y1: el.y1 + dy, x2: el.x2 + dx, y2: el.y2 + dy };
+    return { ...el, x: Math.max(0, (el.x || 0) + dx), y: Math.max(0, (el.y || 0) + dy) };
+  };
+
+  const pickedElements = () => selection.map((sel) => ({ sel, el: listFor(sel.kind).find((x) => x.id === sel.id) })).filter((r) => r.el);
+
+  // Aligns to the outer edge of everything picked, which is what people expect:
+  // the group keeps its footprint and its contents line up inside it.
+  const alignSelection = (edge) => {
+    const rows = pickedElements();
+    if (rows.length < 2) return;
+    const boxes = rows.map((r) => boundsOf(r.el));
+    const left = Math.min(...boxes.map((b) => b.x));
+    const right = Math.max(...boxes.map((b) => b.x + b.w));
+    const top = Math.min(...boxes.map((b) => b.y));
+    const bottom = Math.max(...boxes.map((b) => b.y + b.h));
+    const shiftFor = (b) => {
+      if (edge === "left") return [left - b.x, 0];
+      if (edge === "right") return [right - (b.x + b.w), 0];
+      if (edge === "hcentre") return [(left + right) / 2 - (b.x + b.w / 2), 0];
+      if (edge === "top") return [0, top - b.y];
+      if (edge === "bottom") return [0, bottom - (b.y + b.h)];
+      return [0, (top + bottom) / 2 - (b.y + b.h / 2)];
+    };
+    let i = 0;
+    const next = changeSelection((el) => { const [dx, dy] = shiftFor(boxes[i++]); return moveElBy(el, Math.round(dx), Math.round(dy)); });
+    if (next) edit(next);
+  };
+
+  // Even gaps between the outermost two, which stay where they are.
+  const distributeSelection = (axis) => {
+    const rows = pickedElements();
+    if (rows.length < 3) return;
+    const withBox = rows.map((r) => ({ ...r, box: boundsOf(r.el) }));
+    withBox.sort((a, b) => (axis === "x" ? a.box.x - b.box.x : a.box.y - b.box.y));
+    const first = withBox[0].box, last = withBox[withBox.length - 1].box;
+    const span = axis === "x" ? (last.x + last.w) - first.x : (last.y + last.h) - first.y;
+    const used = withBox.reduce((sum, r) => sum + (axis === "x" ? r.box.w : r.box.h), 0);
+    const gap = (span - used) / (withBox.length - 1);
+    const target = new Map();
+    let cursor = axis === "x" ? first.x : first.y;
+    for (const r of withBox) {
+      target.set(r.sel.id, Math.round(cursor));
+      cursor += (axis === "x" ? r.box.w : r.box.h) + gap;
+    }
+    const next = changeSelection((el) => {
+      const want = target.get(el.id);
+      if (want === undefined) return el;
+      const box = boundsOf(el);
+      return moveElBy(el, axis === "x" ? want - box.x : 0, axis === "y" ? want - box.y : 0);
+    });
+    if (next) edit(next);
+  };
+
+  // Typing an exact number, for when nudging isn't the point.
+  const setExact = (field, raw) => {
+    const value = Math.round(Number(raw));
+    if (!Number.isFinite(value) || !selected || selection.length !== 1) return;
+    const el = pickedElement();
+    if (!el) return;
+    const box = boundsOf(el);
+    if (field === "w") {
+      if (selected.kind !== "item" || value < 20) return;
+      return edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === el.id ? { ...b, w: value } : b)) });
+    }
+    const next = changeSelection((x) => moveElBy(x, field === "x" ? value - box.x : 0, field === "y" ? value - box.y : 0));
+    if (next) edit(next);
+  };
+
+  const nudgeSelection = (dx, dy) => {
+    const next = changeSelection((el) => moveElBy(el, dx, dy));
+    if (next) edit(next);
+  };
+
   const saveCrop = (crop, imgAspect) => {
     if (!cropping) return;
     edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === cropping.id ? { ...b, crop, imgAspect: imgAspect || b.imgAspect } : b)) });
@@ -3564,7 +3688,10 @@ function IdeaBank({ data, saveData, profile }) {
   const showShapeControls = drawingMode || !!pickedShape;
   const showTextControls = tool === "text" || tool === "note" || !!pickedText || !!editingTextId;
 
+  const isLocked = (kind, id) => !!(listFor(kind).find((el) => el.id === id) || {}).locked;
+
   const saveBoardItemPos = (id, x, y, dx, dy) => {
+    if (isLocked("item", id)) return;
     const moved = dragSelectionBy("item", id, dx || 0, dy || 0);
     if (moved) return edit({ ...moved, boardItems: moved.boardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
     edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
@@ -3781,6 +3908,12 @@ function IdeaBank({ data, saveData, profile }) {
         }
         return setSelection(everything);
       }
+      if (selection.length && ev.key.startsWith("Arrow")) {
+        // Shift jumps ten at a time, for when a pixel at a time is too slow.
+        const step = ev.shiftKey ? 10 : 1;
+        const by = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[ev.key];
+        if (by) { ev.preventDefault(); return nudgeSelection(by[0], by[1]); }
+      }
       if (ev.key === "Escape") setSelected(null);
     };
     window.addEventListener("keydown", onKey);
@@ -3990,6 +4123,10 @@ function IdeaBank({ data, saveData, profile }) {
                 onDoubleClick={isEditing ? undefined : openOnDouble("item", b.id, openBoardItem(b))}
                 style={{
                   position: "absolute", left: pos.x, top: pos.y, width,
+                  mixBlendMode: b.blend && b.blend !== "normal" ? b.blend : undefined,
+                  filter: b.shadow && b.shadow !== "none" ? shadowCss(b.shadow) : undefined,
+                  transform: b.spin ? `rotate(${b.spin}deg)` : undefined,
+                  clipPath: maskCss(b.mask) || undefined,
                   pointerEvents: drawingMode && tool !== "erase" ? "none" : "auto",
                   cursor: isEditing ? "text" : tool === "erase" ? "pointer" : "grab",
                   userSelect: isEditing ? "text" : "none",
@@ -4473,6 +4610,97 @@ function IdeaBank({ data, saveData, profile }) {
                   );
                 })}
               </div>
+            </PanelSection>
+          )}
+
+          {picked && selection.length > 1 && (
+            <PanelSection title="Line up">
+              <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
+                {[["left", AlignLeft], ["hcentre", AlignCenter], ["right", AlignRight]].map(([edge, Icon]) => (
+                  <button key={edge} className="btn" style={{ ...PANEL_BTN, flex: 1, justifyContent: "center" }} onClick={() => alignSelection(edge)} title={`Align ${edge}`}><Icon size={12} /></button>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+                {[["top", "Top"], ["vcentre", "Middle"], ["bottom", "Bottom"]].map(([edge, label]) => (
+                  <button key={edge} className="btn" style={{ ...PANEL_BTN, flex: 1, justifyContent: "center" }} onClick={() => alignSelection(edge)}>{label}</button>
+                ))}
+              </div>
+              {selection.length > 2 && (
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button className="btn" style={{ ...PANEL_BTN, flex: 1, justifyContent: "center" }} onClick={() => distributeSelection("x")}>Even across</button>
+                  <button className="btn" style={{ ...PANEL_BTN, flex: 1, justifyContent: "center" }} onClick={() => distributeSelection("y")}>Even down</button>
+                </div>
+              )}
+            </PanelSection>
+          )}
+
+          {picked && (
+            <PanelSection title="Place">
+              {selection.length === 1 && (
+                <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+                  {[["x", "X"], ["y", "Y"]].map(([field, label]) => (
+                    <label key={field} style={{ flex: 1, fontSize: 10, color: "var(--muted)" }}>
+                      {label}
+                      <input
+                        type="number" value={Math.round(boundsOf(pickedElement())[field])}
+                        onChange={(e) => setExact(field, e.target.value)}
+                        style={{ width: "100%", boxSizing: "border-box", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "4px 6px", outline: "none", marginTop: 2 }}
+                      />
+                    </label>
+                  ))}
+                  {selected.kind === "item" && (
+                    <label style={{ flex: 1, fontSize: 10, color: "var(--muted)" }}>
+                      W
+                      <input
+                        type="number" value={Math.round(pickedElement().w || 220)}
+                        onChange={(e) => setExact("w", e.target.value)}
+                        style={{ width: "100%", boxSizing: "border-box", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "4px 6px", outline: "none", marginTop: 2 }}
+                      />
+                    </label>
+                  )}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                <button className="btn" style={PANEL_BTN} onClick={() => setOnSelection({ spin: (((pickedElement() || {}).spin || 0) + 15) % 360 })} title="Turn 15°"><RotateCw size={11} /> Turn</button>
+                <button className="btn" style={PANEL_BTN} onClick={() => setOnSelection({ spin: 0 })}>Straighten</button>
+                <button
+                  className="btn"
+                  style={{ ...PANEL_BTN, ...(pickedElement().locked ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }}
+                  onClick={() => setOnSelection({ locked: !pickedElement().locked })}
+                  title="A locked thing can't be dragged by accident"
+                ><Lock size={11} /> {pickedElement().locked ? "Locked" : "Lock"}</button>
+              </div>
+              <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 7, lineHeight: 1.4 }}>Arrow keys nudge · Shift for ten at a time</div>
+            </PanelSection>
+          )}
+
+          {picked && selection.length === 1 && selected.kind === "item" && (
+            <PanelSection title="Effects">
+              <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 5 }}>Against what's behind</div>
+              <select
+                value={pickedElement().blend || "normal"} onChange={(e) => setOnSelection({ blend: e.target.value })}
+                style={{ width: "100%", boxSizing: "border-box", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "5px 6px", outline: "none", marginBottom: 9 }}
+              >
+                {BLEND_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+              </select>
+              <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 5 }}>Shadow</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 9 }}>
+                {SHADOWS.map((sh) => {
+                  const on = (pickedElement().shadow || "none") === sh.id;
+                  return <button key={sh.id} className="btn" style={{ ...PANEL_BTN, ...(on ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }} onClick={() => setOnSelection({ shadow: sh.id })}>{sh.label}</button>;
+                })}
+              </div>
+              {pickedElement().type === "image" && (
+                <>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 5 }}>Cut to a shape</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {MASK_SHAPES.map((m) => {
+                      const on = (pickedElement().mask || "none") === m.id;
+                      return <button key={m.id} className="btn" style={{ ...PANEL_BTN, ...(on ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}) }} onClick={() => setOnSelection({ mask: m.id })}>{m.label}</button>;
+                    })}
+                  </div>
+                </>
+              )}
             </PanelSection>
           )}
 
