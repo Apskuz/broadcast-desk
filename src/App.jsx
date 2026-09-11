@@ -119,6 +119,31 @@ const IDEA_COLORS = ["#F5D76E", "#F2A65A", "#F2789F", "#B79CED", "#7EC8E3", "#8F
 // description: two corners. These turn that box into the points each shape
 // needs. Shapes saved before fill/width/opacity existed simply have none of
 // those fields, and the defaults below are what they were being drawn with.
+// Undo covers a mistake you notice straight away. This covers the other kind:
+// someone clears a board on Tuesday and on Thursday you want it back. Kept in
+// its own table — see supabase-history-schema.sql for why.
+const HISTORY_EVERY_MS = 20 * 60 * 1000;   // at most one snapshot per 20 minutes
+const HISTORY_KEEP = 60;
+// The parts of the board the Idea Bank owns, so a board can be put back without
+// dragging the calendar and the chat back with it.
+const IDEA_BANK_KEYS = ["ideas", "ideaFolders", "boardItems", "ideaDrawings", "boardComments", "boardPalette", "boardSurfaces"];
+
+async function takeSnapshot(board, who, note) {
+  try {
+    await supabase.from("hub_history").insert({ snapshot: board, taken_by: who || null, note: note || null });
+    // Keep the newest, let the rest go. Done here rather than on a schedule so
+    // there's nothing extra to deploy or remember.
+    const { data: old } = await supabase
+      .from("hub_history").select("id").order("taken_at", { ascending: false }).range(HISTORY_KEEP, HISTORY_KEEP + 40);
+    if (old && old.length) await supabase.from("hub_history").delete().in("id", old.map((r) => r.id));
+    return true;
+  } catch {
+    // A missing table just means the SQL hasn't been run yet; the board itself
+    // must not care.
+    return false;
+  }
+}
+
 const SHAPE_DEFAULTS = { width: 3, fill: "none", opacity: 1 };
 
 // What the board itself looks like behind everything. Dots are the default the
@@ -3160,6 +3185,8 @@ function IdeaBank({ data, saveData, profile }) {
   const [cropping, setCropping] = useState(null);   // the picture being reframed
   const [openPinId, setOpenPinId] = useState(null); // the pin whose thread is showing
   const [peeking, setPeeking] = useState(false);    // holding the before/after button
+  const [history, setHistory] = useState(null);     // null until the list is fetched
+  const [historyBusy, setHistoryBusy] = useState(false);
   // Panning is the scroll container doing its job — there's no second set of
   // coordinates to keep in step, and the scrollbars say where you are.
   const [zoom, setZoom] = useState(1);
@@ -3622,6 +3649,39 @@ function IdeaBank({ data, saveData, profile }) {
   };
 
   snapRef.current = snapTo;
+
+  const openHistory = async () => {
+    setHistory("loading");
+    const { data: rows, error } = await supabase
+      .from("hub_history").select("id, taken_at, taken_by, note, snapshot").order("taken_at", { ascending: false }).limit(40);
+    if (error) return setHistory("missing");
+    setHistory(rows || []);
+  };
+  const saveVersionNow = async () => {
+    setHistoryBusy(true);
+    const ok = await takeSnapshot(data, profile, "Saved by hand");
+    setHistoryBusy(false);
+    if (ok) openHistory();
+  };
+  // Two ways back, because they're wanted at different moments: put the whole
+  // board back, or put only the Idea Bank back and leave the duties, calendar
+  // and chat as they are now.
+  const restoreFrom = (row, ideaBankOnly) => {
+    const snap = row.snapshot || {};
+    const when = new Date(row.taken_at).toLocaleString();
+    if (!window.confirm(ideaBankOnly
+      ? `Put the Idea Bank back to how it was on ${when}? Everything else — duties, calendar, chat — stays exactly as it is now.`
+      : `Put the WHOLE board back to how it was on ${when}? That includes duties, the calendar, chat and notes. Anything added since will be gone.`)) return;
+    // Goes through edit() like any other change, so it merges rather than
+    // stamping over whatever someone else is doing this second — and one press
+    // of undo takes the restore itself back.
+    const next = ideaBankOnly
+      ? { ...data, ...Object.fromEntries(IDEA_BANK_KEYS.map((k) => [k, snap[k] !== undefined ? snap[k] : data[k]])) }
+      : { ...snap };
+    edit(next);
+    setHistory(null);
+    setSelected(null);
+  };
 
   const ZOOM_STEPS = [0.25, 0.4, 0.55, 0.75, 1, 1.25, 1.5, 2, 3];
   // Keeps whatever is in the middle of the view in the middle afterwards,
@@ -4212,6 +4272,7 @@ function IdeaBank({ data, saveData, profile }) {
           ) : (
             <button className="btn" onClick={() => setShowFolderForm(true)}><Folder size={15} /> New folder</button>
           )}
+          <button className="btn" onClick={openHistory}><Clock size={15} /> History</button>
           <button className="btn" onClick={() => setShowStickers(true)}><Smile size={15} /> Stickers</button>
           <button className="btn" onClick={() => setShowTemplates(true)}><Layers size={15} /> Templates</button>
           <button className="btn" onClick={() => exportBoard("png")} disabled={!!exporting}>
@@ -5012,6 +5073,53 @@ function IdeaBank({ data, saveData, profile }) {
 
       {cropping && (
         <CropModal item={cropping} onCancel={() => setCropping(null)} onSave={saveCrop} />
+      )}
+
+      {history !== null && (
+        <Modal title="Board history" onClose={() => setHistory(null)}>
+          {history === "loading" && <div className="empty">Looking…</div>}
+          {history === "missing" && (
+            <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+              History isn't switched on yet. Run <strong style={{ color: "var(--text)" }}>supabase-history-schema.sql</strong> in
+              Supabase (Project → SQL Editor → New query → paste → Run), the same way as the original setup. Snapshots start
+              building up from then on.
+            </div>
+          )}
+          {Array.isArray(history) && (
+            <>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+                A copy of the board is kept every twenty minutes or so while people are working, and the newest {HISTORY_KEEP} are
+                held. Restoring goes through the same merge as any other change, so it won't stamp over what someone else is doing
+                right now — and Undo takes the restore itself back.
+              </div>
+              <button className="btn" style={{ marginBottom: 12 }} onClick={saveVersionNow} disabled={historyBusy}>
+                {historyBusy ? "Saving…" : "Save a version now"}
+              </button>
+              {history.length === 0 && <div className="empty">Nothing kept yet — the first one lands the next time someone edits.</div>}
+              {history.map((row) => {
+                const snap = row.snapshot || {};
+                return (
+                  <div key={row.id} style={{ borderTop: "1px solid var(--hair)", padding: "10px 0" }}>
+                    <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>
+                      {new Date(row.taken_at).toLocaleString()}
+                      {row.taken_by && <span style={{ color: "var(--muted)", fontWeight: 400 }}> · {row.taken_by}</span>}
+                      {row.note && <span style={{ color: "var(--gold)", fontWeight: 400 }}> · {row.note}</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", margin: "3px 0 7px" }}>
+                      {(snap.ideas || []).length} ideas · {(snap.boardItems || []).length} on the board ·{" "}
+                      {(snap.ideaDrawings || []).length} drawn · {(snap.tasks || []).length} duties · {(snap.messages || []).length} messages
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button className="btn" style={PANEL_BTN} onClick={() => restoreFrom(row, true)}>Restore the Idea Bank</button>
+                      <button className="btn" style={{ ...PANEL_BTN, borderColor: "var(--alert)", color: "var(--alert)" }} onClick={() => restoreFrom(row, false)}>Restore everything</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+          <div className="modal-actions"><button className="btn" onClick={() => setHistory(null)}>Close</button></div>
+        </Modal>
       )}
 
       {showStickers && (
@@ -7081,8 +7189,12 @@ export default function TeamHub() {
   const writingRef = useRef(false);
   const flushTimerRef = useRef(null);
   const failureRef = useRef(0);
+  const lastSnapshotRef = useRef(0);
+  // flush() runs from a timer, so it can't read who is signed in from a render.
+  const loggedInRef = useRef(null);
 
   const applyLocal = (next) => { dataRef.current = next; setData(next); };
+  loggedInRef.current = loggedIn;
 
   // Read the live board and fold our unsaved edits into it.
   const reconcile = async () => {
@@ -7121,6 +7233,13 @@ export default function TeamHub() {
         versionRef.current = rows[0].updated_at;
         failureRef.current = 0;
         setSaveError(false);
+        // Piggy-backs on a save that already worked, so a snapshot can never be
+        // the thing that breaks an edit, and only ever records a board that
+        // actually made it to the server.
+        if (Date.now() - lastSnapshotRef.current > HISTORY_EVERY_MS) {
+          lastSnapshotRef.current = Date.now();
+          takeSnapshot(mine, loggedInRef.current && loggedInRef.current.name, null);
+        }
       } else {
         // Somebody saved first. That is normal, not a failure: take their
         // board, put our edit back on top, and go again after a little jitter
