@@ -7,7 +7,8 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen
+  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
+  Minus, ArrowRight, Square, Circle, Triangle, Star, Droplet
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -96,6 +97,63 @@ function useDraggable(onDragEnd, onClick, onDragMove) {
 }
 
 const IDEA_COLORS = ["#F5D76E", "#F2A65A", "#F2789F", "#B79CED", "#7EC8E3", "#8FD9A8"];
+
+// Every drawn shape is defined by the box you dragged, so they all share one
+// description: two corners. These turn that box into the points each shape
+// needs. Shapes saved before fill/width/opacity existed simply have none of
+// those fields, and the defaults below are what they were being drawn with.
+const SHAPE_DEFAULTS = { width: 3, fill: "none", opacity: 1 };
+const STROKE_WIDTHS = [1, 3, 6, 12];
+
+const shapeBox = (s) => ({
+  left: Math.min(s.x1, s.x2), top: Math.min(s.y1, s.y2),
+  w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1),
+});
+
+const trianglePoints = (s) => {
+  const { left, top, w, h } = shapeBox(s);
+  return `${left + w / 2},${top} ${left + w},${top + h} ${left},${top + h}`;
+};
+
+// A five-pointed star inscribed in the box, starting at the top point.
+const starPoints = (s) => {
+  const { left, top, w, h } = shapeBox(s);
+  const cx = left + w / 2, cy = top + h / 2, rx = w / 2, ry = h / 2;
+  const pts = [];
+  for (let i = 0; i < 10; i++) {
+    const scale = i % 2 === 0 ? 1 : 0.4;
+    const angle = (Math.PI / 5) * i - Math.PI / 2;
+    pts.push(`${cx + Math.cos(angle) * rx * scale},${cy + Math.sin(angle) * ry * scale}`);
+  }
+  return pts.join(" ");
+};
+
+// Body plus a tail hanging off the bottom-left, the way a comment bubble reads.
+const bubblePath = (s) => {
+  const { left, top, w, h } = shapeBox(s);
+  const bodyH = Math.max(h * 0.75, 1);
+  const r = Math.min(10, w / 2, bodyH / 2);
+  const tailX = left + Math.min(w * 0.3, 40);
+  return [
+    `M ${left + r} ${top}`,
+    `H ${left + w - r} A ${r} ${r} 0 0 1 ${left + w} ${top + r}`,
+    `V ${top + bodyH - r} A ${r} ${r} 0 0 1 ${left + w - r} ${top + bodyH}`,
+    `H ${tailX + 18}`,
+    `L ${tailX} ${top + h}`,
+    `L ${tailX + 4} ${top + bodyH}`,
+    `H ${left + r} A ${r} ${r} 0 0 1 ${left} ${top + bodyH - r}`,
+    `V ${top + r} A ${r} ${r} 0 0 1 ${left + r} ${top} Z`,
+  ].join(" ");
+};
+
+// The head sits at the end you dragged to, turned to face the way you dragged.
+const arrowHeadPoints = (s, width) => {
+  const size = Math.max(9, width * 3);
+  const angle = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
+  const wing = 2.6;
+  const p = (a, len) => `${s.x2 - Math.cos(a) * len},${s.y2 - Math.sin(a) * len}`;
+  return `${s.x2},${s.y2} ${p(angle - Math.PI / wing, size)} ${p(angle + Math.PI / wing, size)}`;
+};
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -2840,6 +2898,9 @@ function IdeaBank({ data, saveData, profile }) {
   const drawings = (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId === openFolderId : !d.folderId));
   const [tool, setTool] = useState("move"); // move | pen | line | rect | circle | erase
   const [drawColor, setDrawColor] = useState(IDEA_COLORS[0]);
+  const [drawFill, setDrawFill] = useState("none");
+  const [drawWidth, setDrawWidth] = useState(SHAPE_DEFAULTS.width);
+  const [drawOpacity, setDrawOpacity] = useState(1);
   const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
   const boardRef = useRef(null);
   const draftRef = useRef(null);
@@ -2863,9 +2924,10 @@ function IdeaBank({ data, saveData, profile }) {
       setTool("move");
       return;
     }
+    const style = { color: drawColor, width: drawWidth, opacity: drawOpacity, fill: tool === "pen" || tool === "line" || tool === "arrow" ? "none" : drawFill };
     const shape = tool === "pen"
-      ? { tool: "pen", color: drawColor, points: [x, y] }
-      : { tool, color: drawColor, x1: x, y1: y, x2: x, y2: y };
+      ? { tool: "pen", ...style, points: [x, y] }
+      : { tool, ...style, x1: x, y1: y, x2: x, y2: y };
     draftRef.current = shape;
     setDraft(shape);
 
@@ -2914,28 +2976,55 @@ function IdeaBank({ data, saveData, profile }) {
   const clearDrawings = () => edit({ ...data, ideaDrawings: (data.ideaDrawings || []).filter((d) => (openFolderId ? d.folderId !== openFolderId : !!d.folderId)) });
 
   const renderShape = (s, key, isDraft) => {
-    const common = { stroke: s.color, strokeWidth: 3, fill: "none", strokeLinecap: "round", strokeLinejoin: "round" };
-    const hit = tool === "erase" && !isDraft
-      ? { stroke: "transparent", strokeWidth: 16, fill: "none", style: { cursor: "pointer", pointerEvents: "stroke" }, onClick: () => eraseShape(s.id) }
+    const width = typeof s.width === "number" ? s.width : SHAPE_DEFAULTS.width;
+    const fill = s.fill && s.fill !== "none" ? s.fill : "none";
+    const common = {
+      stroke: s.color, strokeWidth: width, fill,
+      opacity: typeof s.opacity === "number" ? s.opacity : 1,
+      strokeLinecap: "round", strokeLinejoin: "round",
+    };
+    // The eraser catches strokes; the move tool picks them up to restyle. Both
+    // ride on a fat transparent copy underneath, because a 1px line is not
+    // something anybody can hit with a finger.
+    const hit = isDraft ? null
+      : tool === "erase" ? { stroke: "transparent", strokeWidth: Math.max(18, width + 14), fill: "none", style: { cursor: "pointer", pointerEvents: "stroke" }, onClick: () => eraseShape(s.id) }
+      : tool === "move" ? { stroke: "transparent", strokeWidth: Math.max(18, width + 14), fill: "none", style: { cursor: "pointer", pointerEvents: "stroke" }, onClick: (ev) => { ev.stopPropagation(); setSelected({ kind: "shape", id: s.id }); } }
       : null;
+    // A halo rather than a colour change, so what's picked is obvious without
+    // hiding what the shape actually looks like.
+    const halo = !isDraft && isPicked("shape", s.id)
+      ? { stroke: "var(--gold)", strokeWidth: width + 7, fill: "none", opacity: 0.4, strokeLinecap: "round", strokeLinejoin: "round", style: { pointerEvents: "none" } }
+      : null;
+
     const shapes = [];
+    const layer = (Tag, props) => {
+      if (halo) shapes.push(<Tag key={`${key}-halo`} {...props} {...halo} />);
+      if (hit) shapes.push(<Tag key={`${key}-hit`} {...props} {...hit} />);
+      shapes.push(<Tag key={key} {...props} {...common} />);
+    };
+
     if (s.tool === "pen") {
       const pts = [];
       for (let i = 0; i < s.points.length; i += 2) pts.push(`${s.points[i]},${s.points[i + 1]}`);
-      const d = pts.join(" ");
-      if (hit) shapes.push(<polyline key={`${key}-hit`} points={d} {...hit} />);
-      shapes.push(<polyline key={key} points={d} {...common} />);
+      layer("polyline", { points: pts.join(" "), fill: "none" });
     } else if (s.tool === "line") {
-      if (hit) shapes.push(<line key={`${key}-hit`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} {...hit} />);
-      shapes.push(<line key={key} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} {...common} />);
+      layer("line", { x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 });
+    } else if (s.tool === "arrow") {
+      layer("line", { x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 });
+      // The head is filled with the stroke colour whatever the body's fill is —
+      // a hollow arrowhead reads as a chevron, not an arrow.
+      shapes.push(<polygon key={`${key}-head`} points={arrowHeadPoints(s, width)} fill={s.color} stroke={s.color} strokeWidth={1} strokeLinejoin="round" opacity={common.opacity} style={{ pointerEvents: "none" }} />);
     } else if (s.tool === "rect") {
-      const box = { x: Math.min(s.x1, s.x2), y: Math.min(s.y1, s.y2), width: Math.abs(s.x2 - s.x1), height: Math.abs(s.y2 - s.y1) };
-      if (hit) shapes.push(<rect key={`${key}-hit`} {...box} {...hit} />);
-      shapes.push(<rect key={key} {...box} rx={4} {...common} />);
+      const b = shapeBox(s);
+      layer("rect", { x: b.left, y: b.top, width: b.w, height: b.h, rx: 4 });
     } else if (s.tool === "circle") {
-      const el = { cx: (s.x1 + s.x2) / 2, cy: (s.y1 + s.y2) / 2, rx: Math.abs(s.x2 - s.x1) / 2, ry: Math.abs(s.y2 - s.y1) / 2 };
-      if (hit) shapes.push(<ellipse key={`${key}-hit`} {...el} {...hit} />);
-      shapes.push(<ellipse key={key} {...el} {...common} />);
+      layer("ellipse", { cx: (s.x1 + s.x2) / 2, cy: (s.y1 + s.y2) / 2, rx: Math.abs(s.x2 - s.x1) / 2, ry: Math.abs(s.y2 - s.y1) / 2 });
+    } else if (s.tool === "triangle") {
+      layer("polygon", { points: trianglePoints(s) });
+    } else if (s.tool === "star") {
+      layer("polygon", { points: starPoints(s) });
+    } else if (s.tool === "bubble") {
+      layer("path", { d: bubblePath(s) });
     }
     return shapes;
   };
@@ -2944,11 +3033,18 @@ function IdeaBank({ data, saveData, profile }) {
     { id: "move", label: "Move", icon: Pin },
     { id: "text", label: "Text", icon: TypeIcon },
     { id: "pen", label: "Pen", icon: Pencil },
-    { id: "line", label: "Line", icon: ChevronRight },
-    { id: "rect", label: "Box", icon: Layers },
-    { id: "circle", label: "Circle", icon: Globe },
+    { id: "line", label: "Line", icon: Minus },
+    { id: "arrow", label: "Arrow", icon: ArrowRight },
+    { id: "rect", label: "Box", icon: Square },
+    { id: "circle", label: "Circle", icon: Circle },
+    { id: "triangle", label: "Triangle", icon: Triangle },
+    { id: "star", label: "Star", icon: Star },
+    { id: "bubble", label: "Bubble", icon: MessageSquare },
     { id: "erase", label: "Erase", icon: Trash2 },
   ];
+  // Which tools draw a shape that can be filled — a pen line and an arrow have
+  // no inside to fill.
+  const FILLABLE = ["rect", "circle", "triangle", "star", "bubble"];
 
   // ---- loose pictures and text placed straight on the board ----
   // Separate from idea cards: these are for laying out a case — a wall of
@@ -2972,8 +3068,8 @@ function IdeaBank({ data, saveData, profile }) {
 
   // The three lists are separate in the saved board but behave as one surface
   // here, so each action works out which list it's touching from the kind.
-  const listKeyFor = { item: "boardItems", idea: "ideas", folder: "ideaFolders" };
-  const listFor = (kind) => (kind === "item" ? allBoardItems : kind === "idea" ? ideas : folders);
+  const listKeyFor = { item: "boardItems", idea: "ideas", folder: "ideaFolders", shape: "ideaDrawings" };
+  const listFor = (kind) => (kind === "item" ? allBoardItems : kind === "idea" ? ideas : kind === "shape" ? (data.ideaDrawings || []) : folders);
   const pickedElement = () => (selected ? listFor(selected.kind).find((el) => el.id === selected.id) : null);
 
   const restack = (z) => {
@@ -2981,15 +3077,29 @@ function IdeaBank({ data, saveData, profile }) {
     const key = listKeyFor[selected.kind];
     edit({ ...data, [key]: listFor(selected.kind).map((el) => (el.id === selected.id ? { ...el, z } : el)) });
   };
-  const bringToFront = () => restack(topStack() + 1);
-  const sendToBack = () => restack(bottomStack() - 1);
+  // Drawn shapes all live in one SVG above the rest, so their order is only
+  // ever relative to each other — front and back mean something different
+  // there than they do for a picture.
+  const stackPeers = () => (selected && selected.kind === "shape" ? (data.ideaDrawings || []) : allPlaced());
+  const bringToFront = () => restack(stackPeers().reduce((m, el) => Math.max(m, stackOf(el)), 0) + 1);
+  const sendToBack = () => restack(stackPeers().reduce((m, el) => Math.min(m, stackOf(el)), 0) - 1);
 
   const duplicateSelected = () => {
     const el = pickedElement();
     if (!el) return;
     const key = listKeyFor[selected.kind];
     // Offset so the copy is visibly a second thing rather than hidden under it.
-    const copy = { ...el, id: uid(), x: (el.x || 0) + 18, y: (el.y || 0) + 18, z: topStack() + 1 };
+    const nudge = 18;
+    // A shape has no x/y — it's two corners, or a run of points — so shifting a
+    // copy means shifting all of them rather than one origin.
+    const copy = selected.kind === "shape"
+      ? {
+          ...el, id: uid(), z: stackPeers().reduce((m, s2) => Math.max(m, stackOf(s2)), 0) + 1,
+          ...(el.points
+            ? { points: el.points.map((n) => n + nudge) }
+            : { x1: el.x1 + nudge, y1: el.y1 + nudge, x2: el.x2 + nudge, y2: el.y2 + nudge }),
+        }
+      : { ...el, id: uid(), x: (el.x || 0) + nudge, y: (el.y || 0) + nudge, z: topStack() + 1 };
     if (selected.kind === "idea") copy.votes = [];
     // A duplicated picture points at the same Drive file on purpose: copying
     // the file would double the team's storage for something that looks the
@@ -2997,6 +3107,28 @@ function IdeaBank({ data, saveData, profile }) {
     // still uses it.
     edit({ ...data, [key]: [...listFor(selected.kind), copy] });
     setSelected({ kind: selected.kind, id: copy.id });
+  };
+
+  // A style control does two jobs at once, which is what people expect from a
+  // drawing app: it restyles whatever is picked, and it becomes the setting the
+  // next shape is drawn with.
+  const applyStyle = (patch) => {
+    if (patch.color !== undefined) setDrawColor(patch.color);
+    if (patch.fill !== undefined) setDrawFill(patch.fill);
+    if (patch.width !== undefined) setDrawWidth(patch.width);
+    if (patch.opacity !== undefined) setDrawOpacity(patch.opacity);
+    if (selected && selected.kind === "shape") {
+      edit({ ...data, ideaDrawings: (data.ideaDrawings || []).map((sh) => (sh.id === selected.id ? { ...sh, ...patch } : sh)) });
+    }
+  };
+  // What the controls should show: the picked shape's own style, or the
+  // settings waiting for the next one.
+  const pickedShape = selected && selected.kind === "shape" ? (data.ideaDrawings || []).find((sh) => sh.id === selected.id) : null;
+  const styleNow = {
+    color: pickedShape ? pickedShape.color : drawColor,
+    fill: pickedShape ? (pickedShape.fill || "none") : drawFill,
+    width: pickedShape && typeof pickedShape.width === "number" ? pickedShape.width : drawWidth,
+    opacity: pickedShape && typeof pickedShape.opacity === "number" ? pickedShape.opacity : drawOpacity,
   };
 
   const saveBoardItemPos = (id, x, y) => edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === id ? { ...b, x, y } : b)) });
@@ -3035,6 +3167,7 @@ function IdeaBank({ data, saveData, profile }) {
     if (!selected) return;
     const { kind, id } = selected;
     setSelected(null);
+    if (kind === "shape") return eraseShape(id);
     if (kind === "item") return removeBoardItem(id);
     if (kind === "idea") return removeIdea(id);
     if (kind === "folder") return removeFolder(id);
@@ -3045,6 +3178,7 @@ function IdeaBank({ data, saveData, profile }) {
   const openSelected = () => {
     const el = pickedElement();
     if (!el || !selected) return;
+    if (selected.kind === "shape") return;   // a shape has nothing to open
     if (selected.kind === "idea") return setOpenIdeaId(el.id);
     if (selected.kind === "folder") return setOpenFolderId(el.id);
     if (el.type === "text") { setEditingTextId(el.id); setEditingText(el.text || ""); live.signal({ kind: "write", itemId: el.id }); return; }
@@ -3213,10 +3347,67 @@ function IdeaBank({ data, saveData, profile }) {
           <Image size={13} /> {boardUploading ? `Adding… ${boardUploadProgress}%` : "Picture"}
         </button>
         <input ref={boardFileInputRef} type="file" accept="video/*,image/*" onChange={handleBoardFileSelect} disabled={boardUploading} style={{ display: "none" }} />
-        <span style={{ display: "flex", gap: 5, marginLeft: 4 }}>
+      </div>
+
+      {/* Style sits on its own row: on a phone the tools alone already wrap to
+          two lines, and mixing the two makes neither easy to hit. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, fontSize: 11, color: "var(--muted)" }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Colour</span>
           {IDEA_COLORS.map((c) => (
-            <button key={c} onClick={() => setDrawColor(c)} title="Pen and text colour" style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: drawColor === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+            <button
+              key={c} onClick={() => applyStyle({ color: c })} title="Line, pen and text colour"
+              style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: styleNow.color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer", padding: 0 }}
+            />
           ))}
+          <input
+            type="color" value={styleNow.color} onChange={(e) => applyStyle({ color: e.target.value })}
+            title="Any other colour"
+            style={{ width: 24, height: 22, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
+          />
+        </span>
+
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Width</span>
+          {STROKE_WIDTHS.map((wpx) => (
+            <button
+              key={wpx} onClick={() => applyStyle({ width: wpx })} title={`${wpx}px line`}
+              style={{ width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: styleNow.width === wpx ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${styleNow.width === wpx ? "var(--gold)" : "var(--hair)"}`, borderRadius: 5, cursor: "pointer" }}
+            >
+              <span style={{ width: 13, height: Math.min(wpx, 8), borderRadius: 4, background: styleNow.width === wpx ? "var(--gold)" : "var(--text)", display: "block" }} />
+            </button>
+          ))}
+        </span>
+
+        {(FILLABLE.includes(tool) || (pickedShape && FILLABLE.includes(pickedShape.tool))) && (
+          <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Fill</span>
+            <button
+              onClick={() => applyStyle({ fill: "none" })} title="No fill — outline only"
+              style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--panel-raised)", border: styleNow.fill === "none" ? "2px solid var(--text)" : "1px solid var(--hair)", cursor: "pointer", color: "var(--muted)", fontSize: 12, lineHeight: 1, padding: 0 }}
+            >⌀</button>
+            {IDEA_COLORS.map((c) => (
+              <button
+                key={c} onClick={() => applyStyle({ fill: c })} title="Fill colour"
+                style={{ width: 20, height: 20, borderRadius: "50%", background: c, border: styleNow.fill === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer", padding: 0 }}
+              />
+            ))}
+            <input
+              type="color" value={styleNow.fill === "none" ? "#000000" : styleNow.fill}
+              onChange={(e) => applyStyle({ fill: e.target.value })} title="Any other fill colour"
+              style={{ width: 24, height: 22, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
+            />
+          </span>
+        )}
+
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Opacity</span>
+          <input
+            type="range" min="10" max="100" step="5" value={Math.round(styleNow.opacity * 100)}
+            onChange={(e) => applyStyle({ opacity: Number(e.target.value) / 100 })}
+            style={{ width: 84, accentColor: "var(--gold)" }}
+          />
+          <span style={{ width: 30, textAlign: "right" }}>{Math.round(styleNow.opacity * 100)}%</span>
         </span>
         {drawings.length > 0 && (
           <button className="btn" style={{ padding: "6px 10px", fontSize: 12, marginLeft: "auto" }} onClick={clearDrawings}>Clear drawing</button>
@@ -3228,9 +3419,14 @@ function IdeaBank({ data, saveData, profile }) {
       {selected && pickedElement() && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "7px 10px", background: "var(--gold-soft)", border: "1px solid var(--gold)", borderRadius: 9 }}>
           <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--gold)", marginRight: 2 }}>
-            {selected.kind === "idea" ? "Idea" : selected.kind === "folder" ? "Folder" : pickedElement().type === "text" ? "Text" : "Picture"} picked
+            {selected.kind === "idea" ? "Idea"
+              : selected.kind === "folder" ? "Folder"
+              : selected.kind === "shape" ? "Shape"
+              : pickedElement().type === "text" ? "Text" : "Picture"} picked
           </span>
-          <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={openSelected}><ExternalLink size={12} /> Open</button>
+          {selected.kind !== "shape" && (
+            <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={openSelected}><ExternalLink size={12} /> Open</button>
+          )}
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={duplicateSelected} title="Duplicate (Ctrl+D)"><Copy size={12} /> Duplicate</button>
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={bringToFront} title="Bring to front"><ChevronUp size={12} /> Front</button>
           <button className="btn" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={sendToBack} title="Send to back"><ChevronDown size={12} /> Back</button>
@@ -3255,7 +3451,7 @@ function IdeaBank({ data, saveData, profile }) {
             // so restacking a picture must never bury someone's notes.
             style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 900 }}
           >
-            {drawings.map((s) => renderShape(s, s.id, false))}
+            {[...drawings].sort((a, b) => stackOf(a) - stackOf(b)).map((sh) => renderShape(sh, sh.id, false))}
             {draft && renderShape(draft, "draft", true)}
             {strokesHere.map((a) => renderShape(a.shape, `live-${a.id}`, true))}
           </svg>
