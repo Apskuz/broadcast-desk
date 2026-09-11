@@ -8,7 +8,7 @@ import {
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
   Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
-  Minus, ArrowRight, Square, Circle, Triangle, Star, Droplet
+  Minus, ArrowRight, Square, Circle, Triangle, Star, Bold, Italic, AlignLeft, AlignCenter, AlignRight
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -103,6 +103,33 @@ const IDEA_COLORS = ["#F5D76E", "#F2A65A", "#F2789F", "#B79CED", "#7EC8E3", "#8F
 // needs. Shapes saved before fill/width/opacity existed simply have none of
 // those fields, and the defaults below are what they were being drawn with.
 const SHAPE_DEFAULTS = { width: 3, fill: "none", opacity: 1 };
+
+// Three of these were already being loaded for the app's own chrome, so only
+// the last two cost anything. Each is a different job: something to read,
+// something with a bit of weight, something that looks handwritten, something
+// that shouts.
+const BOARD_FONTS = [
+  { id: "sans", label: "Sans", stack: "'Inter', sans-serif" },
+  { id: "serif", label: "Serif", stack: "'Fraunces', serif" },
+  { id: "mono", label: "Mono", stack: "'IBM Plex Mono', monospace" },
+  { id: "hand", label: "Hand", stack: "'Caveat', cursive" },
+  { id: "poster", label: "Poster", stack: "'Anton', 'Inter', sans-serif" },
+];
+const fontStack = (id) => (BOARD_FONTS.find((f) => f.id === id) || BOARD_FONTS[0]).stack;
+const TEXT_SIZES = [13, 16, 22, 30, 44];
+const TEXT_DEFAULTS = { fontSize: 15, font: "sans", align: "left", bold: false, italic: false };
+
+// Everything a text box needs to look the same while you're editing it as it
+// does when you're done — used by both the textarea and the finished box, so
+// the two can't drift apart.
+const textStyleOf = (b) => ({
+  fontFamily: fontStack(b.font),
+  fontSize: typeof b.fontSize === "number" ? b.fontSize : TEXT_DEFAULTS.fontSize,
+  fontWeight: b.bold ? 800 : b.font === "poster" ? 400 : 500,
+  fontStyle: b.italic ? "italic" : "normal",
+  textAlign: b.align || TEXT_DEFAULTS.align,
+  lineHeight: b.font === "hand" ? 1.25 : 1.4,
+});
 const STROKE_WIDTHS = [1, 3, 6, 12];
 
 const shapeBox = (s) => ({
@@ -469,7 +496,7 @@ const seedData = () => ({
 /* ---------------------------------- CSS ---------------------------------- */
 
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Caveat:wght@500;700&family=Anton&display=swap');
 
 :root{
   --ink:#12141B; --panel:#191C25; --panel-raised:#20232D; --hair: rgba(237,235,227,0.09);
@@ -2901,6 +2928,11 @@ function IdeaBank({ data, saveData, profile }) {
   const [drawFill, setDrawFill] = useState("none");
   const [drawWidth, setDrawWidth] = useState(SHAPE_DEFAULTS.width);
   const [drawOpacity, setDrawOpacity] = useState(1);
+  const [textFont, setTextFont] = useState(TEXT_DEFAULTS.font);
+  const [textSize, setTextSize] = useState(TEXT_DEFAULTS.fontSize);
+  const [textBold, setTextBold] = useState(false);
+  const [textItalic, setTextItalic] = useState(false);
+  const [textAlign, setTextAlign] = useState(TEXT_DEFAULTS.align);
   const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
   const boardRef = useRef(null);
   const draftRef = useRef(null);
@@ -2916,9 +2948,16 @@ function IdeaBank({ data, saveData, profile }) {
     if (!drawingMode || tool === "erase") return;
     e.preventDefault();
     const { x, y } = pointOn(e);
-    if (tool === "text") {
-      // Drop a text box where you tapped and start typing straight away.
-      const created = addBoardItem({ type: "text", x, y, w: 220, text: "", color: drawColor });
+    if (tool === "text" || tool === "note") {
+      // A sticky note is a text box with a background — same dragging, same
+      // editing, same everything, so it doesn't need a type of its own.
+      const created = addBoardItem({
+        type: "text", x, y, w: tool === "note" ? 180 : 220, text: "",
+        color: tool === "note" ? "#22232b" : drawColor,
+        bg: tool === "note" ? drawFill !== "none" ? drawFill : IDEA_COLORS[0] : null,
+        font: textFont, fontSize: tool === "note" ? 16 : textSize,
+        bold: textBold, italic: textItalic, align: tool === "note" ? "left" : textAlign,
+      });
       setEditingTextId(created.id);
       setEditingText("");
       setTool("move");
@@ -3032,6 +3071,7 @@ function IdeaBank({ data, saveData, profile }) {
   const TOOLS = [
     { id: "move", label: "Move", icon: Pin },
     { id: "text", label: "Text", icon: TypeIcon },
+    { id: "note", label: "Note", icon: StickyNote },
     { id: "pen", label: "Pen", icon: Pencil },
     { id: "line", label: "Line", icon: Minus },
     { id: "arrow", label: "Arrow", icon: ArrowRight },
@@ -3124,6 +3164,28 @@ function IdeaBank({ data, saveData, profile }) {
   // What the controls should show: the picked shape's own style, or the
   // settings waiting for the next one.
   const pickedShape = selected && selected.kind === "shape" ? (data.ideaDrawings || []).find((sh) => sh.id === selected.id) : null;
+  // The picked text box, if that's what's picked — a sticky note counts, since
+  // a note is only a text box with a background.
+  const pickedText = selected && selected.kind === "item"
+    ? allBoardItems.find((b) => b.id === selected.id && b.type === "text")
+    : null;
+
+  const applyText = (patch) => {
+    if (patch.font !== undefined) setTextFont(patch.font);
+    if (patch.fontSize !== undefined) setTextSize(patch.fontSize);
+    if (patch.bold !== undefined) setTextBold(patch.bold);
+    if (patch.italic !== undefined) setTextItalic(patch.italic);
+    if (patch.align !== undefined) setTextAlign(patch.align);
+    // The box being typed into isn't saved keystroke by keystroke, but its
+    // styling is — so a size change lands while the cursor is still in it.
+    const target = pickedText ? pickedText.id : editingTextId;
+    if (target) {
+      edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === target ? { ...b, ...patch } : b)) });
+    }
+  };
+  const textNow = pickedText || (editingTextId ? allBoardItems.find((b) => b.id === editingTextId) : null) || {
+    font: textFont, fontSize: textSize, bold: textBold, italic: textItalic, align: textAlign,
+  };
   const styleNow = {
     color: pickedShape ? pickedShape.color : drawColor,
     fill: pickedShape ? (pickedShape.fill || "none") : drawFill,
@@ -3379,7 +3441,7 @@ function IdeaBank({ data, saveData, profile }) {
           ))}
         </span>
 
-        {(FILLABLE.includes(tool) || (pickedShape && FILLABLE.includes(pickedShape.tool))) && (
+        {(FILLABLE.includes(tool) || tool === "note" || (pickedShape && FILLABLE.includes(pickedShape.tool))) && (
           <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Fill</span>
             <button
@@ -3398,6 +3460,47 @@ function IdeaBank({ data, saveData, profile }) {
               style={{ width: 24, height: 22, padding: 0, border: "1px solid var(--hair)", borderRadius: 5, background: "none", cursor: "pointer" }}
             />
           </span>
+        )}
+
+        {(tool === "text" || tool === "note" || pickedText || editingTextId) && (
+          <>
+            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Font</span>
+              <select
+                value={textNow.font || "sans"} onChange={(e) => applyText({ font: e.target.value })}
+                style={{ background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "4px 6px", outline: "none" }}
+              >
+                {BOARD_FONTS.map((fnt) => <option key={fnt.id} value={fnt.id}>{fnt.label}</option>)}
+              </select>
+              <select
+                value={textNow.fontSize || TEXT_DEFAULTS.fontSize} onChange={(e) => applyText({ fontSize: Number(e.target.value) })}
+                title="Text size"
+                style={{ background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 5, color: "var(--text)", fontSize: 11, padding: "4px 6px", outline: "none" }}
+              >
+                {TEXT_SIZES.map((sz) => <option key={sz} value={sz}>{sz}px</option>)}
+              </select>
+              {[
+                { key: "bold", Icon: Bold, title: "Bold", on: !!textNow.bold },
+                { key: "italic", Icon: Italic, title: "Italic", on: !!textNow.italic },
+              ].map(({ key, Icon, title, on }) => (
+                <button
+                  key={key} title={title} onClick={() => applyText({ [key]: !on })}
+                  style={{ width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${on ? "var(--gold)" : "var(--hair)"}`, color: on ? "var(--gold)" : "var(--text)", borderRadius: 5, cursor: "pointer", padding: 0 }}
+                ><Icon size={12} /></button>
+              ))}
+              {[
+                { val: "left", Icon: AlignLeft }, { val: "center", Icon: AlignCenter }, { val: "right", Icon: AlignRight },
+              ].map(({ val, Icon }) => {
+                const on = (textNow.align || "left") === val;
+                return (
+                  <button
+                    key={val} title={`Align ${val}`} onClick={() => applyText({ align: val })}
+                    style={{ width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "var(--gold-soft)" : "var(--panel-raised)", border: `1px solid ${on ? "var(--gold)" : "var(--hair)"}`, color: on ? "var(--gold)" : "var(--text)", borderRadius: 5, cursor: "pointer", padding: 0 }}
+                  ><Icon size={12} /></button>
+                );
+              })}
+            </span>
+          </>
         )}
 
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -3505,10 +3608,31 @@ function IdeaBank({ data, saveData, profile }) {
                     onChange={(e) => { setEditingText(e.target.value); live.signal({ kind: "write", itemId: b.id }, true); }}
                     onBlur={commitText}
                     onKeyDown={(e) => { if (e.key === "Escape") commitText(); }}
-                    style={{ width: "100%", minHeight: 70, background: "var(--panel-raised)", color: "var(--text)", border: `1px solid ${b.color || "var(--gold)"}`, borderRadius: 6, padding: "8px 10px", fontSize: 14, lineHeight: 1.45, resize: "none" }}
+                    style={{
+                      width: "100%", minHeight: 70,
+                      background: b.bg || "var(--panel-raised)",
+                      color: b.bg ? (b.color || "#22232b") : "var(--text)",
+                      border: `1px solid ${b.bg ? "var(--text)" : b.color || "var(--gold)"}`,
+                      borderRadius: 6, padding: "8px 10px", resize: "none",
+                      ...textStyleOf(b),
+                    }}
                   />
                 ) : (
-                  <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", color: b.color || "var(--text)", fontSize: 15, lineHeight: 1.45, padding: "6px 8px", textShadow: "0 1px 3px rgba(0,0,0,0.5)" }}>
+                  <div
+                    style={{
+                      whiteSpace: "pre-wrap", wordBreak: "break-word",
+                      color: b.color || "var(--text)",
+                      ...textStyleOf(b),
+                      padding: b.bg ? "11px 12px" : "6px 8px",
+                      background: b.bg || "transparent",
+                      borderRadius: b.bg ? 4 : 0,
+                      boxShadow: b.bg ? "0 6px 14px rgba(0,0,0,0.38)" : "none",
+                      // A shadow behind loose text keeps it readable over a
+                      // photo; on a sticky note the note itself does that job.
+                      textShadow: b.bg ? "none" : "0 1px 3px rgba(0,0,0,0.5)",
+                      minHeight: b.bg ? 60 : 0,
+                    }}
+                  >
                     {b.text}
                   </div>
                 )}
