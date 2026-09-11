@@ -132,6 +132,49 @@ const STICKER_GROUPS = [
 ];
 const TEXT_DEFAULTS = { fontSize: 15, font: "sans", align: "left", bold: false, italic: false };
 
+// Photo adjustment, the same way crop works: numbers recorded against the
+// picture, never a change to the file in Drive. The browser does the work with
+// CSS filters, which costs nothing, applies instantly and can be taken off
+// again — and because it is only numbers, one photo's look can be copied onto
+// another, and it all rides through undo like any other edit.
+const PHOTO_DEFAULTS = { exposure: 0, contrast: 0, saturation: 0, warmth: 0, blur: 0, spin: 0 };
+const PHOTO_SLIDERS = [
+  { key: "exposure", label: "Exposure", min: -60, max: 60 },
+  { key: "contrast", label: "Contrast", min: -60, max: 60 },
+  { key: "saturation", label: "Saturation", min: -100, max: 100 },
+  { key: "warmth", label: "Warmth", min: -60, max: 60 },
+  { key: "blur", label: "Blur", min: 0, max: 12 },
+];
+const PHOTO_PRESETS = [
+  { id: "none", label: "Original", look: {} },
+  { id: "bw", label: "B&W", look: { saturation: -100, contrast: 12 } },
+  { id: "faded", label: "Faded", look: { contrast: -22, saturation: -25, exposure: 10 } },
+  { id: "punchy", label: "Punchy", look: { contrast: 28, saturation: 30 } },
+  { id: "warm", label: "Warm", look: { warmth: 34, exposure: 6, saturation: 10 } },
+  { id: "cold", label: "Cold", look: { warmth: -34, saturation: -8, contrast: 8 } },
+];
+
+const photoLook = (b) => ({ ...PHOTO_DEFAULTS, ...(b && b.look ? b.look : {}) });
+const hasLook = (b) => {
+  const look = photoLook(b);
+  return PHOTO_SLIDERS.some(({ key }) => look[key] !== PHOTO_DEFAULTS[key]);
+};
+// Percentages rather than raw filter values, so a slider at zero is genuinely
+// "leave it alone" and the numbers mean something when read back.
+const photoFilter = (b) => {
+  const l = photoLook(b);
+  const parts = [];
+  if (l.exposure) parts.push(`brightness(${1 + l.exposure / 100})`);
+  if (l.contrast) parts.push(`contrast(${1 + l.contrast / 100})`);
+  if (l.saturation) parts.push(`saturate(${Math.max(0, 1 + l.saturation / 100)})`);
+  // Warmth has no filter of its own: a little hue rotation plus sepia leans an
+  // image warm or cold convincingly enough for a mood board.
+  if (l.warmth > 0) parts.push(`sepia(${l.warmth / 160}) saturate(${1 + l.warmth / 200})`);
+  if (l.warmth < 0) parts.push(`hue-rotate(${l.warmth / 6}deg) saturate(${1 + -l.warmth / 300})`);
+  if (l.blur) parts.push(`blur(${l.blur / 4}px)`);
+  return parts.length ? parts.join(" ") : "none";
+};
+
 // Starter layouts. Each returns plain board items and shapes — nothing a
 // person couldn't have placed by hand — so a template can be rearranged,
 // restyled and undone like anything else rather than being a special object
@@ -3055,6 +3098,8 @@ function IdeaBank({ data, saveData, profile }) {
   const [linkDraft, setLinkDraft] = useState(null); // the url being typed, or null
   const [cropping, setCropping] = useState(null);   // the picture being reframed
   const [openPinId, setOpenPinId] = useState(null); // the pin whose thread is showing
+  const [peeking, setPeeking] = useState(false);    // holding the before/after button
+  const [lookClip, setLookClip] = useState(null);   // a copied look, waiting to be pasted
   const [pinDraft, setPinDraft] = useState("");
   const [exporting, setExporting] = useState("");
   const [draft, setDraft] = useState(null); // shape being drawn right now, not yet saved
@@ -3309,6 +3354,33 @@ function IdeaBank({ data, saveData, profile }) {
     setLinkDraft(null);
   };
 
+  // Every adjustment goes through here so it lands as one change per move of a
+  // slider — which keeps undo meaning "put that back how it was".
+  const applyLook = (patch) => {
+    if (!pickedPhoto) return;
+    const next = { ...photoLook(pickedPhoto), ...patch };
+    // Nothing worth storing once it's all back at zero.
+    const clean = PHOTO_SLIDERS.some(({ key }) => next[key] !== PHOTO_DEFAULTS[key]) || next.spin ? next : null;
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === pickedPhoto.id ? { ...b, look: clean } : b)) });
+  };
+  const usePreset = (preset) => {
+    if (!pickedPhoto) return;
+    const spin = photoLook(pickedPhoto).spin;   // turning it is framing, not a look
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === pickedPhoto.id ? { ...b, look: Object.keys(preset.look).length ? { ...PHOTO_DEFAULTS, ...preset.look, spin } : (spin ? { ...PHOTO_DEFAULTS, spin } : null) } : b)) });
+  };
+  const spinPhoto = () => {
+    if (!pickedPhoto) return;
+    const look = { ...photoLook(pickedPhoto), spin: (photoLook(pickedPhoto).spin + 90) % 360 };
+    edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === pickedPhoto.id ? { ...b, look } : b)) });
+  };
+  // Lightroom's best trick: get one photo right, then put that look on the rest.
+  const copyLook = () => { if (pickedPhoto) setLookClip(photoLook(pickedPhoto)); };
+  const pasteLook = () => {
+    if (!lookClip || !selection.length) return;
+    const targets = new Set(selection.filter((sel) => sel.kind === "item").map((sel) => sel.id));
+    edit({ ...data, boardItems: allBoardItems.map((b) => (targets.has(b.id) && b.type === "image" ? { ...b, look: { ...lookClip, spin: photoLook(b).spin } } : b)) });
+  };
+
   const saveCrop = (crop, imgAspect) => {
     if (!cropping) return;
     edit({ ...data, boardItems: allBoardItems.map((b) => (b.id === cropping.id ? { ...b, crop, imgAspect: imgAspect || b.imgAspect } : b)) });
@@ -3487,6 +3559,8 @@ function IdeaBank({ data, saveData, profile }) {
     : pickedElement().sticker ? "Sticker"
     : pickedElement().type === "text" ? (pickedElement().bg ? "Note" : "Text")
     : "Picture";
+  const pickedPhoto = selection.length === 1 && selected && selected.kind === "item"
+    && pickedElement() && pickedElement().type === "image" ? pickedElement() : null;
   const showShapeControls = drawingMode || !!pickedShape;
   const showTextControls = tool === "text" || tool === "note" || !!pickedText || !!editingTextId;
 
@@ -3945,7 +4019,7 @@ function IdeaBank({ data, saveData, profile }) {
                         <img
                           src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
                           alt={b.name || ""} draggable={false}
-                          style={{ position: "absolute", top: 0, left: 0, width: `${100 / b.crop.w}%`, maxWidth: "none", transform: `translate(${-b.crop.x * 100 / b.crop.w}%, ${-b.crop.y * 100 / b.crop.h}%)`, display: "block" }}
+                          style={{ position: "absolute", top: 0, left: 0, width: `${100 / b.crop.w}%`, maxWidth: "none", transform: `translate(${-b.crop.x * 100 / b.crop.w}%, ${-b.crop.y * 100 / b.crop.h}%)`, display: "block", filter: peeking && pickedPhoto && pickedPhoto.id === b.id ? "none" : photoFilter(b) }}
                         />
                       </div>
                     ) : (
@@ -3953,7 +4027,11 @@ function IdeaBank({ data, saveData, profile }) {
                         src={driveThumbSrc(b.fileId, "s800")} onError={hideBrokenThumb}
                         alt={b.name || ""}
                         draggable={false}
-                        style={{ width: "100%", borderRadius: 8, display: "block", boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)" }}
+                        style={{
+                          width: "100%", borderRadius: 8, display: "block", boxShadow: "0 4px 14px rgba(0,0,0,0.4)", background: "var(--panel-raised)",
+                          filter: peeking && pickedPhoto && pickedPhoto.id === b.id ? "none" : photoFilter(b),
+                          transform: photoLook(b).spin ? `rotate(${photoLook(b).spin}deg)` : undefined,
+                        }}
                       />
                     )}
                     {b.kind !== "image" && (
@@ -4247,6 +4325,50 @@ function IdeaBank({ data, saveData, profile }) {
                     {pickedElement().link && <button className="btn" style={PANEL_BTN} onClick={() => saveLink("")}>Remove</button>}
                   </div>
                 </>
+              )}
+            </PanelSection>
+          )}
+
+          {pickedPhoto && (
+            <PanelSection title="Picture">
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
+                {PHOTO_PRESETS.map((pre) => (
+                  <button key={pre.id} className="btn" style={PANEL_BTN} onClick={() => usePreset(pre)}>{pre.label}</button>
+                ))}
+              </div>
+              {PHOTO_SLIDERS.map(({ key, label, min, max }) => {
+                const value = photoLook(pickedPhoto)[key];
+                return (
+                  <div key={key} style={{ marginBottom: 7 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>
+                      <span>{label}</span><span>{value > 0 ? "+" : ""}{value}</span>
+                    </div>
+                    <input
+                      type="range" min={min} max={max} step="1" value={value}
+                      onChange={(e) => applyLook({ [key]: Number(e.target.value) })}
+                      onDoubleClick={() => applyLook({ [key]: PHOTO_DEFAULTS[key] })}
+                      title="Double-click to put this one back"
+                      style={{ width: "100%", accentColor: "var(--gold)" }}
+                    />
+                  </div>
+                );
+              })}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 9 }}>
+                <button className="btn" style={PANEL_BTN} onClick={spinPhoto} title="Turn a quarter turn"><RotateCw size={11} /> Turn</button>
+                <button
+                  className="btn" style={PANEL_BTN}
+                  onMouseDown={() => setPeeking(true)} onMouseUp={() => setPeeking(false)} onMouseLeave={() => setPeeking(false)}
+                  onTouchStart={() => setPeeking(true)} onTouchEnd={() => setPeeking(false)}
+                  title="Hold to see it without the edit"
+                  disabled={!hasLook(pickedPhoto)}
+                >Before</button>
+                <button className="btn" style={PANEL_BTN} onClick={copyLook} disabled={!hasLook(pickedPhoto)} title="Copy this look">Copy look</button>
+              </div>
+              {lookClip && (
+                <button
+                  className="btn" style={{ ...PANEL_BTN, marginTop: 6, width: "100%", justifyContent: "center", borderColor: "var(--teal)", color: "var(--teal)" }}
+                  onClick={pasteLook}
+                >Paste that look here</button>
               )}
             </PanelSection>
           )}
