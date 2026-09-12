@@ -63,7 +63,30 @@ async function getSession(onProgress) {
 
     const res = await fetch(MODEL_URL);
     if (!res.ok) throw new Error(`no model (${res.status})`);
-    const weights = new Uint8Array(await res.arrayBuffer());
+
+    // 27MB, once. On a good connection that is a blink and on a bad one it is
+    // most of a minute, so it is counted out rather than left looking hung. The
+    // browser caches it afterwards and the file never changes, so this is a
+    // first-visit cost, not a per-removal one.
+    const total = Number(res.headers.get("content-length")) || 0;
+    let weights;
+    if (total && res.body && res.body.getReader) {
+      const reader = res.body.getReader();
+      const parts = [];
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        got += value.length;
+        if (onProgress) onProgress(`Fetching what it knows about photographs… ${Math.round((got / total) * 100)}%`);
+      }
+      weights = new Uint8Array(got);
+      let at = 0;
+      for (const part of parts) { weights.set(part, at); at += part.length; }
+    } else {
+      weights = new Uint8Array(await res.arrayBuffer());
+    }
 
     if (onProgress) onProgress("Waking it up…");
     // WebGPU where it exists and wasm everywhere else. Asking for both and
