@@ -3619,6 +3619,7 @@ function IdeaBank({ data, saveData, profile }) {
   const boardFileInputRef = useRef(null);
   const [boardUploading, setBoardUploading] = useState(false);
   const [boardUploadProgress, setBoardUploadProgress] = useState(0);
+  const [boardUploadError, setBoardUploadError] = useState("");
 
   // The three lists are separate in the saved board but behave as one surface
   // here, so each action works out which list it's touching from the kind.
@@ -4695,12 +4696,33 @@ function IdeaBank({ data, saveData, profile }) {
     if (!file || !file.type || !file.type.startsWith("image/")) return false;
     setBoardUploading(true);
     setBoardUploadProgress(0);
+    setBoardUploadError("");
+
+    // Two steps, kept apart on purpose.
+    //
+    // The moment uploadToDrive returns, the picture is in Drive. Both steps used
+    // to sit inside one try/catch that swallowed everything and returned false
+    // without a word — so anything going wrong after the upload left the file in
+    // Drive with nothing on the board pointing at it, and said nothing. From the
+    // outside that looks exactly like the picture never arriving, so it gets
+    // added again, and again. That is how three copies of the same photograph
+    // ended up in Drive with one of them on the board.
+    let result = null;
     try {
-      const result = await uploadToDrive(file, setBoardUploadProgress, profile);
+      result = await uploadToDrive(file, setBoardUploadProgress, profile);
+    } catch {
+      setBoardUploading(false);
+      setBoardUploadError("That picture didn't upload. Check the connection and try again.");
+      return false;
+    }
+
+    try {
+      const fileId = driveFileId(result.link);
+      if (!fileId) throw new Error("no file id");
       const count = boardItems.filter((b) => b.type === "image").length;
       addBoardItem({
         type: "image",
-        fileId: driveFileId(result.link),
+        fileId,
         kind: result.kind,
         name: result.name,
         x: at ? Math.max(0, Math.round(at.x)) : 60 + (count % 5) * 60,
@@ -4709,7 +4731,9 @@ function IdeaBank({ data, saveData, profile }) {
       });
       return true;
     } catch {
-      // nothing half-created is left behind; the picker can just be used again
+      // The picture is safe in Drive; it is only the board that missed it. Say
+      // so, rather than letting it look as though nothing happened.
+      setBoardUploadError("The picture reached Drive but didn't land on the board. Try adding it again.");
       return false;
     } finally {
       setBoardUploading(false);
@@ -4883,6 +4907,23 @@ function IdeaBank({ data, saveData, profile }) {
           <Image size={13} /> {boardUploading ? `Adding… ${boardUploadProgress}%` : "Picture"}
         </button>
         <input ref={boardFileInputRef} type="file" accept="video/*,image/*" onChange={handleBoardFileSelect} disabled={boardUploading} style={{ display: "none" }} />
+
+        {/* A picture that does not arrive used to say nothing at all, which is
+            why the same one got added three times. */}
+        {boardUploadError && (
+          <span
+            role="status"
+            onClick={() => setBoardUploadError("")}
+            title="Dismiss"
+            style={{
+              fontSize: 11.5, color: "var(--alert)", background: "var(--alert-soft)",
+              border: "1px solid var(--alert)", borderRadius: 6, padding: "4px 8px",
+              cursor: "pointer", maxWidth: 380,
+            }}
+          >
+            {boardUploadError}
+          </span>
+        )}
       </div>
 
       {/* Board and its panel sit side by side on a laptop. On a phone the panel
