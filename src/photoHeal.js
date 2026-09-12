@@ -70,7 +70,7 @@ const REFINE_MIN = 2, REFINE_MAX = 4;  // look-again passes per pyramid level
 // catch. It costs about six tenths of a second and no detail (0.410 -> 0.407).
 // It was 1 because an earlier, much smaller benchmark said the pass was not
 // worth its time; four test cases were not enough to see this.
-const MID_ITERS = 2;               // look-again passes at the refinement size
+const MID_ITERS = 3;               // look-again passes at the refinement size
 const MID_RADIUS = 24;             // how far the close-up search may roam
 
 
