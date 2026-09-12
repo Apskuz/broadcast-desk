@@ -398,8 +398,12 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
     if (y > 0) fix(i - w);
   };
 
-  const run = (forward, first) => {
+  // Let the page breathe part-way through a sweep, not only between them.
+  // A sweep over a big hole is a second or more of solid arithmetic, and a tab
+  // that stops answering for that long is one the browser offers to kill.
+  const run = async (forward, first) => {
     for (let k = 0; k < order.length; k++) {
+      if (yieldToPage && (k & 8191) === 8191) await yieldToPage();
       const i = order[forward ? k : order.length - 1 - k];
       const x = i % w, y = (i / w) | 0;
       let bD = nnD[i], bx = nnx[i], by = nny[i], bA = level.nnA[i], bS = level.nnS[i], bM = level.nnM[i];
@@ -467,7 +471,7 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
     }
   };
 
-  run(true, true);
+  await run(true, true);
   if (yieldToPage) await yieldToPage();
   for (let p = 0; p < refinePasses; p++) {
     // Everything has something in it now, so every pixel may look again with
@@ -479,7 +483,7 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
         nnD[i] = patchDist(level, i % w, (i / w) | 0, nnx[i], nny[i], transformOf(level, i), Infinity);
       }
     }
-    run(p % 2 === 0, false);
+    await run(p % 2 === 0, false);
     if (yieldToPage) await yieldToPage();
   }
 }
