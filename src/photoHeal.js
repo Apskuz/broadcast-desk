@@ -37,11 +37,20 @@
  *   camera pixels, so the fill ends up made of photograph rather than of an
  *   enlargement of a thumbnail.
  *
- * It invents nothing: everything in the hole was somewhere else in the same
- * frame. That makes it very good at a bin, a sign, a wire, a passer-by, and
- * bad at anything needing an object that is not in the picture at all.
+ * On its own it invents nothing: everything in the hole was somewhere else in
+ * the same frame. That makes it very good at a bin, a sign, a wire or a
+ * passer-by against a busy background, and poor at anything needing material
+ * the photograph simply does not contain — remove a child from a lawn and there
+ * is no spare empty lawn to copy.
  *
- * It runs on the machine looking at it, costs nothing, and needs no network.
+ * So it no longer works alone. photoMigan.js runs a small network that says
+ * what *ought* to be behind the thing, and that answer is dropped in as the
+ * starting point (`guess`, below). The network decides what; this file still
+ * decides which actual pixels, by matching against the photograph at its own
+ * resolution. Everything here works without it — the guess is optional and its
+ * absence costs quality, not function.
+ *
+ * All of it runs on the machine looking at the picture. Nothing is uploaded.
  * ------------------------------------------------------------------------ */
 
 const PATCH = 7;
