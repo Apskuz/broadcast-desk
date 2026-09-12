@@ -36,8 +36,22 @@ const BITS = 4;                       // 16 levels a channel
 const LEVELS = 1 << BITS;
 const BIN = 8 - BITS;
 
-// A bin has to be seen this often before it counts as background, so that one
-// stray pixel of the thing itself cannot make the thing look like background.
+// How much of the surroundings has to be one colour before that colour counts
+// as "the background around here".
+//
+// This is the whole difficulty. What surrounds a mouse on a desk is not only
+// desk: there is a black keyboard beside it, a bag behind it, and the shadow it
+// casts. Accepting every colour that appears nearby means accepting black — and
+// then a black mouse looks exactly like background and gets handed back, which
+// is how a removal ran and left the mouse sitting there.
+//
+// So only the materials that actually make up the bulk of the surroundings
+// count. The bins are taken commonest first until they accou nt for this much of
+// the ring, and the long tail — the keyboard, the cable, the shadow — is left
+// out. The desk is what the mouse is on, and the desk is what wins.
+const BACKGROUND_SHARE = 0.6;
+
+// And no bin at all below this, so noise cannot contribute.
 const MIN_HITS = 3;
 
 // If releasing would leave less than this much of the brush, assume the brush
@@ -113,6 +127,24 @@ export function tightenMask(image, mask) {
     ringCount++;
   }
   if (ringCount < 200) return mask;             // too little to judge from
+
+  // Keep only the commonest colours, up to BACKGROUND_SHARE of the ring. What
+  // is left out is everything the brush happens to sit near without being on:
+  // the keyboard beside the mouse, the cable across the desk, the dark of the
+  // room behind it.
+  {
+    const order = [];
+    for (let b = 0; b < hits.length; b++) if (hits[b] >= MIN_HITS) order.push(b);
+    order.sort((a, b) => hits[b] - hits[a]);
+    let acc = 0;
+    const keep = new Set();
+    for (const b of order) {
+      keep.add(b);
+      acc += hits[b];
+      if (acc >= ringCount * BACKGROUND_SHARE) break;
+    }
+    for (let b = 0; b < hits.length; b++) if (!keep.has(b)) hits[b] = 0;
+  }
 
   // Where the picture changes sharply.
   //

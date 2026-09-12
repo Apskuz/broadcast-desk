@@ -747,17 +747,32 @@ export async function healRegion({ image, mask, onProgress }) {
 
   /* ---- 1. complete it small, where the search can afford to look around --- */
 
-  const mapScale = Math.min(
+  // The map is a shrunken copy, and something thin — a cable, a narrow gap
+  // between a thing and its shadow — can fall between the pixels of it and
+  // leave nothing to fill. That used to return null, which the room showed as
+  // simply nothing happening: the strokes still there, no picture changed, no
+  // word said. So if the hole does not survive being shrunk, it is drawn again
+  // larger until it does.
+  let mapScale = Math.min(
     1,
     WORK / Math.max(region.w, region.h),
     Math.sqrt(HOLE_BUDGET / Math.max(1, region.holeArea)),
   );
-  const small = regionAt(image, mask, region, mapScale);
-  const base = levelFromImageData(small.pixels, small.w, small.h, small.maskPixels);
+  let small = regionAt(image, mask, region, mapScale);
+  let base = levelFromImageData(small.pixels, small.w, small.h, small.maskPixels);
 
-  let any = false;
-  for (let i = 0; i < base.hole.length; i++) if (base.hole[i]) { any = true; break; }
-  if (!any) return null;
+  const hasHole = (lv) => {
+    for (let i = 0; i < lv.hole.length; i++) if (lv.hole[i]) return true;
+    return false;
+  };
+
+  for (let tries = 0; tries < 4 && !hasHole(base); tries++) {
+    if (mapScale >= 1) break;
+    mapScale = Math.min(1, mapScale * 2.5);
+    small = regionAt(image, mask, region, mapScale);
+    base = levelFromImageData(small.pixels, small.w, small.h, small.maskPixels);
+  }
+  if (!hasHole(base)) return null;
 
   const pyramid = [base];
   while (Math.min(pyramid[pyramid.length - 1].w, pyramid[pyramid.length - 1].h) > COARSEST) {

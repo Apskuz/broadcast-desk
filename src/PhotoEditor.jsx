@@ -864,8 +864,18 @@ export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookCl
       // which this is very good at, and a large one, which it is not.
       const wanted = snapToObject ? tightenMask(source, mask) : mask;
       const result = await healRegion({ image: source, mask: wanted, onProgress: setHealing });
-      if (result) { setHealed(result); setHealStrokes([]); }
-      setHealing("");
+      if (result) {
+        setHealed(result);
+        setHealStrokes([]);
+        setHealing("");
+      } else {
+        // It used to stop here without a word — strokes still on screen, the
+        // picture unchanged, nothing said. That is indistinguishable from the
+        // button not working, and it is how a removal that quietly did nothing
+        // got reported as a removal that had been done.
+        setHealing("Nothing to remove there — try painting over more of it.");
+        setTimeout(() => setHealing(""), 4000);
+      }
     } catch {
       setHealing("That didn't work — try a smaller area.");
       setTimeout(() => setHealing(""), 3500);
