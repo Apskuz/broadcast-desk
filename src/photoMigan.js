@@ -33,6 +33,18 @@
 const MODEL_SIZE = 512;
 const MODEL_URL = "/models/migan_pipeline_v2.onnx";
 
+// The runtime loads its own WebAssembly at run time, by name, and has to be
+// told where to find it. Handing it a path under /public does not work: the
+// loader half is a module, and Vite will not resolve a module out of /public —
+// it refuses at dev time and silently ships a broken path in a build. Asking
+// the bundler for the URLs instead means it emits both files as assets and
+// hands back whatever they are really called, hashed or not.
+//
+// The jsep build is the one that can use WebGPU, and it runs plain WebAssembly
+// too, so one pair covers both.
+import wasmUrl from "./ortwasm/ort-wasm-simd-threaded.jsep.wasm?url";
+import mjsUrl from "./ortwasm/ort-wasm-simd-threaded.jsep.mjs?url";
+
 let runtime = null;          // the loaded onnxruntime module
 let sessionPromise = null;   // in flight or resolved; only ever created once
 
@@ -47,10 +59,7 @@ async function getSession(onProgress) {
     const ort = await import("onnxruntime-web");
     runtime = ort;
     ort.env.logLevel = "error";
-    // Served from our own /ort/ rather than left to the bundler to find. The
-    // runtime locates its WebAssembly at run time, by name, which survives
-    // neither hashed filenames nor a CDN we do not control.
-    ort.env.wasm.wasmPaths = "/ort/";
+    ort.env.wasm.wasmPaths = { wasm: wasmUrl, mjs: mjsUrl };
 
     const res = await fetch(MODEL_URL);
     if (!res.ok) throw new Error(`no model (${res.status})`);
