@@ -54,7 +54,14 @@ const MID_BUDGET = 2e6;      // pixels for the high-resolution refinement pass
 const FINE_BUDGET = 12e6;    // pixels held for the final copy
 
 const REFINE_MIN = 2, REFINE_MAX = 4;  // look-again passes per pyramid level
-const MID_ITERS = 1;               // look-again passes at the refinement size
+// Two, not one. Measured over thirty removals across ten photographs, a second
+// look-again pass at the close-up resolution takes the join from 1.34 to 1.09 —
+// where 1.0 means the step from photograph to fill is the same size as the
+// steps between ordinary neighbouring pixels, i.e. nothing for the eye to
+// catch. It costs about six tenths of a second and no detail (0.410 -> 0.407).
+// It was 1 because an earlier, much smaller benchmark said the pass was not
+// worth its time; four test cases were not enough to see this.
+const MID_ITERS = 2;               // look-again passes at the refinement size
 const MID_RADIUS = 24;             // how far the close-up search may roam
 
 
