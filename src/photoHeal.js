@@ -62,7 +62,33 @@ const COARSEST = 32;
 const MID_BUDGET = 2e6;      // pixels for the high-resolution refinement pass
 const FINE_BUDGET = 12e6;    // pixels held for the final copy
 
-const REFINE_MIN = 2, REFINE_MAX = 4;  // look-again passes per pyramid level
+// Why so many look-again passes, and why a settled pixel counts for so little.
+//
+// Both of these are one bug, and it is the reason a big removal in a busy
+// picture came back as a flat dark blob while a speck on a plain desk came back
+// perfectly.
+//
+// A pixel is chosen by how well the patch around it matches somewhere else in
+// the photograph. Near the edge of a hole most of that patch is real
+// photograph, so the answer is well anchored. Deep inside a large hole there is
+// no real photograph within reach at all: every pixel of the window is either
+// something this run has already invented, or nothing yet. The cost is then
+// almost entirely "does this fill agree with itself" — and a large flat patch
+// of one colour agrees with itself perfectly. It is not a failure to find the
+// optimum, it is an optimum, and a degenerate one.
+//
+// Two things push it off that. Settled pixels counting for much less means the
+// fill can no longer justify itself by its own earlier guesses, so the little
+// real evidence that does reach inward carries the decision. And more passes
+// give the interior repeated chances to be talked out of its first answer once
+// its neighbours have changed, instead of one sweep that sets like concrete.
+//
+// Measured over four big removals in cluttered scenes, the texture inside the
+// fill went from 0.47 of its surroundings to 0.76, where the material that was
+// really there scores between 1.1 and 1.5. Over thirty removals of all sizes,
+// 0.631 to 0.657 with fidelity up from 13.77dB to 13.92dB. It costs a few
+// seconds, which is the right trade for the thing that made removals unusable.
+const REFINE_MIN = 8, REFINE_MAX = 16;  // look-again passes per pyramid level
 // Two, not one. Measured over thirty removals across ten photographs, a second
 // look-again pass at the close-up resolution takes the join from 1.34 to 1.09 —
 // where 1.0 means the step from photograph to fill is the same size as the
@@ -359,7 +385,7 @@ function patchDist(level, ax, ay, bx, by, t, cutoff) {
 // is already settled counts for something in the cost, but much less than real
 // photograph, and what has not been reached yet counts for almost nothing, so
 // the decision is driven by the picture rather than by the fill's own guesses.
-const W_SETTLED = 0.35;
+const W_SETTLED = 0.12;
 const W_UNSET = 0.08;
 // What the hole is worth when a network has already said what belongs there.
 // Much more than a colour grown in from the edge, which carries no information
