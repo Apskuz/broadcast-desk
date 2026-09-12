@@ -25,6 +25,7 @@ import {
 } from "./photoEdit";
 import { renderPhoto, renderToBlob, rendererAvailable, turnedAspect, MAX_MASKS } from "./photoRender";
 import { healRegion } from "./photoHeal";
+import { tightenMask } from "./maskIntent";
 
 const GOLD = "var(--gold)";
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -385,6 +386,8 @@ export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookCl
   const [healed, setHealed] = useState(null);      // a canvas standing in for the original
   const [healStrokes, setHealStrokes] = useState([]);
   const [healBrush, setHealBrush] = useState(0.06);
+  // On by default: the brush is nearly always wider than the thing.
+  const [snapToObject, setSnapToObject] = useState(true);
   const [healing, setHealing] = useState("");
 
   const canvasRef = useRef(null);
@@ -854,7 +857,13 @@ export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookCl
     }
     setHealing("Starting…");
     try {
-      const result = await healRegion({ image: source, mask, onProgress: setHealing });
+      // Read the brush as an intention before acting on it. Nobody traces a
+      // thing exactly, so the strokes always cover a good deal of whatever it
+      // was sitting on, and that part was already right. Handing it back means
+      // less to invent, which is also the difference between a small hole,
+      // which this is very good at, and a large one, which it is not.
+      const wanted = snapToObject ? tightenMask(source, mask) : mask;
+      const result = await healRegion({ image: source, mask: wanted, onProgress: setHealing });
       if (result) { setHealed(result); setHealStrokes([]); }
       setHealing("");
     } catch {
@@ -1412,6 +1421,18 @@ export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookCl
               style={{ width: 90, accentColor: GOLD }}
             />
             <button style={BTN} onClick={() => setHealStrokes([])} disabled={!healStrokes.length || !!healing}>Clear</button>
+            {/* Normally what you paint over is the thing plus a margin of
+                whatever it was standing on. Off, it takes the strokes
+                literally, which is what you want when the thing you are
+                removing is a patch of the background itself. */}
+            <button
+              style={snapToObject ? BTN_ON : BTN}
+              onClick={() => setSnapToObject((v) => !v)}
+              disabled={!!healing}
+              title={snapToObject
+                ? "Removing just the object under your strokes, and keeping the background you clipped"
+                : "Removing everything you painted over, exactly as painted"}
+            >{snapToObject ? "Just the object" : "All I painted"}</button>
             <button
               style={healStrokes.length ? BTN_ON : BTN}
               onClick={applyHeal} disabled={!healStrokes.length || !!healing}
