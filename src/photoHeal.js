@@ -168,6 +168,30 @@ function seedHole(level) {
   }
 }
 
+// Put a network's guess into the hole as the starting point, instead of growing
+// a colour in from the edge.
+//
+// The guess is soft — it was made at 512px and stretched back up — and none of
+// that softness survives, because nothing here is ever shown. Its whole job is
+// to tell the matcher roughly what belongs where, so that the first pass hunts
+// for grass where grass should be and for fence where fence should be, instead
+// of working that out from the boundary alone and sometimes getting it wrong.
+// Outside the hole nothing is touched: that is real photograph and it stays.
+function seedFromGuide(level, guide) {
+  const { w, h, hole, rgb } = level;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(guide, 0, 0, guide.width, guide.height, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  for (let i = 0, n = w * h; i < n; i++) {
+    if (!hole[i]) continue;
+    rgb[i * 3] = px[i * 4];
+    rgb[i * 3 + 1] = px[i * 4 + 1];
+    rgb[i * 3 + 2] = px[i * 4 + 2];
+  }
+}
+
 // How far every pixel is from the nearest hole pixel. A patch may only be taken
 // from far enough out that nothing it covers is hole — otherwise the fill feeds
 // on itself and smears. With rotation and scale in play the footprint is no
@@ -321,6 +345,10 @@ function patchDist(level, ax, ay, bx, by, t, cutoff) {
 // the decision is driven by the picture rather than by the fill's own guesses.
 const W_SETTLED = 0.35;
 const W_UNSET = 0.08;
+// What the hole is worth when a network has already said what belongs there.
+// Much more than a colour grown in from the edge, which carries no information
+// at all past the first few pixels, and still well short of real photograph.
+const W_GUIDED = 0.35;
 
 async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldToPage, refinePasses) {
   const { w, h, hole, rgb, nnx, nny, nnD, lum, lgx, lgy } = level;
@@ -336,7 +364,8 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
   for (let i = 0; i < n; i++) hasHint[i] = nnD[i] < Infinity ? 1 : 0;
 
   level.wt = new Float32Array(n);
-  for (let i = 0; i < n; i++) level.wt[i] = hole[i] ? W_UNSET : W_REAL;
+  const unset = level.guided ? W_GUIDED : W_UNSET;
+  for (let i = 0; i < n; i++) level.wt[i] = hole[i] ? unset : W_REAL;
   for (let i = 0; i < n; i++) if (hole[i]) nnD[i] = Infinity;
 
   // Keep the slope arrays honest as pixels land, or every decision after the
@@ -684,7 +713,7 @@ function regionAt(image, mask, region, scale) {
  * what to remove. Returns a canvas at the image's own size, or null if there
  * was nothing to do.
  */
-export async function healRegion({ image, mask, onProgress }) {
+export async function healRegion({ image, mask, guess, onProgress }) {
   const iw = image.naturalWidth || image.width;
   const ih = image.naturalHeight || image.height;
 
@@ -696,6 +725,14 @@ export async function healRegion({ image, mask, onProgress }) {
   if (!region) return null;
 
   const rng = seededRandom(12345);
+
+  // Ask whoever called us whether they have a guess at what is behind it. They
+  // may not — no model on this machine, a browser too old for it, weights that
+  // would not load — and everything below works either way, just less well.
+  let hint = null;
+  if (guess) {
+    try { hint = await guess(region); } catch { hint = null; }
+  }
 
   /* ---- 1. complete it small, where the search can afford to look around --- */
 
@@ -716,7 +753,17 @@ export async function healRegion({ image, mask, onProgress }) {
     pyramid.push(shrink(pyramid[pyramid.length - 1]));
   }
 
-  seedHole(pyramid[pyramid.length - 1]);
+  // A guess from the network, if there is one, is a far better starting point
+  // than anything grown from the edge: it already says where the ground meets
+  // the hedge behind the thing that was removed. Where it exists the matcher is
+  // also allowed to take it more seriously (W_GUIDED rather than W_UNSET),
+  // because for once the contents of the hole mean something.
+  if (hint) {
+    seedFromGuide(pyramid[pyramid.length - 1], hint);
+    for (const lv of pyramid) lv.guided = true;
+  } else {
+    seedHole(pyramid[pyramid.length - 1]);
+  }
   for (let li = pyramid.length - 1; li >= 0; li--) {
     say(`Working out what was behind it… ${pyramid.length - li}/${pyramid.length}`);
     await breathe();

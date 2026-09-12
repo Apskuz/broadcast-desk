@@ -25,6 +25,7 @@ import {
 } from "./photoEdit";
 import { renderPhoto, renderToBlob, rendererAvailable, turnedAspect, MAX_MASKS } from "./photoRender";
 import { healRegion } from "./photoHeal";
+import { guessBehind } from "./photoMigan";
 
 const GOLD = "var(--gold)";
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -854,7 +855,20 @@ export default function PhotoEditor({ src, fallbackSrc, name, look, crop, lookCl
     }
     setHealing("Starting…");
     try {
-      const result = await healRegion({ image: source, mask, onProgress: setHealing });
+      // Two halves. The network says what ought to be behind the thing —
+      // where the ground meets the wall, which way the branch was going — and
+      // the matcher then finds those things in this actual photograph and
+      // copies them at full resolution. Neither is much good alone: the network
+      // paints something soft and faintly invented, the matcher on its own has
+      // to work out the layout from the boundary and sometimes gets it wrong.
+      // If the network cannot be loaded, guessBehind returns null and the
+      // matcher carries on by itself, exactly as it did before.
+      const result = await healRegion({
+        image: source,
+        mask,
+        guess: (region) => guessBehind({ image: source, mask, region, onProgress: setHealing }),
+        onProgress: setHealing,
+      });
       if (result) { setHealed(result); setHealStrokes([]); }
       setHealing("");
     } catch {
