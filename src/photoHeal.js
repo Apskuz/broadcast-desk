@@ -108,7 +108,6 @@ const SCALE_LO = 0.85, SCALE_HI = 1.18;
 const ROT_MAX = 0.22;              // radians, about 12 degrees
 
 const W_REAL = 1;                  // a pixel that came out of the camera
-const W_GUESS = 0.5;               // one this run is still deciding
 const GRAD_W = 0.5;                // slope against colour, in the match cost
 
 /* ------------------------------- small helpers ---------------------------- */
@@ -252,41 +251,28 @@ function computeLuma(level) {
   }
 }
 
-// Bilinear read, clamped at the edges.
-function sample3(rgb, w, h, x, y, out) {
-  const fx = clamp(x, 0, w - 1.001), fy = clamp(y, 0, h - 1.001);
-  const x0 = fx | 0, y0 = fy | 0;
-  const x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0;
-  const ax = fx - x0, ay = fy - y0;
-  const i00 = (y0 * w + x0) * 3, i10 = (y0 * w + x1) * 3;
-  const i01 = (y1 * w + x0) * 3, i11 = (y1 * w + x1) * 3;
-  const w00 = (1 - ax) * (1 - ay), w10 = ax * (1 - ay), w01 = (1 - ax) * ay, w11 = ax * ay;
-  out[0] = rgb[i00] * w00 + rgb[i10] * w10 + rgb[i01] * w01 + rgb[i11] * w11;
-  out[1] = rgb[i00 + 1] * w00 + rgb[i10 + 1] * w10 + rgb[i01 + 1] * w01 + rgb[i11 + 1] * w11;
-  out[2] = rgb[i00 + 2] * w00 + rgb[i10 + 2] * w10 + rgb[i01 + 2] * w01 + rgb[i11 + 2] * w11;
-}
-
-function sample1(a, w, h, x, y) {
-  const fx = clamp(x, 0, w - 1.001), fy = clamp(y, 0, h - 1.001);
-  const x0 = fx | 0, y0 = fy | 0;
-  const x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0;
-  const ax = fx - x0, ay = fy - y0;
-  return a[y0 * w + x0] * (1 - ax) * (1 - ay) + a[y0 * w + x1] * ax * (1 - ay)
-    + a[y1 * w + x0] * (1 - ax) * ay + a[y1 * w + x1] * ax * ay;
-}
-
 /* ------------------------------- PatchMatch ------------------------------- */
 
 // The transform a match carries: mirror, then rotate, then scale. Stored per
 // pixel as the four numbers that make it up rather than as a matrix, because
-// the random search has to contract each of them independently.
-function transformOf(level, i) {
-  const m = level.nnM[i] ? -1 : 1;
-  const a = level.nnA[i], s = level.nnS[i];
+// the random search has to contract each of them independently. It is handed
+// around as four loose numbers rather than an object: the search builds one per
+// candidate, millions of times over a fill, and an object per candidate is
+// rubbish for the collector to clear up.
+//
+//   [ c -sn ] [ m 0 ]
+//   [ sn  c ] [ 0 1 ]
+const TM = [1, 0, 0, 1];
+
+function transformInto(a, s, mirror, out) {
+  const m = mirror ? -1 : 1;
+  if (a === 0 && s === 1) {
+    out[0] = m; out[1] = 0; out[2] = 0; out[3] = 1;
+    return out;
+  }
   const c = Math.cos(a) * s, sn = Math.sin(a) * s;
-  // [ c -sn ] [ m 0 ]
-  // [ sn  c ] [ 0 1 ]
-  return { xx: c * m, xy: -sn, yx: sn * m, yy: c };
+  out[0] = c * m; out[1] = -sn; out[2] = sn * m; out[3] = c;
+  return out;
 }
 
 // Distance between the patch of the current estimate centred at (ax, ay) and
@@ -295,17 +281,37 @@ function transformOf(level, i) {
 // Real photograph inside the window counts for more than the estimate. Without
 // that the search compares its own guess against the world, finds that smooth
 // matches smooth, and settles on a flat patch.
-const PX = [0, 0, 0];
-
-function patchDist(level, ax, ay, bx, by, t, cutoff) {
-  const { w, h, rgb, hole, lgx, lgy } = level;
-  const px = PX;
+function patchDist(level, ax, ay, bx, by, txx, txy, tyx, tyy, cutoff) {
+  const { w, h, rgb, lgx, lgy, wt } = level;
   let sum = 0;
 
   // Most matches are a plain copy, and a plain copy lands exactly on pixels.
   // Taking that path without the interpolation is worth about four times the
   // speed, which is the difference between this being usable and not.
-  if (t.xy === 0 && t.yx === 0 && t.xx === 1 && t.yy === 1) {
+  if (txy === 0 && tyx === 0 && txx === 1 && tyy === 1) {
+    // And when neither window touches the edge of the frame — which is nearly
+    // always, since a patch is seven across in a region hundreds wide — nothing
+    // needs clamping either, and both windows walk forward by one.
+    if (ax >= HALF && ay >= HALF && ax < w - HALF && ay < h - HALF
+      && bx >= HALF && by >= HALF && bx < w - HALF && by < h - HALF) {
+      let ai = (ay - HALF) * w + (ax - HALF), bi = (by - HALF) * w + (bx - HALF);
+      const stride = w - PATCH;
+      for (let dy = 0; dy < PATCH; dy++) {
+        for (let dx = 0; dx < PATCH; dx++) {
+          const a3 = ai * 3, b3 = bi * 3;
+          const dr = rgb[a3] - rgb[b3];
+          const dg = rgb[a3 + 1] - rgb[b3 + 1];
+          const db = rgb[a3 + 2] - rgb[b3 + 2];
+          const ex = lgx[ai] - lgx[bi], ey = lgy[ai] - lgy[bi];
+          sum += wt[ai] * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
+          if (sum >= cutoff) return sum;
+          ai++; bi++;
+        }
+        ai += stride; bi += stride;
+      }
+      return sum;
+    }
+
     for (let dy = -HALF; dy <= HALF; dy++) {
       const ay2 = clamp(ay + dy, 0, h - 1), by2 = clamp(by + dy, 0, h - 1);
       for (let dx = -HALF; dx <= HALF; dx++) {
@@ -315,34 +321,51 @@ function patchDist(level, ax, ay, bx, by, t, cutoff) {
         const dg = rgb[ai * 3 + 1] - rgb[bi * 3 + 1];
         const db = rgb[ai * 3 + 2] - rgb[bi * 3 + 2];
         const ex = lgx[ai] - lgx[bi], ey = lgy[ai] - lgy[bi];
-        const wt = level.wt ? level.wt[ai] : (hole[ai] ? W_GUESS : W_REAL);
-        sum += wt * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
+        sum += wt[ai] * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
         if (sum >= cutoff) return sum;
       }
     }
     return sum;
   }
 
+  // A turned or resized patch lands between pixels, so every one of its
+  // forty-nine samples is an interpolation. Colour and the two slopes are read
+  // at the *same* point, though, so the expensive part — clamping, taking the
+  // floor, the four corner addresses — is worked out once and the three of them
+  // share it. It used to be done three times over.
   for (let dy = -HALF; dy <= HALF; dy++) {
     for (let dx = -HALF; dx <= HALF; dx++) {
       const ax2 = clamp(ax + dx, 0, w - 1), ay2 = clamp(ay + dy, 0, h - 1);
       const ai = ay2 * w + ax2;
 
-      const ux = bx + t.xx * dx + t.xy * dy;
-      const uy = by + t.yx * dx + t.yy * dy;
+      const ux = bx + txx * dx + txy * dy;
+      const uy = by + tyx * dx + tyy * dy;
 
-      sample3(rgb, w, h, ux, uy, px);
-      const dr = rgb[ai * 3] - px[0], dg = rgb[ai * 3 + 1] - px[1], db = rgb[ai * 3 + 2] - px[2];
+      const fx = clamp(ux, 0, w - 1.001), fy = clamp(uy, 0, h - 1.001);
+      const x0 = fx | 0, y0 = fy | 0;
+      const x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0;
+      const bax = fx - x0, bay = fy - y0;
+      const r0 = y0 * w, r1 = y1 * w;
+      const i00 = r0 + x0, i10 = r0 + x1, i01 = r1 + x0, i11 = r1 + x1;
+      const w00 = (1 - bax) * (1 - bay), w10 = bax * (1 - bay);
+      const w01 = (1 - bax) * bay, w11 = bax * bay;
+
+      const j00 = i00 * 3, j10 = i10 * 3, j01 = i01 * 3, j11 = i11 * 3;
+      const dr = rgb[ai * 3] - (rgb[j00] * w00 + rgb[j10] * w10 + rgb[j01] * w01 + rgb[j11] * w11);
+      const dg = rgb[ai * 3 + 1] - (rgb[j00 + 1] * w00 + rgb[j10 + 1] * w10 + rgb[j01 + 1] * w01 + rgb[j11 + 1] * w11);
+      const db = rgb[ai * 3 + 2] - (rgb[j00 + 2] * w00 + rgb[j10 + 2] * w10 + rgb[j01 + 2] * w01 + rgb[j11 + 2] * w11);
 
       // The slope has to be compared in the same frame, so the source slope is
       // brought back through the transform before it is subtracted.
-      const sgx = sample1(lgx, w, h, ux, uy), sgy = sample1(lgy, w, h, ux, uy);
-      const tgx = t.xx * sgx + t.yx * sgy;
-      const tgy = t.xy * sgx + t.yy * sgy;
+      const sgx = lgx[i00] * (1 - bax) * (1 - bay) + lgx[i10] * bax * (1 - bay)
+        + lgx[i01] * (1 - bax) * bay + lgx[i11] * bax * bay;
+      const sgy = lgy[i00] * (1 - bax) * (1 - bay) + lgy[i10] * bax * (1 - bay)
+        + lgy[i01] * (1 - bax) * bay + lgy[i11] * bax * bay;
+      const tgx = txx * sgx + tyx * sgy;
+      const tgy = txy * sgx + tyy * sgy;
       const ex = lgx[ai] - tgx, ey = lgy[ai] - tgy;
 
-      const wt = level.wt ? level.wt[ai] : (hole[ai] ? W_GUESS : W_REAL);
-      sum += wt * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
+      sum += wt[ai] * (dr * dr + dg * dg + db * db + GRAD_W * (ex * ex + ey * ey));
       if (sum >= cutoff) return sum;
     }
   }
@@ -398,6 +421,23 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
     if (y > 0) fix(i - w);
   };
 
+  // The pixel being decided, and the best answer found for it so far. Held out
+  // here rather than inside the sweep so that weighing up a candidate is one
+  // function made once, instead of a fresh closure built for every pixel of
+  // every pass — which, over a big hole, is millions of them.
+  let x = 0, y = 0, bD = Infinity, bx = 0, by = 0, bA = 0, bS = 1, bM = 0;
+
+  const consider = (cx, cy, ca, cs, cm) => {
+    const s = clamp(cs, SCALE_LO, SCALE_HI);
+    const a = clamp(ca, -ROT_MAX, ROT_MAX);
+    if (cx < 0 || cy < 0 || cx > w - 1 || cy > h - 1) return;
+    const reach = Math.ceil(HALF * Math.max(1, s) * 1.45) + 1;
+    if (minDist[(cy | 0) * w + (cx | 0)] <= reach) return;
+    const t = transformInto(a, s, cm, TM);
+    const d = patchDist(level, x, y, cx, cy, t[0], t[1], t[2], t[3], bD);
+    if (d < bD) { bD = d; bx = cx; by = cy; bA = a; bS = s; bM = cm; }
+  };
+
   // Let the page breathe part-way through a sweep, not only between them.
   // A sweep over a big hole is a second or more of solid arithmetic, and a tab
   // that stops answering for that long is one the browser offers to kill.
@@ -405,21 +445,9 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
     for (let k = 0; k < order.length; k++) {
       if (yieldToPage && (k & 8191) === 8191) await yieldToPage();
       const i = order[forward ? k : order.length - 1 - k];
-      const x = i % w, y = (i / w) | 0;
-      let bD = nnD[i], bx = nnx[i], by = nny[i], bA = level.nnA[i], bS = level.nnS[i], bM = level.nnM[i];
-
-      const consider = (cx, cy, ca, cs, cm) => {
-        const s = clamp(cs, SCALE_LO, SCALE_HI);
-        const a = clamp(ca, -ROT_MAX, ROT_MAX);
-        if (cx < 0 || cy < 0 || cx > w - 1 || cy > h - 1) return;
-        const reach = Math.ceil(HALF * Math.max(1, s) * 1.45) + 1;
-        if (minDist[(cy | 0) * w + (cx | 0)] <= reach) return;
-        const m = cm ? -1 : 1;
-        const c = Math.cos(a) * s, sn = Math.sin(a) * s;
-        const t = { xx: c * m, xy: -sn, yx: sn * m, yy: c };
-        const d = patchDist(level, x, y, cx, cy, t, bD);
-        if (d < bD) { bD = d; bx = cx; by = cy; bA = a; bS = s; bM = cm; }
-      };
+      x = i % w; y = (i / w) | 0;
+      bD = nnD[i]; bx = nnx[i]; by = nny[i];
+      bA = level.nnA[i]; bS = level.nnS[i]; bM = level.nnM[i];
 
       const step = forward ? -1 : 1;
       if (x + step >= 0 && x + step < w && nnD[i + step] < Infinity) {
@@ -480,7 +508,8 @@ async function onionCopy(level, order, rng, sources, minDist, maxRadius, yieldTo
     for (let k = 0; k < order.length; k++) {
       const i = order[k];
       if (nnD[i] < Infinity) {
-        nnD[i] = patchDist(level, i % w, (i / w) | 0, nnx[i], nny[i], transformOf(level, i), Infinity);
+        const t = transformInto(level.nnA[i], level.nnS[i], level.nnM[i], TM);
+        nnD[i] = patchDist(level, i % w, (i / w) | 0, nnx[i], nny[i], t[0], t[1], t[2], t[3], Infinity);
       }
     }
     await run(p % 2 === 0, false);
