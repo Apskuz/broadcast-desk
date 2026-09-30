@@ -789,6 +789,10 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
 .nav-item:hover{ background:var(--panel-raised); color:var(--text); }
 .nav-item.active{ background:var(--gold-soft); color:var(--gold); }
 .nav-item svg{ flex-shrink:0; }
+.unread-pip{
+  margin-left:auto; background:var(--alert); color:#fff; font-size:10px; font-weight:700;
+  border-radius:10px; padding:1px 6px; line-height:1.6; flex-shrink:0;
+}
 .sidebar-foot{ margin-top:auto; padding:12px 8px 2px; border-top:1px solid var(--hair); font-size:10.5px; color:var(--muted); }
 .live-tag{ display:inline-flex; align-items:center; gap:5px; color:var(--alert); font-weight:600; letter-spacing:0.08em; }
 .live-tag .dot{ width:6px; height:6px; border-radius:50%; background:var(--alert); animation:pulse 1.8s infinite; }
@@ -6345,6 +6349,29 @@ function Meeting({ data, saveData, profile }) {
 
 /* ---------------------------------- Chat ---------------------------------- */
 
+// How many messages are waiting, and in which conversation. The sidebar badge and
+// the thread list inside Chat both read this, so the numbers always agree: if the
+// sidebar says 7, the threads add up to 7.
+//
+// A message counts as read once it has your name in readBy. Messages written
+// before this existed have no readBy array at all, and those stay silent — nobody
+// wants to open Chat and be told a year of history is new.
+function unreadChat(data, profile) {
+  const counts = { team: 0, byPerson: {}, total: 0 };
+  // A direct message only counts while its sender still has a profile — otherwise
+  // there is no thread left to open, and the badge could never be cleared.
+  const present = new Set((data.profiles || []).map((p) => p.name));
+  for (const m of data.messages || []) {
+    if (m.from === profile) continue;
+    if (!Array.isArray(m.readBy) || m.readBy.includes(profile)) continue;
+    if (m.to === null) counts.team += 1;
+    else if (m.to === profile && present.has(m.from)) counts.byPerson[m.from] = (counts.byPerson[m.from] || 0) + 1;
+    else continue; // somebody else's private conversation, or a deleted profile's
+    counts.total += 1;
+  }
+  return counts;
+}
+
 function Chat({ data, saveData, profile }) {
   const [thread, setThread] = useState("team"); // "team" | a profile name
   const [text, setText] = useState("");
@@ -6360,11 +6387,27 @@ function Chat({ data, saveData, profile }) {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [visible.length, thread]);
 
+  const unread = unreadChat(data, profile);
+
+  // Reading a thread is opening it. Anything unread in the thread on screen is
+  // marked read on sight, which also covers a message that lands while you sit here.
+  const unreadHere = visible.filter((m) => m.from !== profile && Array.isArray(m.readBy) && !m.readBy.includes(profile));
+  useEffect(() => {
+    if (unreadHere.length === 0) return;
+    const ids = new Set(unreadHere.map((m) => m.id));
+    saveData({
+      ...data,
+      messages: (data.messages || []).map((m) =>
+        ids.has(m.id) ? { ...m, readBy: [...new Set([...(m.readBy || []), profile])] } : m
+      ),
+    });
+  }, [thread, unreadHere.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const initials = (name) => (name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
   const send = () => {
     if (!text.trim() || !profile) return;
-    const msg = { id: uid(), from: profile, to: thread === "team" ? null : thread, text: text.trim(), date: todayISO(), time: new Date().toTimeString().slice(0, 5) };
+    const msg = { id: uid(), from: profile, to: thread === "team" ? null : thread, text: text.trim(), date: todayISO(), time: new Date().toTimeString().slice(0, 5), readBy: [profile] };
     let notifications = data.notifications || [];
     if (thread === "team") {
       notifications = [...notifications, makeNotification({ toProfile: null, type: "message", text: `${profile} in Team Chat: ${text.trim().slice(0, 60)}`, link: "chat", fromProfile: profile })];
@@ -6381,16 +6424,27 @@ function Chat({ data, saveData, profile }) {
   return (
     <div>
       <div className="topbar">
-        <div><div className="page-title">Chat</div><div className="page-sub">Team chat, or message someone directly.</div></div>
+        <div>
+          <div className="page-title">Chat</div>
+          <div className="page-sub">
+            {unread.total > 0
+              ? `${unread.total} new ${unread.total === 1 ? "message" : "messages"} waiting.`
+              : "Team chat, or message someone directly."}
+          </div>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="card" style={{ width: 200, flexShrink: 0, padding: 12 }}>
-          <button className={`nav-item ${thread === "team" ? "active" : ""}`} onClick={() => setThread("team")}><Users size={16} /> Team Chat</button>
+          <button className={`nav-item ${thread === "team" ? "active" : ""}`} onClick={() => setThread("team")}>
+            <Users size={16} /> Team Chat
+            {unread.team > 0 && <span className="unread-pip">{unread.team}</span>}
+          </button>
           {others.map((p) => (
             <button key={p.id} className={`nav-item ${thread === p.name ? "active" : ""}`} onClick={() => setThread(p.name)}>
               <span style={{ width: 20, height: 20, borderRadius: "50%", background: `var(--${p.color}-soft)`, color: `var(--${p.color})`, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{initials(p.name)}</span>
               {p.name}
+              {unread.byPerson[p.name] > 0 && <span className="unread-pip">{unread.byPerson[p.name]}</span>}
             </button>
           ))}
           {others.length === 0 && <div className="empty" style={{ padding: "10px 4px", fontSize: 11 }}>No one else has signed in yet.</div>}
@@ -7685,7 +7739,7 @@ function NotificationBell({ data, saveData, profile, setView }) {
         <Bell size={16} />
         Notifications
         {unread.length > 0 && (
-          <span style={{ marginLeft: "auto", background: "var(--alert)", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 6px" }}>{unread.length}</span>
+          <span className="unread-pip">{unread.length}</span>
         )}
       </button>
       {open && pos && createPortal(
@@ -8176,7 +8230,12 @@ export default function TeamHub() {
   const myUnreadNotifications = (data.notifications || []).filter(
     (n) => (n.toProfile === profile || n.toProfile === null) && !(n.readBy || []).includes(profile)
   );
-  const navBadgeCount = (navId) => myUnreadNotifications.filter((n) => n.link === navId).length;
+  // Chat counts the messages themselves rather than the notification rows, so the
+  // sidebar number keeps pace with the per-thread numbers inside Chat: it only
+  // drops once a thread has actually been read, not the moment Chat is opened.
+  const chatUnread = unreadChat(data, profile);
+  const navBadgeCount = (navId) =>
+    navId === "chat" ? chatUnread.total : myUnreadNotifications.filter((n) => n.link === navId).length;
   const openNavItem = (navId) => {
     setView(navId);
     setNavOpen(false);
@@ -8255,7 +8314,7 @@ export default function TeamHub() {
             <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => openNavItem(n.id)}>
               <Icon size={16} /> {n.label}
               {count > 0 && (
-                <span style={{ marginLeft: "auto", background: "var(--alert)", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 6px" }}>{count}</span>
+                <span className="unread-pip">{count}</span>
               )}
             </button>
           );
