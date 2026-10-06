@@ -44,6 +44,28 @@ async function graph(path, params) {
   return json;
 }
 
+const PAGE_FIELDS = "id,name,access_token,instagram_business_account{id,username}";
+
+// me/accounts lists the Pages a person has a role on directly. A Page owned by
+// a business portfolio and granted through Facebook Login for Business is
+// often missing from it altogether -- the grant is real, it just isn't listed
+// there. The token itself records exactly which Pages were ticked in the
+// consent dialog, so read them from debug_token and ask for each by id.
+async function grantedPages(userToken, appId, appSecret) {
+  const debug = await graph("debug_token", { input_token: userToken, access_token: `${appId}|${appSecret}` });
+  const ids = new Set();
+  for (const s of debug.data?.granular_scopes || []) {
+    if (String(s.scope).startsWith("pages_")) (s.target_ids || []).forEach((id) => ids.add(String(id)));
+  }
+  const pages = [];
+  for (const id of ids) {
+    try {
+      pages.push(await graph(id, { fields: PAGE_FIELDS, access_token: userToken }));
+    } catch { /* one unreadable Page shouldn't hide the others */ }
+  }
+  return pages;
+}
+
 export default async function handler(req, res) {
   const { code, error, error_description: errorDescription } = req.query || {};
 
@@ -80,11 +102,14 @@ export default async function handler(req, res) {
     const expiresAt = new Date(Date.now() + (Number(longJson.expires_in) || 5184000) * 1000);
 
     // 3. Which Pages does this person manage, and which have Instagram attached?
-    const pages = await graph("me/accounts", {
-      fields: "id,name,access_token,instagram_business_account{id,username}",
-      limit: "100",
-      access_token: userToken,
-    });
+    const pages = await graph("me/accounts", { fields: PAGE_FIELDS, limit: "100", access_token: userToken });
+    if (!(pages.data || []).some((p) => p.instagram_business_account?.id)) {
+      try {
+        const granted = await grantedPages(userToken, appId, appSecret);
+        const known = new Set((pages.data || []).map((p) => p.id));
+        pages.data = [...(pages.data || []), ...granted.filter((p) => !known.has(p.id))];
+      } catch { /* fall through to the explanation below */ }
+    }
 
     const linked = (pages.data || []).filter((p) => p.instagram_business_account?.id);
     if (!linked.length) {
@@ -115,7 +140,11 @@ export default async function handler(req, res) {
       ig_user_id: String(p.instagram_business_account.id),
       username: p.instagram_business_account.username || null,
       account_type: "BUSINESS",
-      access_token: p.access_token,   // the page token -- what syncs actually use
+      // The page token -- what syncs actually use. A Page read by id comes back
+      // without one when the person's access is through a business portfolio;
+      // the user token can read the same Instagram insights, it just needs
+      // renewing, which the nightly sync does.
+      access_token: p.access_token || userToken,
       user_token: userToken,
       token_expires: expiresAt.toISOString(),
       page_id: p.id,

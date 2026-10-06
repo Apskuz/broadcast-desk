@@ -81,18 +81,16 @@ async function refreshTokenIfNeeded(supabase, account) {
     if (!renewed.access_token) return account.access_token;
 
     // Re-read the page token from the renewed user token, so both stay fresh.
-    let pageToken = account.access_token;
-    try {
-      const pages = await graph("me/accounts", {
-        fields: "id,access_token,instagram_business_account{id}",
-        limit: "100",
-        access_token: renewed.access_token,
-      });
-      const mine = (pages.data || []).find(
-        (p) => String(p.instagram_business_account?.id) === String(account.ig_user_id)
-      );
-      if (mine?.access_token) pageToken = mine.access_token;
-    } catch { /* keep the existing page token; it is usually still valid */ }
+    // Asked for by Page id rather than found in me/accounts: a Page owned by a
+    // business portfolio is often not listed there at all. Without a page
+    // token, the renewed user token is what reads the insights.
+    let pageToken = account.access_token === account.user_token ? renewed.access_token : account.access_token;
+    if (account.page_id) {
+      try {
+        const page = await graph(account.page_id, { fields: "access_token", access_token: renewed.access_token });
+        if (page.access_token) pageToken = page.access_token;
+      } catch { /* keep the existing token; it is usually still valid */ }
+    }
 
     const newExpiry = new Date(Date.now() + (Number(renewed.expires_in) || 5184000) * 1000).toISOString();
     await supabase.from("ig_accounts")
