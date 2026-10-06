@@ -21,7 +21,7 @@ import {
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
   Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
-  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette, Search, Play as PlayIcon, Maximize2, Scissors, PenTool, Sliders
+  Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette, Search, Play as PlayIcon, Maximize2, Scissors, PenTool, Sliders, Download, Music
 } from "lucide-react";
 
 /* ---------------------------------- helpers ---------------------------------- */
@@ -1120,6 +1120,7 @@ function MediaLightbox({ fileId, kind, name, onClose }) {
       style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(8,9,13,0.94)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
     >
       <button className="icon-btn" onClick={onClose} style={{ position: "absolute", top: 16, right: 16, color: "var(--text)" }}><X size={22} /></button>
+      <a className="icon-btn" href={driveDownloadSrc(fileId)} download={name || true} onClick={(e) => e.stopPropagation()} title="Download the original" style={{ position: "absolute", top: 16, right: 60, color: "var(--text)" }}><Download size={22} /></a>
       {kind === "image" ? (
         <img src={driveThumbSrc(fileId, "s1600")} onError={hideBrokenThumb} alt={name || ""} onClick={(e) => e.stopPropagation()} style={{ maxWidth: "100%", maxHeight: "90vh", objectFit: "contain", borderRadius: 8 }} />
       ) : (
@@ -2340,7 +2341,16 @@ function youtubeId(url) {
   const m = (url || "").match(/(?:youtu\.be\/|v=|embed\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
 }
-const fileKind = (file) => ((file.type || "").startsWith("image/") ? "image" : "video");
+const fileKind = (file) => {
+  const type = file.type || "";
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("audio/")) return "audio";
+  return "video";
+};
+// The file exactly as it was uploaded — not a preview, not a re-encode. Drive
+// serves it straight to the browser as a download (every upload is already
+// "anyone with the link"), so it costs none of this app's own transfer allowance.
+const driveDownloadSrc = (fileId) => `https://drive.google.com/uc?export=download&id=${fileId}`;
 
 // What was actually uploaded wins over the format picked in the form — someone
 // can upload a photo against a piece marked "Video / Reel", and it still needs
@@ -2629,9 +2639,11 @@ async function shrinkImage(file, maxDim = 1920, quality = 0.85) {
   }
 }
 
-function uploadToDrive(originalFile, onProgress, profile, onRetry) {
+// keepOriginal skips shrinkImage — for Chat, where a picture is sent to be
+// kept and downloaded at full quality, not just looked at on the board.
+function uploadToDrive(originalFile, onProgress, profile, onRetry, { keepOriginal = false } = {}) {
   return new Promise(async (resolve, reject) => {
-    const file = await shrinkImage(originalFile);
+    const file = keepOriginal ? originalFile : await shrinkImage(originalFile);
     const maxAttempts = 3;
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -6468,7 +6480,7 @@ function Chat({ data, saveData, profile }) {
     setAttachRetry("");
     setAttachError("");
     try {
-      const result = await uploadToDrive(file, setAttachProgress, profile, (attempt, max) => setAttachRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
+      const result = await uploadToDrive(file, setAttachProgress, profile, (attempt, max) => setAttachRetry(`Connection hiccup — retrying (${attempt}/${max})…`), { keepOriginal: true });
       setPending((list) => [...list, { fileId: driveFileId(result.link), name: result.name, kind: result.kind }]);
     } catch (err) {
       setAttachError(err.message || "Couldn't attach that.");
@@ -6502,7 +6514,9 @@ function Chat({ data, saveData, profile }) {
     if ((!body && pending.length === 0) || !profile) return;
     const msg = { id: uid(), from: profile, to: thread === "team" ? null : thread, text: body, attachments: pending, date: todayISO(), time: new Date().toTimeString().slice(0, 5), readBy: [profile] };
     // What the notification says when the message is pictures and nothing else.
-    const summary = body || (pending.length === 1 ? `sent a ${pending[0].kind === "video" ? "video" : "picture"}` : `sent ${pending.length} pictures`);
+    const summary = body || (pending.length === 1
+      ? `sent ${{ video: "a video", audio: "an audio file" }[pending[0].kind] || "a picture"}`
+      : `sent ${pending.length} files`);
     let notifications = data.notifications || [];
     if (thread === "team") {
       notifications = [...notifications, makeNotification({ toProfile: null, type: "message", text: `${profile} in Team Chat: ${summary.slice(0, 60)}`, link: "chat", fromProfile: profile })];
@@ -6555,11 +6569,22 @@ function Chat({ data, saveData, profile }) {
                 <div style={{ display: "inline-block", background: m.from === profile ? "var(--gold)" : "var(--panel-raised)", color: m.from === profile ? "#171812" : "var(--text)", padding: m.text ? "8px 12px" : 6, borderRadius: 10, fontSize: 13, maxWidth: "75%", textAlign: "left", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                   {m.text && <Linkify text={m.text} />}
                   {m.text && <LinkPreview text={m.text} />}
-                  {(m.attachments || []).length > 0 && (
+                  {(m.attachments || []).filter((a) => a.kind === "audio").map((a) => (
+                    // Audio has no picture to tap, so it plays right here in the bubble.
+                    <div key={a.fileId} style={{ marginTop: m.text ? 8 : 0, minWidth: 240 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginBottom: 4 }}>
+                        <Music size={13} />
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
+                        <a href={driveDownloadSrc(a.fileId)} download={a.name} title="Download" style={{ color: "inherit", lineHeight: 0 }}><Download size={14} /></a>
+                      </div>
+                      <audio src={driveMediaSrc(a.fileId)} controls preload="none" style={{ width: "100%", display: "block" }} />
+                    </div>
+                  ))}
+                  {(m.attachments || []).some((a) => a.kind !== "audio") && (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: m.text ? 8 : 0 }}>
-                      {m.attachments.map((a) => (
+                      {m.attachments.filter((a) => a.kind !== "audio").map((a) => (
+                        <div key={a.fileId} style={{ position: "relative" }}>
                         <button
-                          key={a.fileId}
                           onClick={() => setLightbox(a)}
                           title={a.name}
                           style={{ position: "relative", padding: 0, border: "none", background: "none", lineHeight: 0, borderRadius: 8, overflow: "hidden" }}
@@ -6574,6 +6599,13 @@ function Chat({ data, saveData, profile }) {
                             <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", background: "rgba(0,0,0,0.25)" }}><Play size={22} /></span>
                           )}
                         </button>
+                        <a
+                          href={driveDownloadSrc(a.fileId)} download={a.name} title="Download the original"
+                          style={{ position: "absolute", top: 4, right: 4, width: 24, height: 24, borderRadius: "50%", background: "rgba(0,0,0,0.55)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}
+                        >
+                          <Download size={13} />
+                        </a>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -6587,7 +6619,13 @@ function Chat({ data, saveData, profile }) {
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
               {pending.map((a) => (
                 <div key={a.fileId} style={{ position: "relative", width: 68 }}>
-                  <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: 68, height: 68, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                  {a.kind === "audio" ? (
+                    <div title={a.name} style={{ width: 68, height: 68, borderRadius: 6, background: "var(--panel-raised)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontSize: 9, color: "var(--muted)", overflow: "hidden", padding: 4, textAlign: "center", wordBreak: "break-all" }}>
+                      <Music size={18} />{a.name.slice(0, 18)}
+                    </div>
+                  ) : (
+                    <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: 68, height: 68, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                  )}
                   <button
                     onClick={() => removePending(a.fileId)}
                     title="Remove"
@@ -6601,16 +6639,16 @@ function Chat({ data, saveData, profile }) {
           )}
           {attaching && (
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-              {attachRetry || `Adding picture… ${attachProgress}%`}
+              {attachRetry || `Adding file… ${attachProgress}%`}
             </div>
           )}
           {attachError && <div style={{ fontSize: 11, color: "var(--alert)", marginTop: 10 }}>{attachError}</div>}
           <div className="comment-form" style={{ marginTop: 14 }}>
-            <input ref={fileInputRef} type="file" accept="image/*,video/*" onChange={handleFileSelect} style={{ display: "none" }} />
+            <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*" onChange={handleFileSelect} style={{ display: "none" }} />
             <button
               className="btn btn-ghost"
               style={{ alignSelf: "flex-end" }}
-              title="Add a picture or video"
+              title="Add a picture, video or audio file — sent at full quality"
               disabled={attaching}
               onClick={() => fileInputRef.current && fileInputRef.current.click()}
             >

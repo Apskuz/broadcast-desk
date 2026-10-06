@@ -59,7 +59,8 @@ export default async function handler(req, res) {
 // <root>/<person>/Photos or Videos — found or created as needed.
 async function resolveUploadFolder(accessToken, rootFolderId, profile, mimeType) {
   const personName = (profile || "Unsorted").trim() || "Unsorted";
-  const typeName = (mimeType || "").startsWith("image/") ? "Photos" : "Videos";
+  const type = mimeType || "";
+  const typeName = type.startsWith("image/") ? "Photos" : type.startsWith("audio/") ? "Audio" : "Videos";
   const personFolderId = await findOrCreateFolder(accessToken, rootFolderId, personName);
   return findOrCreateFolder(accessToken, personFolderId, typeName);
 }
