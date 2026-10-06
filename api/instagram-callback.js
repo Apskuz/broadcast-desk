@@ -49,21 +49,56 @@ const PAGE_FIELDS = "id,name,access_token,instagram_business_account{id,username
 // me/accounts lists the Pages a person has a role on directly. A Page owned by
 // a business portfolio and granted through Facebook Login for Business is
 // often missing from it altogether -- the grant is real, it just isn't listed
-// there. The token itself records exactly which Pages were ticked in the
-// consent dialog, so read them from debug_token and ask for each by id.
-async function grantedPages(userToken, appId, appSecret) {
+// there. The token itself records exactly which Pages and Instagram accounts
+// were ticked in the consent dialog, so read them from debug_token and ask for
+// each by id.
+//
+// Returns entries shaped like me/accounts rows, plus notes on whatever Facebook
+// refused, so a failure can say what actually happened instead of guessing.
+async function grantedAccounts(userToken, appId, appSecret) {
+  const notes = [];
   const debug = await graph("debug_token", { input_token: userToken, access_token: `${appId}|${appSecret}` });
-  const ids = new Set();
+  const pageIds = new Set();
+  const igIds = new Set();
   for (const s of debug.data?.granular_scopes || []) {
-    if (String(s.scope).startsWith("pages_")) (s.target_ids || []).forEach((id) => ids.add(String(id)));
+    const scope = String(s.scope);
+    const ids = (s.target_ids || []).map(String);
+    if (scope.startsWith("pages_")) ids.forEach((id) => pageIds.add(id));
+    if (scope.startsWith("instagram_")) ids.forEach((id) => igIds.add(id));
   }
+  if (!pageIds.size && !igIds.size) {
+    notes.push(`the login granted no specific Pages or Instagram accounts (scopes: ${(debug.data?.scopes || []).join(", ") || "none"})`);
+  }
+
   const pages = [];
-  for (const id of ids) {
-    try {
-      pages.push(await graph(id, { fields: PAGE_FIELDS, access_token: userToken }));
-    } catch { /* one unreadable Page shouldn't hide the others */ }
+  for (const id of pageIds) {
+    // The page token is the field most likely to be refused when access runs
+    // through a business portfolio, so ask again without it before giving up.
+    let page = null;
+    for (const fields of [PAGE_FIELDS, "id,name,instagram_business_account{id,username}"]) {
+      try {
+        page = await graph(id, { fields, access_token: userToken });
+        break;
+      } catch (err) {
+        notes.push(`Page ${id}: ${err.message}`);
+      }
+    }
+    if (page) pages.push(page);
   }
-  return pages;
+
+  // The Instagram account itself is what the analytics read, and the user
+  // token can read it directly -- the Page is only the usual way to find it.
+  const viaPages = new Set(pages.map((p) => String(p.instagram_business_account?.id || "")));
+  for (const id of igIds) {
+    if (viaPages.has(id)) continue;
+    try {
+      const ig = await graph(id, { fields: "id,username", access_token: userToken });
+      pages.push({ id: [...pageIds][0] || null, name: null, instagram_business_account: { id: String(ig.id), username: ig.username } });
+    } catch (err) {
+      notes.push(`Instagram ${id}: ${err.message}`);
+    }
+  }
+  return { pages, notes };
 }
 
 export default async function handler(req, res) {
@@ -103,13 +138,19 @@ export default async function handler(req, res) {
 
     // 3. Which Pages does this person manage, and which have Instagram attached?
     const pages = await graph("me/accounts", { fields: PAGE_FIELDS, limit: "100", access_token: userToken });
+    let notes = [];
     if (!(pages.data || []).some((p) => p.instagram_business_account?.id)) {
       try {
-        const granted = await grantedPages(userToken, appId, appSecret);
+        const granted = await grantedAccounts(userToken, appId, appSecret);
+        notes = granted.notes;
         const known = new Set((pages.data || []).map((p) => p.id));
-        pages.data = [...(pages.data || []), ...granted.filter((p) => !known.has(p.id))];
-      } catch { /* fall through to the explanation below */ }
+        pages.data = [...(pages.data || []), ...granted.pages.filter((p) => !p.id || !known.has(p.id) || p.instagram_business_account)];
+      } catch (err) {
+        notes.push(`couldn't read the login's grants: ${err.message}`);
+      }
     }
+    // What Facebook actually said, appended to the explanation below.
+    const why = notes.length ? ` (Facebook: ${notes.join("; ").slice(0, 400)})` : "";
 
     const linked = (pages.data || []).filter((p) => p.instagram_business_account?.id);
     if (!linked.length) {
@@ -121,12 +162,12 @@ export default async function handler(req, res) {
       if (!seen.length) {
         return done(res, false,
           "Facebook gave the app no Pages. Connect again and tick the Tulisielu Page " +
-          "(and its Instagram account) when Facebook asks which ones to share.");
+          "(and its Instagram account) when Facebook asks which ones to share." + why);
       }
       return done(res, false,
         `Facebook shared these Pages: ${seen.join(", ")} — but none has an Instagram ` +
         "account linked, or the Instagram account wasn't ticked. Check the Page's " +
-        "Settings > Linked accounts > Instagram, then connect again.");
+        "Settings > Linked accounts > Instagram, then connect again." + why);
     }
 
     let profile = "";
@@ -147,7 +188,7 @@ export default async function handler(req, res) {
       access_token: p.access_token || userToken,
       user_token: userToken,
       token_expires: expiresAt.toISOString(),
-      page_id: p.id,
+      page_id: p.id || null,
       page_name: p.name || null,
       connected_by: profile || null,
       connected_at: new Date().toISOString(),
