@@ -239,9 +239,11 @@ async function syncAccount(supabase, account, token, report) {
     byDay.get(day)[key] = value;
   };
 
+  // follower_count is NEW followers that day, not the total -- Meta's name
+  // for it is misleading, and storing it as the total showed "0 followers".
   const SERIES = {
     reach: "reach",
-    follower_count: "followers",
+    follower_count: "new_followers",
   };
 
   for (let chunk = 0; chunk * 30 < daysBack; chunk++) {
@@ -269,6 +271,15 @@ async function syncAccount(supabase, account, token, report) {
   }
 
   await syncTotalOnly(supabase, account, token, record, report);
+
+  // The total follower count only exists as "right now", so it is recorded
+  // once a day from the day of connecting; the history builds up from there.
+  try {
+    const me = await graph(account.ig_user_id, { fields: "followers_count", access_token: token });
+    if (typeof me.followers_count === "number") record(new Date().toISOString().slice(0, 10), "followers", me.followers_count);
+  } catch (err) {
+    report.errors.push(`followers total: ${err.message}`);
+  }
 
   const rows = [...byDay.values()];
   // Saved in groups of days that carry the same columns. One upsert writes

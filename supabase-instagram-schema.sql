@@ -92,7 +92,8 @@ create table if not exists ig_account_snapshots (
   id                 bigint generated always as identity primary key,
   ig_user_id         text not null references ig_accounts(ig_user_id) on delete cascade,
   day                date not null,
-  followers          bigint,
+  followers          bigint,      -- total followers that day (recorded nightly from the day of connecting)
+  new_followers      bigint,      -- accounts that followed that day (Meta's follower_count)
   reach              bigint,
   views              bigint,
   profile_views      bigint,
