@@ -1132,6 +1132,36 @@ function MediaLightbox({ fileId, kind, name, onClose }) {
   );
 }
 
+// A carousel's files side by side, in posting order and numbered the way they
+// will go out. Tap one to see it full size (and download the original there).
+function SlideStrip({ slides }) {
+  const [lightbox, setLightbox] = useState(null);
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 16, paddingBottom: 4 }}>
+        {slides.map((sl, i) => {
+          const fileId = driveFileId(sl.link);
+          return (
+            <button
+              key={sl.link}
+              onClick={() => setLightbox({ fileId, kind: sl.kind, name: sl.name })}
+              title={sl.name}
+              style={{ position: "relative", flexShrink: 0, padding: 0, border: "none", background: "#000", borderRadius: 8, overflow: "hidden", lineHeight: 0, cursor: "pointer" }}
+            >
+              <img src={driveThumbSrc(fileId)} onError={hideBrokenThumb} alt={sl.name || ""} style={{ width: 150, height: 188, objectFit: "cover", display: "block" }} />
+              {sl.kind === "video" && (
+                <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", background: "rgba(0,0,0,0.25)" }}><Play size={22} /></span>
+              )}
+              <span style={{ position: "absolute", top: 6, left: 6, fontSize: 11, fontWeight: 700, lineHeight: "18px", background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 5, padding: "0 6px" }}>{i + 1}</span>
+            </button>
+          );
+        })}
+      </div>
+      {lightbox && <MediaLightbox fileId={lightbox.fileId} kind={lightbox.kind} name={lightbox.name} onClose={() => setLightbox(null)} />}
+    </>
+  );
+}
+
 /* ---------------------------------- Dashboard ---------------------------------- */
 
 function Dashboard({ data, saveData, profile, setView, isEmployer }) {
@@ -2355,6 +2385,17 @@ const driveDownloadSrc = (fileId) => `https://drive.google.com/uc?export=downloa
 // What was actually uploaded wins over the format picked in the form — someone
 // can upload a photo against a piece marked "Video / Reel", and it still needs
 // to render as a photo rather than a video player that shows nothing.
+// A carousel is one piece holding several files, in posting order, in slides.
+// link and mediaKind still point at the first one, so anything that only knows
+// about a single file (the calendar, older code) keeps working.
+// Every Drive file a piece holds — current files and every past version's —
+// so deleting, posting and the orphan sweep never miss a slide.
+function contentFileLinks(item) {
+  const links = [item.link, ...(item.slides || []).map((sl) => sl.link)];
+  (item.versions || []).forEach((v) => links.push(v.link, ...(v.slides || []).map((sl) => sl.link)));
+  return [...new Set(links.filter(Boolean))];
+}
+
 function isPhotoItem(item) {
   if (item.mediaKind) return item.mediaKind === "image";
   return item.format === "photo" || item.format === "graphic";
@@ -2664,6 +2705,25 @@ function uploadToDrive(originalFile, onProgress, profile, onRetry, { keepOrigina
   });
 }
 
+// Several files, one after another rather than all at once — a handful of phone
+// videos racing each other would split the connection and make every one slow.
+// A file that fails doesn't stop the rest; the caller hears which ones did.
+async function uploadAllToDrive(files, profile, { onFile, onProgress, onRetry } = {}) {
+  const uploaded = [];
+  const failed = [];
+  for (let i = 0; i < files.length; i++) {
+    if (onFile) onFile(i, files.length);
+    if (onProgress) onProgress(0);
+    try {
+      const result = await uploadToDrive(files[i], onProgress, profile, onRetry);
+      uploaded.push({ link: result.link, kind: result.kind, name: result.name });
+    } catch (err) {
+      failed.push(`${files[i].name}: ${err.message || "upload failed"}`);
+    }
+  }
+  return { uploaded, failed };
+}
+
 // Marks a piece of content as posted and cleans up every Drive file it ever
 // used (current version + full history) — shared by Content Review and the
 // Approved admin page so "posted" always means the same thing everywhere.
@@ -2671,13 +2731,13 @@ function publishContentItem(data, saveData, id) {
   const item = data.content.find((c) => c.id === id);
   saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status: "published" } : c)) });
   if (item) {
-    const fileIds = [item.link, ...(item.versions || []).map((v) => v.link)].map(driveFileId).filter(Boolean);
+    const fileIds = contentFileLinks(item).map(driveFileId).filter(Boolean);
     Promise.all(
       fileIds.map((fileId) =>
         fetch("/api/drive-delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId }) }).catch(() => {})
       )
     ).finally(() => {
-      saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status: "published", link: "", versions: [], driveArchived: true } : c)) });
+      saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status: "published", link: "", slides: [], versions: [], driveArchived: true } : c)) });
     });
   }
 }
@@ -2689,53 +2749,65 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   const [commentText, setCommentText] = useState("");
   const [localCaption, setLocalCaption] = useState("");
   const fileInputRef = useRef(null);
-  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "" });
+  const [form, setForm] = useState({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "", slides: [] });
   const [scheduled, setScheduled] = useState({}); // { [contentId]: true } — just for the "added" confirmation text
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState("");
   const [uploadRetry, setUploadRetry] = useState("");
+  const [uploadCount, setUploadCount] = useState(""); // "2 of 6" while a carousel goes up
   const [sizeNotice, setSizeNotice] = useState("");
   const [versionUploadTarget, setVersionUploadTarget] = useState(null); // which item the picker was opened for
   const [versionUploading, setVersionUploading] = useState(null); // which item has an upload actually in flight
   const [versionUploadProgress, setVersionUploadProgress] = useState(0);
   const [versionUploadRetry, setVersionUploadRetry] = useState("");
+  const [versionUploadCount, setVersionUploadCount] = useState("");
   const [versionUploadErrorFor, setVersionUploadErrorFor] = useState(null); // { id, message }
   const versionFileInputRef = useRef(null);
 
+  // Pick one file for a single post, or several at once for a carousel — they
+  // stay together as one piece, in the order they were picked.
   const handleFileSelect = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    // Swapping the file before posting leaves the first one orphaned in Drive.
-    deleteDriveFile(form.link);
+    const files = [...(e.target.files || [])];
+    e.target.value = "";
+    if (!files.length) return;
+    // Swapping the files before posting leaves the first ones orphaned in Drive.
+    contentFileLinks(form).forEach(deleteDriveFile);
     // Not a blocker, just worth knowing: a huge clip costs that much again
     // every time someone watches it.
+    const biggest = Math.max(...files.map((f) => f.size));
     setSizeNotice(
-      file.size > 150 * 1024 * 1024
-        ? `That's a ${Math.round(file.size / 1e6)}MB file. It'll upload fine, but exporting at 1080p instead of 4K makes it far quicker to load for everyone reviewing it.`
+      biggest > 150 * 1024 * 1024
+        ? `That's a ${Math.round(biggest / 1e6)}MB file. It'll upload fine, but exporting at 1080p instead of 4K makes it far quicker to load for everyone reviewing it.`
         : ""
     );
     setUploading(true);
-    setUploadProgress(0);
     setUploadError("");
     setUploadRetry("");
-    try {
-      const result = await uploadToDrive(file, setUploadProgress, profile, (attempt, max) => setUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
+    const { uploaded, failed } = await uploadAllToDrive(files, profile, {
+      onFile: (i, n) => { setUploadCount(n > 1 ? `${i + 1} of ${n}` : ""); setUploadRetry(""); },
+      onProgress: setUploadProgress,
+      onRetry: (attempt, max) => setUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`),
+    });
+    if (uploaded.length) {
+      const first = uploaded[0];
       setForm((f) => ({
         ...f,
-        link: result.link,
-        mediaKind: result.kind,
+        link: first.link,
+        mediaKind: first.kind,
+        slides: uploaded.length > 1 ? uploaded : [],
         // Uploading a photo against the default "Video / Reel" format would
         // otherwise leave it mislabelled.
-        format: result.kind === "image" && f.format === "video" ? "photo" : f.format,
-        title: f.title || result.name.replace(/\.[^/.]+$/, ""),
+        format: first.kind === "image" && f.format === "video" ? "photo" : f.format,
+        title: f.title || first.name.replace(/\.[^/.]+$/, ""),
       }));
-    } catch (err) {
-      setUploadError(err.message || "Upload failed.");
+    } else {
+      setForm((f) => ({ ...f, link: "", mediaKind: "", slides: [] }));
     }
+    if (failed.length) setUploadError(files.length > 1 ? `Didn't upload — ${failed.join(" · ")}` : failed[0].replace(/^[^:]*: /, ""));
     setUploading(false);
     setUploadRetry("");
-    e.target.value = "";
+    setUploadCount("");
   };
 
   const addItem = () => {
@@ -2750,14 +2822,14 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     ];
     saveData({ ...data, content: [item, ...data.content], notifications });
     leads.forEach((leadName) => sendPush(leadName, "New content uploaded", `${profile || "Someone"} uploaded: ${item.title}`, profile));
-    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "" });
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "", slides: [] });
     setShowForm(false);
   };
   // Backing out of the form after uploading would otherwise leave the file
   // sitting in Drive with nothing in the app pointing at it.
   const cancelAdd = () => {
-    if (!uploading) deleteDriveFile(form.link);
-    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "" });
+    if (!uploading) contentFileLinks(form).forEach(deleteDriveFile);
+    setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "", slides: [] });
     setShowForm(false);
   };
   const makePublic = (id) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, visibility: "public" } : c)) });
@@ -2780,23 +2852,35 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     setVersionUploadErrorFor(null);
     setTimeout(() => versionFileInputRef.current && versionFileInputRef.current.click(), 0);
   };
+  // A fixed version can be one file or a whole new set of carousel slides; it
+  // replaces everything the piece showed before, which moves into the history.
   const handleVersionFileSelect = async (e) => {
-    const file = e.target.files && e.target.files[0];
+    const files = [...(e.target.files || [])];
     const id = versionUploadTarget;
-    if (!file || !id) return;
+    e.target.value = "";
+    if (!files.length || !id) return;
     setVersionUploading(id);
-    setVersionUploadProgress(0);
     setVersionUploadRetry("");
     try {
-      const result = await uploadToDrive(file, setVersionUploadProgress, profile, (attempt, max) => setVersionUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
+      const { uploaded, failed } = await uploadAllToDrive(files, profile, {
+        onFile: (i, n) => { setVersionUploadCount(n > 1 ? `${i + 1} of ${n}` : ""); setVersionUploadRetry(""); },
+        onProgress: setVersionUploadProgress,
+        onRetry: (attempt, max) => setVersionUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`),
+      });
+      // Half a carousel isn't a fixed version — keep what's there and say why.
+      if (failed.length) {
+        uploaded.forEach((u) => deleteDriveFile(u.link));
+        throw new Error(files.length > 1 ? `Nothing was changed — these didn't upload: ${failed.join(" · ")}` : failed[0].replace(/^[^:]*: /, ""));
+      }
+      const result = uploaded[0];
       const item = data.content.find((c) => c.id === id);
       if (!item) {
         // Someone deleted the piece while this was uploading — don't strand the
-        // file in Drive with nothing pointing at it.
-        deleteDriveFile(result.link);
+        // files in Drive with nothing pointing at them.
+        uploaded.forEach((u) => deleteDriveFile(u.link));
         throw new Error("That piece was removed while this was uploading.");
       }
-      const versions = item.link ? [...(item.versions || []), { link: item.link, date: todayISO(), by: profile || "", mediaKind: item.mediaKind || "video" }] : (item.versions || []);
+      const versions = item.link ? [...(item.versions || []), { link: item.link, slides: item.slides || [], date: todayISO(), by: profile || "", mediaKind: item.mediaKind || "video" }] : (item.versions || []);
       const leads = (data.profiles || []).filter((p) => p.isLead && p.name !== profile).map((p) => p.name);
       const notifications = [
         ...(data.notifications || []),
@@ -2804,7 +2888,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
       ];
       saveData({
         ...data,
-        content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, mediaKind: result.kind, status: "review", versions, driveArchived: false } : c)),
+        content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, mediaKind: result.kind, slides: uploaded.length > 1 ? uploaded : [], status: "review", versions, driveArchived: false } : c)),
         notifications,
       });
       leads.forEach((leadName) => sendPush(leadName, "New version uploaded", `${profile || "Someone"} uploaded a new version: ${item.title}`, profile));
@@ -2814,13 +2898,13 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     setVersionUploading(null);
     setVersionUploadTarget(null);
     setVersionUploadRetry("");
-    e.target.value = "";
+    setVersionUploadCount("");
   };
   // Deleting a piece takes its Drive files with it — current version and the
   // whole history — so nothing is left orphaned in the team's folder.
   const removeItem = (id) => {
     const item = data.content.find((c) => c.id === id);
-    if (item) [item.link, ...(item.versions || []).map((v) => v.link)].forEach(deleteDriveFile);
+    if (item) contentFileLinks(item).forEach(deleteDriveFile);
     saveData({ ...data, content: data.content.filter((c) => c.id !== id) });
   };
   const addComment = (id) => {
@@ -2876,6 +2960,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
           const yt = youtubeId(c.link);
           const driveId = !yt ? driveFileId(c.link) : null;
           const isPhoto = isPhotoItem(c);
+          const isCarousel = (c.slides || []).length > 1;
           const isOpen = open === c.id;
           return (
             <div className="content-item" key={c.id}>
@@ -2886,6 +2971,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                   <div className="content-tags">
                     {c.uploadedBy && <span className="pill" style={{ background: "var(--gold-soft)", color: "var(--gold)" }}>from {c.uploadedBy}</span>}
                     <span className="pill" style={{ background: fmt.color + "22", color: fmt.color }}>{fmt.label}</span>
+                    {isCarousel && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}><Layers size={10} style={{ verticalAlign: "-1px", marginRight: 3 }} />{c.slides.length} slides</span>}
                     <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.platform}</span>
                     <span className="pill" style={{ background: st.color + "22", color: st.color }}>{st.label}</span>
                     {c.assignee && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.assignee}</span>}
@@ -2958,7 +3044,8 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                       )}
                     </div>
                   )}
-                  {driveId && (
+                  {isCarousel && <SlideStrip slides={c.slides} />}
+                  {driveId && !isCarousel && (
                     // Streamed through our own server rather than a Google preview
                     // iframe or public link — the iframe renders badly on mobile, and
                     // public drive.google.com links can't be relied on under this
@@ -3001,7 +3088,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                         onClick={() => uploadNewVersion(c.id)}
                         disabled={versionUploading === c.id}
                       >
-                        <RotateCw size={13} /> {versionUploading === c.id ? (versionUploadRetry || `Uploading… ${versionUploadProgress}%`) : "Upload a fixed version"}
+                        <RotateCw size={13} /> {versionUploading === c.id ? (versionUploadRetry || `Uploading${versionUploadCount ? ` ${versionUploadCount}` : ""}… ${versionUploadProgress}%`) : "Upload a fixed version"}
                       </button>
                       {versionUploading === c.id && (
                         <div className="progress-track" style={{ marginTop: 8 }}>
@@ -3017,7 +3104,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                       <div className="section-title" style={{ fontSize: 13 }}><RotateCw size={14} color="var(--gold)" /> Version history</div>
                       {[...c.versions].reverse().map((v, i) => (
                         <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 2px", fontSize: 12, color: "var(--muted)" }}>
-                          <span style={{ flex: 1 }}>Version {c.versions.length - i} — {v.by || "someone"} · {fmtDate(v.date)}</span>
+                          <span style={{ flex: 1 }}>Version {c.versions.length - i} — {v.by || "someone"} · {fmtDate(v.date)}{(v.slides || []).length > 1 ? ` · ${v.slides.length} slides` : ""}</span>
                           {v.link && <a href={v.link} target="_blank" rel="noopener noreferrer" style={{ color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 4, textDecoration: "none" }}><ExternalLink size={11} /> View</a>}
                         </div>
                       ))}
@@ -3047,14 +3134,14 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
         {visibleContent.length === 0 && <div className="empty">Nothing submitted yet.</div>}
       </div>
 
-      <input ref={versionFileInputRef} type="file" accept="video/*,image/*" onChange={handleVersionFileSelect} style={{ display: "none" }} />
+      <input ref={versionFileInputRef} type="file" accept="video/*,image/*" multiple onChange={handleVersionFileSelect} style={{ display: "none" }} />
 
       {showForm && (
         <Modal title="Add content for review" onClose={cancelAdd}>
           <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Launch teaser — 15s cut" autoFocus /></div>
 
           <div className="field">
-            <label>Upload video or photo</label>
+            <label>Upload a video or photo — or pick several for a carousel</label>
             <button
               type="button"
               className="btn"
@@ -3062,12 +3149,13 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
               onClick={() => fileInputRef.current && fileInputRef.current.click()}
               disabled={uploading}
             >
-              <Upload size={14} /> {uploading ? (uploadRetry || `Uploading… ${uploadProgress}%`) : "Choose a file"}
+              <Upload size={14} /> {uploading ? (uploadRetry || `Uploading${uploadCount ? ` ${uploadCount}` : ""}… ${uploadProgress}%`) : "Choose files"}
             </button>
             <input
               ref={fileInputRef}
               type="file"
               accept="video/*,image/*"
+              multiple
               onChange={handleFileSelect}
               disabled={uploading}
               style={{ display: "none" }}
@@ -3080,11 +3168,23 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
             {uploadError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{uploadError}</div>}
             {sizeNotice && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>{sizeNotice}</div>}
             {!uploading && form.link && driveEmbedUrl(form.link) && (
-              <div style={{ fontSize: 11.5, color: "var(--good)", marginTop: 6, display: "flex", alignItems: "center", gap: 5 }}><Check size={12} /> Uploaded — ready to add.</div>
+              <div style={{ fontSize: 11.5, color: "var(--good)", marginTop: 6, display: "flex", alignItems: "center", gap: 5 }}>
+                <Check size={12} /> {form.slides.length > 1 ? `${form.slides.length} files uploaded — one carousel, in this order.` : "Uploaded — ready to add."}
+              </div>
+            )}
+            {!uploading && form.slides.length > 1 && (
+              <div style={{ display: "flex", gap: 6, overflowX: "auto", marginTop: 8 }}>
+                {form.slides.map((sl, i) => (
+                  <div key={sl.link} style={{ position: "relative", flexShrink: 0 }}>
+                    <img src={driveThumbSrc(driveFileId(sl.link))} onError={hideBrokenThumb} alt={sl.name} title={sl.name} style={{ width: 52, height: 65, objectFit: "cover", borderRadius: 5, background: "var(--panel-raised)", display: "block" }} />
+                    <span style={{ position: "absolute", top: 3, left: 3, fontSize: 9.5, fontWeight: 700, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "0 4px" }}>{i + 1}</span>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
 
-          <div className="field"><label>Or paste a link instead</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="YouTube, Drive, or post link" /></div>
+          <div className="field"><label>Or paste a link instead</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value, slides: [] })} placeholder="YouTube, Drive, or post link" /></div>
 
           <div className="field-row">
             <div className="field"><label>Format</label>
@@ -6441,6 +6541,7 @@ function Chat({ data, saveData, profile }) {
   const [attaching, setAttaching] = useState(false);
   const [attachProgress, setAttachProgress] = useState(0);
   const [attachRetry, setAttachRetry] = useState("");
+  const [attachCount, setAttachCount] = useState(""); // "2 of 5" while several are going up
   const [attachError, setAttachError] = useState("");
   const fileInputRef = useRef(null);
   const [lightbox, setLightbox] = useState(null);
@@ -6473,25 +6574,33 @@ function Chat({ data, saveData, profile }) {
 
   const initials = (name) => (name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
-  const attach = async (file) => {
-    if (!file) return;
+  // One at a time, in the order picked: a handful of phone videos uploading at
+  // once would split the connection and make every one of them slow.
+  const attach = async (files) => {
+    if (!files.length) return;
     setAttaching(true);
-    setAttachProgress(0);
-    setAttachRetry("");
     setAttachError("");
-    try {
-      const result = await uploadToDrive(file, setAttachProgress, profile, (attempt, max) => setAttachRetry(`Connection hiccup — retrying (${attempt}/${max})…`), { keepOriginal: true });
-      setPending((list) => [...list, { fileId: driveFileId(result.link), name: result.name, kind: result.kind }]);
-    } catch (err) {
-      setAttachError(err.message || "Couldn't attach that.");
+    const failed = [];
+    for (let i = 0; i < files.length; i++) {
+      setAttachProgress(0);
+      setAttachRetry("");
+      setAttachCount(files.length > 1 ? `${i + 1} of ${files.length}` : "");
+      try {
+        const result = await uploadToDrive(files[i], setAttachProgress, profile, (attempt, max) => setAttachRetry(`Connection hiccup — retrying (${attempt}/${max})…`), { keepOriginal: true });
+        setPending((list) => [...list, { fileId: driveFileId(result.link), name: result.name, kind: result.kind }]);
+      } catch (err) {
+        failed.push(files.length > 1 ? `${files[i].name}: ${err.message || "failed"}` : err.message || "Couldn't attach that.");
+      }
     }
+    if (failed.length) setAttachError(failed.join(" · "));
     setAttaching(false);
     setAttachRetry("");
+    setAttachCount("");
   };
   const handleFileSelect = async (e) => {
-    const file = e.target.files && e.target.files[0];
+    const files = [...(e.target.files || [])];
     e.target.value = "";
-    await attach(file);
+    await attach(files);
   };
   // Screenshots mostly arrive on the clipboard, and going via Save as… and then
   // a file picker to send one is the long way round.
@@ -6501,7 +6610,7 @@ function Chat({ data, saveData, profile }) {
     const file = item.getAsFile();
     if (!file) return;
     e.preventDefault();
-    attach(file);
+    attach([file]);
   };
   const removePending = (fileId) => {
     deleteDriveFile(fileId); // never sent, so don't leave it sitting in Drive
@@ -6639,12 +6748,12 @@ function Chat({ data, saveData, profile }) {
           )}
           {attaching && (
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-              {attachRetry || `Adding file… ${attachProgress}%`}
+              {attachRetry || `Adding ${attachCount ? `file ${attachCount}` : "file"}… ${attachProgress}%`}
             </div>
           )}
           {attachError && <div style={{ fontSize: 11, color: "var(--alert)", marginTop: 10 }}>{attachError}</div>}
           <div className="comment-form" style={{ marginTop: 14 }}>
-            <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*" onChange={handleFileSelect} style={{ display: "none" }} />
+            <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*" multiple onChange={handleFileSelect} style={{ display: "none" }} />
             <button
               className="btn btn-ghost"
               style={{ alignSelf: "flex-end" }}
@@ -6713,6 +6822,7 @@ function ApprovedQueue({ data, saveData, profile }) {
           const FmtIcon = fmt.icon;
           const yt = youtubeId(c.link);
           const driveId = !yt ? driveFileId(c.link) : null;
+          const isCarousel = (c.slides || []).length > 1;
           const isOpen = open === c.id;
           return (
             <div className="content-item" key={c.id}>
@@ -6726,6 +6836,7 @@ function ApprovedQueue({ data, saveData, profile }) {
                   <div className="content-title">#{i + 1} — {c.title}</div>
                   <div className="content-tags">
                     <span className="pill" style={{ background: fmt.color + "22", color: fmt.color }}>{fmt.label}</span>
+                    {isCarousel && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}><Layers size={10} style={{ verticalAlign: "-1px", marginRight: 3 }} />{c.slides.length} slides</span>}
                     <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.platform}</span>
                     {c.uploadedBy && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.uploadedBy}</span>}
                   </div>
@@ -6736,7 +6847,9 @@ function ApprovedQueue({ data, saveData, profile }) {
               {isOpen && (
                 <div className="content-body">
                   {c.caption && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>{c.caption}</div>}
-                  {driveId && isPhotoItem(c) ? (
+                  {isCarousel ? (
+                    <SlideStrip slides={c.slides} />
+                  ) : driveId && isPhotoItem(c) ? (
                     <img src={driveThumbSrc(driveId, "s1600")} onError={hideBrokenThumb} alt={c.title} style={{ width: "100%", maxHeight: "60vh", objectFit: "contain", borderRadius: 8, background: "#000", display: "block" }} />
                   ) : (yt || driveId) && (
                     <div style={{ position: "relative", paddingTop: "56.25%", marginBottom: 4, borderRadius: 8, overflow: "hidden", background: "var(--panel-raised)" }}>
@@ -7509,7 +7622,7 @@ function referencedFileIds(data) {
     const id = linkOrId.startsWith("http") ? driveFileId(linkOrId) : linkOrId;
     if (id) ids.add(id);
   };
-  (data.content || []).forEach((c) => { add(c.link); (c.versions || []).forEach((v) => add(v.link)); });
+  (data.content || []).forEach((c) => contentFileLinks(c).forEach(add));
   (data.moodboard || []).forEach((m) => add(m.fileId));
   (data.meetingItems || []).forEach((m) => (m.attachments || []).forEach((a) => add(a.fileId)));
   (data.ideas || []).forEach((i) => { add(i.link); (i.attachments || []).forEach((a) => add(a.fileId)); });
