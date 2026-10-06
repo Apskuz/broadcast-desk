@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tietosuojaseloste — Broadcast Desk</title>
+<style>
+  :root { --bg: #ffffff; --text: #1d1f24; --muted: #5d6270; --rule: #e3e5ea; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12141b; --text: #e8e9ed; --muted: #9aa0ad; --rule: #2a2d37; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 28px 0 6px; }
+  p, li { margin: 0 0 10px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 40px 0; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Tietosuojaseloste</h1>
+<p class="muted">Broadcast Desk — Tulisielun tiimin sisäinen työkalu. Päivitetty 6.10.2026.</p>
+
+<h2>Mikä tämä on</h2>
+<p>Broadcast Desk on Tulisielun oma, vain tiimin käyttöön tarkoitettu työtila. Sen analytiikkaosio hakee Tulisielun oman Instagram-tilin tilastot, jotta tiimi näkee, miten julkaisut toimivat. Sovellus ei ole yleisön käytettävissä.</p>
+
+<h2>Mitä tietoja haetaan</h2>
+<p>Kun tilin ylläpitäjä yhdistää Instagram-tilin Facebook-kirjautumisella, sovellus hakee Metalta:</p>
+<ul>
+  <li>Instagram-tilin käyttäjänimen ja sen Facebook-sivun nimen, johon tili on liitetty.</li>
+  <li>Tilin omat julkaisut: tyyppi, kuvateksti, linkki, esikatselukuva ja julkaisuaika.</li>
+  <li>Julkaisujen tilastot: näyttökerrat, kattavuus, tykkäykset, kommenttien määrä, tallennukset, jaot ja katseluaika.</li>
+  <li>Tilin tilastot: seuraajamäärä, kattavuus, profiilikäynnit ja verkkosivuklikkaukset päivittäin.</li>
+  <li>Seuraajien yhteenlasketut jakaumat iän, sukupuolen, kaupungin ja maan mukaan.</li>
+</ul>
+<p>Sovellus <strong>ei</strong> hae yksittäisten seuraajien tai kommentoijien henkilötietoja, viestejä eikä mitään muiden tilien tietoja. Seuraajajakaumat ovat Metan valmiiksi yhdistelemiä lukuja, joista ei voi tunnistaa ketään.</p>
+
+<h2>Miten tietoja säilytetään</h2>
+<p>Tiedot tallennetaan tiimin omaan tietokantaan (Supabase), ja niitä näyttää vain Broadcast Desk tiimin jäsenille. Metan antama käyttöoikeustunnus säilytetään vain palvelimella, eikä se päädy selaimeen. Tietoja ei myydä, jaeta eikä käytetä mainontaan.</p>
+
+<h2 id="poisto">Tietojen poistaminen</h2>
+<p>Yhteyden voi katkaista milloin tahansa Facebookissa: <em>Asetukset ja yksityisyys → Asetukset → Liiketoimintaintegraatiot</em>, ja poistaa sieltä Broadcast Desk Analytics. Tämän jälkeen uusia tietoja ei enää haeta. Jos haluat myös jo tallennetut tiedot poistetuiksi, ota yhteyttä alla olevaan osoitteeseen, niin poistamme ne.</p>
+
+<h2>Yhteystiedot</h2>
+<p>Tulisielu — <a href="mailto:aapo.hanhisalo@tulisielu.com">aapo.hanhisalo@tulisielu.com</a></p>
+
+<hr>
+
+<h1>Privacy Policy</h1>
+<p class="muted">Broadcast Desk — an internal tool for the Tulisielu team. Updated 6 October 2026.</p>
+
+<h2>What this is</h2>
+<p>Broadcast Desk is Tulisielu's own workspace, used only by its team. Its analytics section reads the statistics of Tulisielu's own Instagram account, so the team can see how its posts perform. The app is not open to the public.</p>
+
+<h2>What data is collected</h2>
+<p>When the account's administrator connects the Instagram account through Facebook Login, the app reads from Meta:</p>
+<ul>
+  <li>The Instagram account's username and the name of the Facebook Page it is linked to.</li>
+  <li>The account's own posts: type, caption, link, preview image and posting time.</li>
+  <li>Post statistics: views, reach, likes, comment counts, saves, shares and watch time.</li>
+  <li>Account statistics: follower count, reach, profile visits and website clicks per day.</li>
+  <li>Aggregated follower breakdowns by age, gender, city and country.</li>
+</ul>
+<p>The app does <strong>not</strong> read personal details of individual followers or commenters, messages, or any data about other accounts. Follower breakdowns are totals aggregated by Meta and identify no one.</p>
+
+<h2>How it is stored</h2>
+<p>The data is stored in the team's own database (Supabase) and shown only to team members inside Broadcast Desk. The access token Meta issues is kept on the server only and never reaches the browser. The data is not sold, shared or used for advertising.</p>
+
+<h2 id="deletion">Deleting your data</h2>
+<p>The connection can be removed at any time in Facebook under <em>Settings &amp; privacy → Settings → Business integrations</em> by removing Broadcast Desk Analytics; no new data is collected after that. To have the data already stored deleted as well, write to the address below and we will delete it.</p>
+
+<h2>Contact</h2>
+<p>Tulisielu — <a href="mailto:aapo.hanhisalo@tulisielu.com">aapo.hanhisalo@tulisielu.com</a></p>
+
+</main>
+</body>
+</html>
