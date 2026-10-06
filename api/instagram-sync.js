@@ -241,9 +241,6 @@ async function syncAccount(supabase, account, token, report) {
 
   const SERIES = {
     reach: "reach",
-    views: "views",
-    profile_views: "profile_views",
-    website_clicks: "website_clicks",
     follower_count: "followers",
   };
 
@@ -271,14 +268,77 @@ async function syncAccount(supabase, account, token, report) {
     }
   }
 
+  await syncTotalOnly(supabase, account, token, record, report);
+
   const rows = [...byDay.values()];
-  for (let i = 0; i < rows.length; i += 100) {
-    const { error } = await supabase
-      .from("ig_account_snapshots")
-      .upsert(rows.slice(i, i + 100), { onConflict: "ig_user_id,day" });
-    if (error) report.errors.push(`saving account stats: ${error.message}`);
+  // Saved in groups of days that carry the same columns. One upsert writes
+  // every column any of its rows has, nulling it on rows that lack it -- so a
+  // mixed batch would wipe a month of views with tonight's 3-day refresh.
+  const groups = new Map();
+  for (const row of rows) {
+    const key = Object.keys(row).sort().join(",");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  for (const group of groups.values()) {
+    for (let i = 0; i < group.length; i += 100) {
+      const { error } = await supabase
+        .from("ig_account_snapshots")
+        .upsert(group.slice(i, i + 100), { onConflict: "ig_user_id,day" });
+      if (error) report.errors.push(`saving account stats: ${error.message}`);
+    }
   }
   report.accountDays = rows.length;
+}
+
+// Metrics Meta no longer serves as a daily series: asked for with period=day
+// they fail with "should be specified with parameter metric_type=total_value",
+// and total_value gives one number for the whole since..until window. So each
+// day is its own one-day window. Days are UTC here; Meta counts in Pacific
+// time, so a day's figure can be off by a few hours' worth at the edges.
+const TOTAL_ONLY = {
+  views: "views",
+  profile_views: "profile_views",
+  website_clicks: "website_clicks",
+};
+
+async function syncTotalOnly(supabase, account, token, record, report) {
+  // One call per metric per day, so the first run backfills a month rather
+  // than the full 90 days (that would be 270 calls inside a 60s limit). After
+  // that, the last few days are refreshed each night, since recent numbers
+  // keep settling for a day or two.
+  const { count } = await supabase
+    .from("ig_account_snapshots")
+    .select("id", { count: "exact", head: true })
+    .eq("ig_user_id", account.ig_user_id)
+    .not("views", "is", null);
+  const daysBack = count ? 3 : 30;
+
+  const todayStart = Math.floor(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) / 1000);
+  const calls = [];
+  for (let d = 1; d <= daysBack; d++) {
+    const since = todayStart - d * 86400;
+    const day = new Date(since * 1000).toISOString().slice(0, 10);
+    for (const [metric, column] of Object.entries(TOTAL_ONLY)) calls.push({ since, day, metric, column });
+  }
+
+  const failed = new Map(); // metric -> first error, reported once rather than per day
+  // Ten at a time: fast enough to fit the time limit, gentle enough on Meta.
+  for (let i = 0; i < calls.length; i += 10) {
+    await Promise.all(calls.slice(i, i + 10).map(async ({ since, day, metric, column }) => {
+      try {
+        const json = await graph(`${account.ig_user_id}/insights`, {
+          metric, period: "day", metric_type: "total_value",
+          since: String(since), until: String(since + 86400), access_token: token,
+        });
+        const value = json.data?.[0]?.total_value?.value;
+        if (typeof value === "number") record(day, column, value);
+      } catch (err) {
+        if (!failed.has(metric)) failed.set(metric, err.message);
+      }
+    }));
+  }
+  for (const [metric, message] of failed) report.errors.push(`account ${metric}: ${message}`);
 }
 
 // Audience breakdown. Meta withholds this entirely under 100 followers, which
@@ -321,18 +381,30 @@ async function syncDemographics(supabase, account, token, report) {
 }
 
 export default async function handler(req, res) {
-  // Vercel Cron sends a bearer token when CRON_SECRET is set; the Analytics
-  // screen calls it with ?key=. Only enforced when the secret is configured.
+  // Two callers: Vercel Cron, which sends "Bearer CRON_SECRET" when that env
+  // var is set, and the Analytics screen's Sync now button. The button can't
+  // carry a secret -- anything in the browser bundle is public -- so instead
+  // of a password, an anonymous call is refused while the last sync is still
+  // fresh. Anyone can still ask for a sync, but nobody can hammer Meta's rate
+  // limit or the function quota with this URL.
   const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}` && req.query.key !== secret) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+  const isCron = Boolean(secret) && req.headers.authorization === `Bearer ${secret}`;
 
   let supabase;
   try { supabase = db(); } catch (e) { return res.status(500).json({ error: e.message }); }
 
   const { data: accounts, error } = await supabase.from("ig_accounts").select("*");
   if (error) return res.status(500).json({ error: error.message });
+
+  const COOLDOWN_MIN = 10;
+  const lastSync = Math.max(0, ...(accounts || []).map((a) => Date.parse(a.last_synced_at || "") || 0));
+  const minutesAgo = (Date.now() - lastSync) / 60000;
+  if (!isCron && minutesAgo < COOLDOWN_MIN) {
+    const wait = Math.ceil(COOLDOWN_MIN - minutesAgo);
+    return res.status(429).json({
+      error: `Synced ${Math.floor(minutesAgo)} min ago — try again in ${wait} min. The numbers only move slowly anyway.`,
+    });
+  }
   if (!accounts?.length) return res.status(200).json({ ok: true, note: "No Instagram account connected yet." });
 
   const reports = [];
