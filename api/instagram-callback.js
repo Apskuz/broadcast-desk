@@ -88,11 +88,20 @@ export default async function handler(req, res) {
 
     const linked = (pages.data || []).filter((p) => p.instagram_business_account?.id);
     if (!linked.length) {
-      // By far the most common failure, and the fix is on Instagram's side, so
-      // say what to do rather than reporting an empty list.
+      // Two different problems with two different fixes, so say which one:
+      // Facebook handed over no Pages at all (none ticked in the consent
+      // dialog, or access only through a business portfolio), or it handed
+      // over Pages that have no Instagram account attached.
+      const seen = (pages.data || []).map((p) => p.name || p.id);
+      if (!seen.length) {
+        return done(res, false,
+          "Facebook gave the app no Pages. Connect again and tick the Tulisielu Page " +
+          "(and its Instagram account) when Facebook asks which ones to share.");
+      }
       return done(res, false,
-        "No Instagram account is linked to your Facebook Pages. In Instagram: " +
-        "Settings > Business tools > link to a Facebook Page, then try again.");
+        `Facebook shared these Pages: ${seen.join(", ")} — but none has an Instagram ` +
+        "account linked, or the Instagram account wasn't ticked. Check the Page's " +
+        "Settings > Linked accounts > Instagram, then connect again.");
     }
 
     let profile = "";
