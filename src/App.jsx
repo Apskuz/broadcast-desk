@@ -6372,10 +6372,66 @@ function unreadChat(data, profile) {
   return counts;
 }
 
+// "2 from Jenika, 1 in Team Chat" — where the waiting messages are, in words, for
+// the Chat header and the sidebar badge's tooltip.
+function chatUnreadSummary(unread) {
+  const parts = Object.entries(unread.byPerson).map(([name, n]) => `${n} from ${name}`);
+  if (unread.team > 0) parts.push(`${unread.team} in Team Chat`);
+  return parts.join(", ");
+}
+
+// A link in a message is clickable on its own — Linkify handles that. When it
+// points at something that has a picture, show the picture too, so a shared
+// video or file reads as what it is instead of a line of blue text.
+//
+// Only sources whose thumbnail can be worked out from the URL itself: there is
+// no server here that fetches a page and reads its preview tags, and inventing
+// one to render a card would be a lot of machinery for a chat window.
+function LinkPreview({ text }) {
+  const urls = String(text == null ? "" : text).match(LINK_RE) || [];
+  for (const raw of urls) {
+    const href = raw.toLowerCase().startsWith("www.") ? `https://${raw}` : raw;
+    const yt = youtubeId(raw);
+    const drive = yt ? null : driveFileId(raw);
+    if (!yt && !drive) continue;
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ display: "block", marginTop: 6, maxWidth: 240 }}>
+        <img
+          src={yt ? `https://i.ytimg.com/vi/${yt}/hqdefault.jpg` : driveThumbSrc(drive, "s400")}
+          alt=""
+          // A link to someone else's Drive file is one this board can't read, and
+          // a video can be taken down — either way, fall back to the plain link.
+          onError={(e) => { e.currentTarget.style.display = "none"; }}
+          style={{ width: "100%", borderRadius: 8, display: "block", background: "var(--panel)" }}
+        />
+      </a>
+    );
+  }
+  return null;
+}
+
 function Chat({ data, saveData, profile }) {
-  const [thread, setThread] = useState("team"); // "team" | a profile name
+  // Open on the conversation that is waiting. If Jenika has written, Chat should
+  // land on Jenika — not on Team Chat, leaving you to hunt for the pip. The newest
+  // unread message decides when more than one thread has something.
+  const [thread, setThread] = useState(() => {
+    const waiting = (data.messages || []).filter((m) =>
+      m.from !== profile && Array.isArray(m.readBy) && !m.readBy.includes(profile) &&
+      (m.to === null || (m.to === profile && (data.profiles || []).some((p) => p.name === m.from))));
+    const last = waiting[waiting.length - 1];
+    return !last || last.to === null ? "team" : last.from;
+  }); // "team" | a profile name
   const [text, setText] = useState("");
   const scrollRef = useRef(null);
+  // Pictures are uploaded the moment they are picked, not on send — so the wait
+  // happens while you are still typing, and pressing send is instant.
+  const [pending, setPending] = useState([]);
+  const [attaching, setAttaching] = useState(false);
+  const [attachProgress, setAttachProgress] = useState(0);
+  const [attachRetry, setAttachRetry] = useState("");
+  const [attachError, setAttachError] = useState("");
+  const fileInputRef = useRef(null);
+  const [lightbox, setLightbox] = useState(null);
 
   const others = (data.profiles || []).filter((p) => p.name !== profile);
   const messages = data.messages || [];
@@ -6405,20 +6461,61 @@ function Chat({ data, saveData, profile }) {
 
   const initials = (name) => (name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
+  const attach = async (file) => {
+    if (!file) return;
+    setAttaching(true);
+    setAttachProgress(0);
+    setAttachRetry("");
+    setAttachError("");
+    try {
+      const result = await uploadToDrive(file, setAttachProgress, profile, (attempt, max) => setAttachRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
+      setPending((list) => [...list, { fileId: driveFileId(result.link), name: result.name, kind: result.kind }]);
+    } catch (err) {
+      setAttachError(err.message || "Couldn't attach that.");
+    }
+    setAttaching(false);
+    setAttachRetry("");
+  };
+  const handleFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    await attach(file);
+  };
+  // Screenshots mostly arrive on the clipboard, and going via Save as… and then
+  // a file picker to send one is the long way round.
+  const handlePaste = (e) => {
+    const item = [...(e.clipboardData ? e.clipboardData.items : [])].find((it) => it.kind === "file" && it.type.startsWith("image/"));
+    if (!item) return; // ordinary pasted text: leave it alone
+    const file = item.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    attach(file);
+  };
+  const removePending = (fileId) => {
+    deleteDriveFile(fileId); // never sent, so don't leave it sitting in Drive
+    setPending((list) => list.filter((a) => a.fileId !== fileId));
+  };
+
   const send = () => {
-    if (!text.trim() || !profile) return;
-    const msg = { id: uid(), from: profile, to: thread === "team" ? null : thread, text: text.trim(), date: todayISO(), time: new Date().toTimeString().slice(0, 5), readBy: [profile] };
+    const body = text.trim();
+    // A picture on its own is a message. Only an empty box is nothing to send.
+    if ((!body && pending.length === 0) || !profile) return;
+    const msg = { id: uid(), from: profile, to: thread === "team" ? null : thread, text: body, attachments: pending, date: todayISO(), time: new Date().toTimeString().slice(0, 5), readBy: [profile] };
+    // What the notification says when the message is pictures and nothing else.
+    const summary = body || (pending.length === 1 ? `sent a ${pending[0].kind === "video" ? "video" : "picture"}` : `sent ${pending.length} pictures`);
     let notifications = data.notifications || [];
     if (thread === "team") {
-      notifications = [...notifications, makeNotification({ toProfile: null, type: "message", text: `${profile} in Team Chat: ${text.trim().slice(0, 60)}`, link: "chat", fromProfile: profile })];
+      notifications = [...notifications, makeNotification({ toProfile: null, type: "message", text: `${profile} in Team Chat: ${summary.slice(0, 60)}`, link: "chat", fromProfile: profile })];
       saveData({ ...data, messages: [...messages, msg], notifications });
-      sendPush(null, `${profile} in Team Chat`, text.trim().slice(0, 100), profile);
+      sendPush(null, `${profile} in Team Chat`, summary.slice(0, 100), profile);
     } else {
       notifications = [...notifications, makeNotification({ toProfile: thread, type: "message", text: `${profile} sent you a message`, link: "chat", fromProfile: profile })];
       saveData({ ...data, messages: [...messages, msg], notifications });
-      sendPush(thread, `Message from ${profile}`, text.trim().slice(0, 100));
+      sendPush(thread, `Message from ${profile}`, summary.slice(0, 100));
     }
     setText("");
+    setPending([]);
+    setAttachError("");
   };
 
   return (
@@ -6428,7 +6525,7 @@ function Chat({ data, saveData, profile }) {
           <div className="page-title">Chat</div>
           <div className="page-sub">
             {unread.total > 0
-              ? `${unread.total} new ${unread.total === 1 ? "message" : "messages"} waiting.`
+              ? `New: ${chatUnreadSummary(unread)}.`
               : "Team chat, or message someone directly."}
           </div>
         </div>
@@ -6455,20 +6552,79 @@ function Chat({ data, saveData, profile }) {
             {visible.map((m) => (
               <div key={m.id} style={{ marginBottom: 12, textAlign: m.from === profile ? "right" : "left" }}>
                 {thread === "team" && m.from !== profile && <div style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 3 }}>{m.from}</div>}
-                <div style={{ display: "inline-block", background: m.from === profile ? "var(--gold)" : "var(--panel-raised)", color: m.from === profile ? "#171812" : "var(--text)", padding: "8px 12px", borderRadius: 10, fontSize: 13, maxWidth: "75%", textAlign: "left", whiteSpace: "pre-wrap", wordBreak: "break-word" }}><Linkify text={m.text} /></div>
+                <div style={{ display: "inline-block", background: m.from === profile ? "var(--gold)" : "var(--panel-raised)", color: m.from === profile ? "#171812" : "var(--text)", padding: m.text ? "8px 12px" : 6, borderRadius: 10, fontSize: 13, maxWidth: "75%", textAlign: "left", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {m.text && <Linkify text={m.text} />}
+                  {m.text && <LinkPreview text={m.text} />}
+                  {(m.attachments || []).length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: m.text ? 8 : 0 }}>
+                      {m.attachments.map((a) => (
+                        <button
+                          key={a.fileId}
+                          onClick={() => setLightbox(a)}
+                          title={a.name}
+                          style={{ position: "relative", padding: 0, border: "none", background: "none", lineHeight: 0, borderRadius: 8, overflow: "hidden" }}
+                        >
+                          <img
+                            src={driveThumbSrc(a.fileId)}
+                            onError={hideBrokenThumb}
+                            alt={a.name}
+                            style={{ width: m.attachments.length === 1 ? 190 : 92, height: m.attachments.length === 1 ? 190 : 92, objectFit: "cover", display: "block", background: "var(--panel)" }}
+                          />
+                          {a.kind === "video" && (
+                            <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", background: "rgba(0,0,0,0.25)" }}><Play size={22} /></span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>{m.time}</div>
               </div>
             ))}
             {visible.length === 0 && <div className="empty">{thread === "team" ? "No messages yet — say hi to the team." : `No messages with ${thread} yet.`}</div>}
           </div>
+          {pending.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+              {pending.map((a) => (
+                <div key={a.fileId} style={{ position: "relative", width: 68 }}>
+                  <img src={driveThumbSrc(a.fileId)} onError={hideBrokenThumb} alt={a.name} style={{ width: 68, height: 68, objectFit: "cover", borderRadius: 6, background: "var(--panel-raised)", display: "block" }} />
+                  <button
+                    onClick={() => removePending(a.fileId)}
+                    title="Remove"
+                    style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", background: "var(--alert)", color: "#fff", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {attaching && (
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
+              {attachRetry || `Adding picture… ${attachProgress}%`}
+            </div>
+          )}
+          {attachError && <div style={{ fontSize: 11, color: "var(--alert)", marginTop: 10 }}>{attachError}</div>}
           <div className="comment-form" style={{ marginTop: 14 }}>
+            <input ref={fileInputRef} type="file" accept="image/*,video/*" onChange={handleFileSelect} style={{ display: "none" }} />
+            <button
+              className="btn btn-ghost"
+              style={{ alignSelf: "flex-end" }}
+              title="Add a picture or video"
+              disabled={attaching}
+              onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            >
+              <Image size={14} />
+            </button>
             <textarea
               value={text} onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              onPaste={handlePaste}
               placeholder={thread === "team" ? "Message the team…" : `Message ${thread}…`}
             />
             <button className="btn btn-gold" style={{ alignSelf: "flex-end" }} onClick={send}><Send size={14} /></button>
           </div>
+          {lightbox && <MediaLightbox fileId={lightbox.fileId} kind={lightbox.kind} name={lightbox.name} onClose={() => setLightbox(null)} />}
         </div>
       </div>
     </div>
@@ -8314,7 +8470,7 @@ export default function TeamHub() {
             <button key={n.id} className={`nav-item ${view === n.id ? "active" : ""}`} onClick={() => openNavItem(n.id)}>
               <Icon size={16} /> {n.label}
               {count > 0 && (
-                <span className="unread-pip">{count}</span>
+                <span className="unread-pip" title={n.id === "chat" ? chatUnreadSummary(chatUnread) : undefined}>{count}</span>
               )}
             </button>
           );
