@@ -13,7 +13,7 @@ import { supabase } from "./supabaseClient";
 import {
   Instagram, RefreshCw, ArrowUpRight, ArrowDownRight, ExternalLink,
   AlertTriangle, Check, Eye, Users, Play, Table2, BarChart3, X,
-  ChevronLeft, ChevronRight, Clock, LayoutGrid, Film,
+  ChevronLeft, ChevronRight, Clock, LayoutGrid, Film, ListChecks, FlaskConical, Shield,
 } from "lucide-react";
 import {
   SETTLE_DAYS, MIN_PEERS, kindOf, KIND_NOUN, formatOf, FORMAT_LABEL, ageDays, per, median, percentile,
@@ -21,6 +21,7 @@ import {
 } from "./igInsights";
 import VideoCheck from "./VideoCheck";
 import Benchmarks from "./Benchmarks";
+import { WhatWorks, Tests, Brief, Team, TestMarker, ThemeChips } from "./Insights";
 import { completion } from "./IgPostLink";
 import "./analytics.css";
 
@@ -484,7 +485,7 @@ function PercentBar({ pct }) {
   );
 }
 
-function PostReview({ post, media, times, list, onSelect, onClose, content }) {
+function PostReview({ post, media, times, list, onSelect, onClose, content, data, saveData, profile }) {
   const [history, setHistory] = useState(null);
   const index = list.findIndex((m) => m.id === post.id);
   const prev = index > 0 ? list[index - 1] : null;
@@ -575,6 +576,9 @@ function PostReview({ post, media, times, list, onSelect, onClose, content }) {
                 Posted less than {SETTLE_DAYS} days ago — the numbers are still climbing, so compare again in a few days.
               </div>
             ) : null}
+
+            <ThemeChips post={post} data={data} saveData={saveData} />
+            <TestMarker post={post} data={data} saveData={saveData} profile={profile} />
 
             {enough ? (
               <div className="ig-review-badges">
@@ -1025,7 +1029,7 @@ const RANGES = [
   { label: "90 days", days: 90 },
 ];
 
-export default function Analytics({ profile, data, saveData }) {
+export default function Analytics({ profile, data, saveData, isLead }) {
   const [days, setDays] = useState(30);
   const [status, setStatus] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -1171,7 +1175,9 @@ export default function Analytics({ profile, data, saveData }) {
   ), [demo, demoBreak]);
 
   const times = useMemo(() => postingTimes(media), [media]);
-  const standalone = tab === "video" || tab === "bench";
+  // Tabs that are a page of their own rather than the charts with a filter on top.
+  const LEARN_TABS = ["works", "tests", "brief", "team"];
+  const standalone = tab === "video" || tab === "bench" || LEARN_TABS.includes(tab);
   const formats = useMemo(() => formatComparison(media), [media]);
   const narrow = useNarrow();
 
@@ -1309,8 +1315,17 @@ export default function Analytics({ profile, data, saveData }) {
           <button className={tab === "table" ? "on" : ""} onClick={() => setTab("table")}>
             <Table2 size={13} /> Posts
           </button>
+          <button className={tab === "works" ? "on" : ""} onClick={() => setTab("works")}>
+            <LayoutGrid size={13} /> What works
+          </button>
           <button className={tab === "timing" ? "on" : ""} onClick={() => setTab("timing")}>
             <Clock size={13} /> When & what
+          </button>
+          <button className={tab === "brief" ? "on" : ""} onClick={() => setTab("brief")}>
+            <ListChecks size={13} /> Brief
+          </button>
+          <button className={tab === "tests" ? "on" : ""} onClick={() => setTab("tests")}>
+            <FlaskConical size={13} /> Tests
           </button>
           <button className={tab === "video" ? "on" : ""} onClick={() => setTab("video")}>
             <Film size={13} /> Video check
@@ -1318,6 +1333,11 @@ export default function Analytics({ profile, data, saveData }) {
           <button className={tab === "bench" ? "on" : ""} onClick={() => setTab("bench")}>
             <Users size={13} /> Benchmarks
           </button>
+          {isLead ? (
+            <button className={tab === "team" ? "on" : ""} onClick={() => setTab("team")}>
+              <Shield size={13} /> Team
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -1336,6 +1356,13 @@ export default function Analytics({ profile, data, saveData }) {
 
       {tab === "video" ? <VideoCheck media={media} /> : null}
       {tab === "bench" ? <Benchmarks data={data} saveData={saveData} /> : null}
+      {LEARN_TABS.includes(tab) && loading ? <div className="ig-empty-chart">Loading…</div> : null}
+      {LEARN_TABS.includes(tab) && !loading ? (
+        tab === "works" ? <WhatWorks media={media} data={data} saveData={saveData} account={account} onSelect={setSelected} brand={connected?.username || ""} />
+          : tab === "tests" ? <Tests media={media} data={data} saveData={saveData} profile={profile} onSelect={setSelected} />
+          : tab === "brief" ? <Brief media={media} data={data} saveData={saveData} account={account} profile={profile} />
+          : isLead ? <Team media={media} data={data} onSelect={setSelected} /> : null
+      ) : null}
 
       {!loading && (account.length > 0 || media.length > 0) && !standalone ? (
         <>
@@ -1421,6 +1448,7 @@ export default function Analytics({ profile, data, saveData }) {
       {selected ? (
         <PostReview
           post={selected} media={media} times={times} content={data?.content}
+          data={data} saveData={saveData} profile={profile}
           list={inRange.some((m) => m.id === selected.id) ? inRange : media}
           onSelect={setSelected} onClose={closeReview}
         />

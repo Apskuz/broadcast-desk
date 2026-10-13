@@ -359,3 +359,31 @@
 .bm-mine td { background: var(--gold-soft); }
 .bm-caption { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 a.ig-best { text-decoration: none; }
+
+/* ------------------------------- what works & co ----------------------------- */
+.in-suggest { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.in-suggest .bm-chip { cursor: pointer; padding: 4px 10px; gap: 4px; }
+.bm-chip.on { border-color: var(--gold); color: var(--gold); background: var(--gold-soft); }
+.in-edit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.in-edit input, .in-edit select { flex: 1; min-width: 160px; }
+.in-h4 { display: flex; align-items: center; gap: 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 6px 0 8px; }
+.in-hooks, .in-learned, .in-ideas { list-style: none; margin: 0; padding: 0; }
+.in-hooks li, .in-learned li { display: flex; gap: 10px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--hair); font-size: 12.5px; line-height: 1.45; }
+.in-hooks li:last-child, .in-learned li:last-child { border-bottom: 0; }
+.in-learned li > span:nth-child(2) { flex: 1; }
+.in-hook-rel { flex-shrink: 0; width: 46px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.in-ideas li { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--hair); font-size: 13px; }
+.in-ideas li:last-child { border-bottom: 0; }
+.in-ideas li > div { flex: 1; min-width: 0; }
+.in-ideas a { color: var(--gold); }
+.in-facts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; }
+.in-facts b { font-weight: 600; }
+.in-series { display: flex; flex-direction: column; gap: 8px; }
+.in-series-card { border: 1px solid var(--hair); border-radius: 10px; padding: 8px 12px; background: var(--panel-raised); }
+.in-series-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; width: 100%; background: none; border: 0; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; flex-wrap: wrap; padding: 0; }
+.in-marker { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12.5px; margin: 0 0 14px; }
+.in-marker b { margin-right: 6px; }
+.in-marker input { flex: 1; min-width: 180px; max-width: 320px; padding: 6px 9px; font-size: 12.5px; }
+.in-forecast { font-size: 12.5px; background: var(--panel-raised); border-radius: 8px; padding: 9px 11px; margin: -4px 0 14px; line-height: 1.45; }
+.in-gap { align-items: flex-start; }
+.in-gap > svg { flex-shrink: 0; margin-top: 2px; color: var(--gold); }

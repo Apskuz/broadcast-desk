@@ -4,9 +4,11 @@
 // access token -- so this endpoint returns the safe fields only.
 import { createClient } from "@supabase/supabase-js";
 import { benchmarksHandler } from "../lib/benchmarks.js";
+import { commentsHandler } from "../lib/comments.js";
 
 export default async function handler(req, res) {
   if (req.query?.benchmarks !== undefined) return benchmarksHandler(req, res);
+  if (req.query?.comments !== undefined) return commentsHandler(req, res);
   const url = process.env.VITE_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
   if (!url || !key) {

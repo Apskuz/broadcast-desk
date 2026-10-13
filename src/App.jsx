@@ -6,6 +6,7 @@ import { useLiveBoard } from "./livePresence";
 import Analytics, { AnalyticsIcon, syncStoriesSoon } from "./Analytics";
 import IgPostLink, { loadMedia } from "./IgPostLink";
 import { UploadCheck, checkForUpload, fileSource } from "./VideoCheck";
+import { CalendarHints, ReachForecast } from "./Insights";
 import PhotoEditor from "./PhotoEditor";
 import {
   EDIT_DEFAULTS, ALL_PRESETS, fullEdit, hasEdit, trimEdit, migrateLook, editSummary,
@@ -2075,6 +2076,8 @@ function Calendar({ data, saveData, profile }) {
         </div>
       </div>
 
+      <CalendarHints events={data.calendarEvents} />
+
       {isNarrow && mode !== "day" ? (
         <div>
           <div className="card" style={{ padding: 14, touchAction: "pan-y" }} {...swipe}>
@@ -2308,6 +2311,7 @@ function Calendar({ data, saveData, profile }) {
               </select>
             </div>
           </div>
+          <ReachForecast type={form.type} date={form.date} time={form.time} />
           <div className="field"><label>Assignee</label>
             <input list="cal-assignee-list" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="Who's responsible for this" />
             <datalist id="cal-assignee-list">{allAssignees.map((a) => <option value={a} key={a} />)}</datalist>
@@ -8544,7 +8548,7 @@ export default function TeamHub() {
     chat: <Chat data={data} saveData={saveData} profile={profile} />,
     content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
     ideas: <IdeaBank data={data} saveData={saveData} profile={profile} />,
-    analytics: <Analytics profile={profile} data={data} saveData={saveData} />,
+    analytics: <Analytics profile={profile} data={data} saveData={saveData} isLead={isEmployer} />,
     team: <TeamManage data={data} saveData={saveData} />,
   }[view];
 

@@ -19,6 +19,7 @@ export const GRAPH_VERSION = process.env.IG_GRAPH_VERSION || "v26.0";
 const SCOPES = [
   "instagram_basic",             // read the IG account and its media
   "instagram_manage_insights",   // the actual analytics, post and account level
+  "instagram_manage_comments",   // read comments for the Brief's "what people ask" (read only)
   "pages_show_list",             // find which Page the IG account hangs off
   "pages_read_engagement",       // read that Page
 ];
