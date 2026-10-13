@@ -223,6 +223,58 @@ async function syncMedia(supabase, account, token, report) {
   report.insightsSaved = rows.length;
 }
 
+// Stories. The /media listing above never includes them, and Instagram only
+// serves a story — and its numbers — for 24 hours after it goes up. So they
+// are read from their own endpoint, by the nightly run and by a light
+// story-only run the app asks for every couple of hours while it's open.
+async function syncStories(supabase, account, token, report) {
+  const json = await graph(`${account.ig_user_id}/stories`, {
+    fields: "id,media_type,media_product_type,caption,permalink,thumbnail_url,media_url,timestamp",
+    access_token: token,
+  });
+  const stories = json.data || [];
+  report.storiesSeen = stories.length;
+  if (!stories.length) return;
+  const { error } = await supabase.from("ig_media").upsert(
+    stories.map((m) => ({
+      id: m.id,
+      ig_user_id: account.ig_user_id,
+      media_type: m.media_type || null,
+      media_product_type: "STORY",
+      caption: m.caption || null,
+      permalink: m.permalink || null,
+      thumbnail_url: m.thumbnail_url || null,
+      media_url: m.media_url || null,
+      posted_at: m.timestamp || null,
+    })),
+    { onConflict: "id" }
+  );
+  if (error) { report.errors.push(`saving stories: ${error.message}`); return; }
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = [];
+  for (const m of stories) {
+    const ins = await fetchInsights(m.id, "STORY", token);
+    if (!ins) continue;
+    rows.push({
+      media_id: m.id,
+      // Same one-row-per-day key as posts, so a later run today overwrites
+      // this one with the higher, later numbers.
+      captured_at: `${today}T12:00:00.000Z`,
+      views: ins.views ?? null,
+      reach: ins.reach ?? null,
+      shares: ins.shares ?? null,
+      total_interactions: ins.total_interactions ?? null,
+      follows: ins.follows ?? null,
+      profile_visits: ins.profile_visits ?? null,
+    });
+  }
+  if (rows.length) {
+    const { error: e2 } = await supabase.from("ig_media_snapshots").upsert(rows, { onConflict: "media_id,captured_at" });
+    if (e2) report.errors.push(`saving story stats: ${e2.message}`);
+  }
+  report.storyInsights = rows.length;
+}
+
 // Account-level daily numbers. Meta keeps 90 days but serves only 30 per call,
 // so the first run walks back in chunks and later runs just top up.
 async function syncAccount(supabase, account, token, report) {
@@ -311,6 +363,8 @@ const TOTAL_ONLY = {
   views: "views",
   profile_views: "profile_views",
   website_clicks: "website_clicks",
+  accounts_engaged: "accounts_engaged",
+  total_interactions: "total_interactions",
 };
 
 async function syncTotalOnly(supabase, account, token, record, report) {
@@ -391,6 +445,10 @@ async function syncDemographics(supabase, account, token, report) {
   report.demographics = rows.length;
 }
 
+// Per warm instance: a burst of open tabs asking at once becomes one run.
+const STORY_COOLDOWN_MS = 20 * 60000;
+let lastStoryRun = 0;
+
 export default async function handler(req, res) {
   // Two callers: Vercel Cron, which sends "Bearer CRON_SECRET" when that env
   // var is set, and the Analytics screen's Sync now button. The button can't
@@ -406,6 +464,21 @@ export default async function handler(req, res) {
 
   const { data: accounts, error } = await supabase.from("ig_accounts").select("*");
   if (error) return res.status(500).json({ error: error.message });
+
+  // Story-only run: one listing call plus one per live story, so it is cheap
+  // enough to allow often. It doesn't touch last_synced_at, so it never holds
+  // up a full sync.
+  if (req.query?.stories) {
+    if (Date.now() - lastStoryRun < STORY_COOLDOWN_MS) return res.status(200).json({ ok: true, note: "Stories were checked a moment ago." });
+    lastStoryRun = Date.now();
+    const reports = [];
+    for (const account of accounts || []) {
+      const report = { account: account.username || account.ig_user_id, storiesSeen: 0, storyInsights: 0, errors: [] };
+      try { await syncStories(supabase, account, account.access_token, report); } catch (err) { report.errors.push(err.message); }
+      reports.push(report);
+    }
+    return res.status(200).json({ ok: true, reports });
+  }
 
   const COOLDOWN_MIN = 10;
   const lastSync = Math.max(0, ...(accounts || []).map((a) => Date.parse(a.last_synced_at || "") || 0));
@@ -430,6 +503,7 @@ export default async function handler(req, res) {
       await syncMedia(supabase, account, token, report);
       await syncAccount(supabase, account, token, report);
       await syncDemographics(supabase, account, token, report);
+      try { await syncStories(supabase, account, token, report); } catch (err) { report.errors.push(`stories: ${err.message}`); }
     } catch (err) {
       report.errors.push(err.message);
     }

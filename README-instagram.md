@@ -142,3 +142,20 @@ goes permanently empty, that error message is the place to look first.
 
 **Vercel Hobby allows 2 cron jobs.** This project now uses both (daily reminders
 + Instagram sync).
+
+**The Monday summary rides on the daily-reminders cron**, so it needs no third
+cron job. It goes out with the 07:00 UTC run on Mondays and skips anyone who
+switched "Weekly Instagram summary" off in their notification settings.
+
+**Stories are only readable for 24 hours.** The nightly sync catches the ones
+still up, and the app asks for a story-only sync (`/api/instagram-sync?stories=1`)
+at most every two hours from each device while someone has it open.
+
+## 6. AI review (optional)
+
+The "AI read" on a post and the AI review in Video check send the post's cover
+image, or eight still frames of a video, together with the numbers, to Claude.
+Add `ANTHROPIC_API_KEY` (from console.anthropic.com) to Vercel → Settings →
+Environment Variables and redeploy. Without it, everything else still works and
+those buttons say the key is missing. A review costs a few cents. The video
+itself never leaves the device: the measuring happens in the browser.

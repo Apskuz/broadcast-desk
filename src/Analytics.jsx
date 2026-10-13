@@ -13,7 +13,13 @@ import { supabase } from "./supabaseClient";
 import {
   Instagram, RefreshCw, ArrowUpRight, ArrowDownRight, ExternalLink,
   AlertTriangle, Check, Eye, Users, Play, Table2, BarChart3, X,
+  ChevronLeft, ChevronRight, Sparkles, Clock, LayoutGrid, Film,
 } from "lucide-react";
+import {
+  SETTLE_DAYS, MIN_PEERS, kindOf, KIND_NOUN, formatOf, FORMAT_LABEL, ageDays, per, median, percentile,
+  engagementRate, peersFor, relativeReach, captionStats, postingTimes, slotFor, formatComparison, DAY_NAMES, TIME_BLOCKS,
+} from "./igInsights";
+import VideoCheck, { AiFeedback } from "./VideoCheck";
 import "./analytics.css";
 
 /* --------------------------------- palette --------------------------------
@@ -326,43 +332,34 @@ function BarChart({ rows, valueFormat = full, color = SERIES[0], onRowClick }) {
    typical post of the same kind, and what that comparison says went well and
    what could go better.
 
-   "Typical" is the median of comparable posts -- reels against reels, feed
-   posts against feed posts -- because one viral post drags an average far
-   from anything typical. Posts under three days old are left out of the
-   baseline (their numbers are still climbing), and comparisons need at least
-   five peers; with fewer, a "typical" is just noise.
+   "Typical" is the median of the 30 posts of the same kind posted closest in
+   time to this one (see igInsights.js) -- reels against reels, and against
+   the ones from around the same time, because a 2019 post was seen by a much
+   smaller account. Posts under three days old are left out of the baseline
+   (their numbers are still climbing), and a comparison needs five peers.
 
    The verdicts compare rates (saves per account reached, and so on) rather
    than raw counts, so a post that reached fewer people isn't also marked down
    for every other number. They say what happened next to the norm; the
    suggestions are the usual levers for that number, not a diagnosis. */
-const SETTLE_DAYS = 3;
-const MIN_PEERS = 5;
 const MIN_COUNT = 3;
-
-const kindOf = (m) => (m.media_product_type === "REELS" ? "REELS"
-  : m.media_product_type === "STORY" ? "STORY" : "FEED");
-const KIND_NOUN = { REELS: "reel", FEED: "post", STORY: "story" };
-const ageDays = (m) => (Date.now() - Date.parse(m.posted_at || 0)) / 86400000;
-const per = (num, den, scale) => (num != null && den ? (num / den) * scale : null);
 const fixed = (digits, suffix = "") => (v) => (v == null ? "—" : `${v.toFixed(digits)}${suffix}`);
-
-function median(values) {
-  const v = values.filter((x) => typeof x === "number" && Number.isFinite(x)).sort((a, b) => a - b);
-  if (!v.length) return null;
-  const mid = Math.floor(v.length / 2);
-  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
-}
 
 // Each measure: how to read it off a post, and what to say when it is well
 // above or below the norm. good/weak get the ratio (2.1 = 2.1x typical).
 // count is the raw number behind a rate: "2.4x the comments" is noise when it
 // means two comments instead of one, so a verdict needs MIN_COUNT behind it.
+// Instagram reports follows and profile visits for feed posts only.
 const MEASURES = [
   {
     key: "reach", label: "Accounts reached", get: (m) => m.reach, format: full,
     good: (r, n) => `Reached ${r.toFixed(1)}× more accounts than your typical ${n} — Instagram pushed this one out well beyond the usual audience.`,
     weak: (r, n) => `Reached ${Math.round((1 - r) * 100)}% fewer accounts than your typical ${n}. Reach is mostly decided in the first hour: the opening frame or cover, and posting when your audience is online, matter most.`,
+  },
+  {
+    key: "views", label: "Views per account reached", get: (m) => per(m.views, m.reach, 1), format: fixed(2),
+    good: (r) => `Each person who saw it watched or opened it ${r.toFixed(1)}× as often as usual — people came back to it, or let it loop.`,
+    weak: null,
   },
   {
     key: "saves", label: "Saves per 100 reached", get: (m) => per(m.saved, m.reach, 100), count: (m) => m.saved, format: fixed(2),
@@ -385,29 +382,45 @@ const MEASURES = [
     weak: () => "A smaller share of viewers liked it than usual — it reached people, but fewer of them were moved to react.",
   },
   {
-    key: "follows", label: "Follows per 1,000 reached", get: (m) => per(m.follows, m.reach, 1000), count: (m) => m.follows, format: fixed(1),
+    key: "engagement", label: "Engagement rate", get: engagementRate, format: fixed(1, "%"),
+    good: null, weak: null,
+  },
+  {
+    key: "follows", label: "Follows per 1,000 reached", get: (m) => per(m.follows, m.reach, 1000), count: (m) => m.follows, format: fixed(1), feedOnly: true,
     good: (r) => `Turned viewers into followers at ${r.toFixed(1)}× the usual rate — this is the kind of post that grows the account.`,
     weak: null, // most posts gain almost no follows, so "below typical" here is noise
+  },
+  {
+    key: "visits", label: "Profile visits per 1,000 reached", get: (m) => per(m.profile_visits, m.reach, 1000), count: (m) => m.profile_visits, format: fixed(1), feedOnly: true,
+    good: (r) => `Sent people to your profile ${r.toFixed(1)}× as often as usual — it made them curious about the account.`,
+    weak: null,
   },
   {
     key: "watch", label: "Average watch time", get: (m) => (m.avg_watch_time_ms ? m.avg_watch_time_ms / 1000 : null), format: fixed(1, "s"), reelsOnly: true,
     good: (r) => `People watched ${r.toFixed(1)}× longer than on your typical reel — it held attention.`,
     weak: () => "Viewers left earlier than on your typical reel. Get to the point in the first one or two seconds and cut anything slow.",
   },
+  {
+    key: "watchTotal", label: "Total time watched", get: (m) => (m.total_watch_time_ms ? m.total_watch_time_ms / 60000 : null), format: fixed(0, " min"), reelsOnly: true,
+    good: null, weak: null,
+  },
 ];
 
 function reviewPost(post, all) {
   const kind = kindOf(post);
-  const peers = all.filter((m) => m.id !== post.id && kindOf(m) === kind && m.reach != null && ageDays(m) >= SETTLE_DAYS);
+  const peers = peersFor(post, all);
   const rows = [];
   const good = [];
   const weak = [];
   for (const ms of MEASURES) {
     if (ms.reelsOnly && kind !== "REELS") continue;
+    if (ms.feedOnly && kind !== "FEED") continue;
     const value = ms.get(post);
-    const typical = peers.length >= MIN_PEERS ? median(peers.map(ms.get)) : null;
+    const peerValues = peers.map(ms.get);
+    const typical = peers.length >= MIN_PEERS ? median(peerValues) : null;
     const ratio = value != null && typical ? value / typical : null;
-    rows.push({ ...ms, value, typical, ratio });
+    const pct = peers.length >= MIN_PEERS ? percentile(value, peerValues) : null;
+    rows.push({ ...ms, value, typical, ratio, pct });
     if (ratio == null) continue;
     // Praise needs this post's own count to be real; criticism needs the
     // typical post to have a real count to fall short of.
@@ -425,50 +438,136 @@ function reviewPost(post, all) {
     weak.push({ key: "context", score: 0, text: "Some of the dip above is expected: when a post reaches well beyond your followers, a smaller share of those people react to it." });
   }
 
-  // When the best-reaching comparable posts went out, as a fact to set this
-  // one's timing against -- not a rule, there are too few posts for that.
-  const best = [...peers].sort((a, b) => (b.reach || 0) - (a.reach || 0)).slice(0, 5);
-  const when = (m) => new Date(m.posted_at).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  const byReach = [...peers, post].filter((m) => m.reach != null).sort((a, b) => b.reach - a.reach);
+  const rank = byReach.findIndex((m) => m.id === post.id) + 1;
+  const best = [...peers].sort((a, b) => (b.reach || 0) - (a.reach || 0)).slice(0, 3);
 
-  return { kind, peers: peers.length, rows, good, weak, bestTimes: best.map(when) };
+  // The caption next to the top quarter of its peers by reach.
+  const top = [...peers].sort((a, b) => (b.reach || 0) - (a.reach || 0)).slice(0, Math.max(3, Math.ceil(peers.length / 4)));
+  const topCaptions = top.map((m) => captionStats(m.caption));
+  const caption = {
+    mine: captionStats(post.caption),
+    top: {
+      length: median(topCaptions.map((c) => c.length)),
+      hashtags: median(topCaptions.map((c) => c.hashtags)),
+      question: topCaptions.filter((c) => c.question).length / (topCaptions.length || 1),
+      cta: topCaptions.filter((c) => c.cta).length / (topCaptions.length || 1),
+    },
+  };
+
+  const dates = peers.map((m) => m.posted_at).sort();
+  const span = dates.length ? [dates[0], dates[dates.length - 1]] : null;
+  return { kind, peers: peers.length, span, rows, good, weak, rank, rankOf: byReach.length, best, caption };
 }
 
-function PostReview({ post, media, onClose }) {
+function captionAdvice(c) {
+  const out = [];
+  if (c.mine.length === 0) out.push("There's no caption. Even one line gives people something to react to and tells Instagram what the post is about.");
+  if (c.mine.firstLineLength > 125) out.push(`The first line is ${c.mine.firstLineLength} characters; Instagram cuts the caption off around 125 in the feed, so the hook may sit behind "more".`);
+  if (c.mine.hashtags > 10) out.push(`${c.mine.hashtags} hashtags is a lot — 3 to 5 that really describe the post do as well and read better.`);
+  if (!c.mine.question && c.top.question >= 0.5) out.push("Most of your best-reaching posts from this period ask a question in the caption; this one doesn't.");
+  if (!c.mine.cta && c.top.cta >= 0.5) out.push("Most of your best-reaching posts ask people to do something (save, share, comment, tag); this one doesn't.");
+  if (c.top.length && c.mine.length && c.mine.length < c.top.length * 0.4) out.push(`It's much shorter than your best performers (${c.mine.length} vs about ${Math.round(c.top.length)} characters).`);
+  return out;
+}
+
+function PercentBar({ pct }) {
+  if (pct == null) return <span className="ig-dim">—</span>;
+  const color = pct >= 70 ? "var(--good)" : pct <= 30 ? "var(--alert)" : MUTED;
+  return (
+    <span className="ig-pctbar" title={`Better than ${Math.round(pct)}% of them`}>
+      <span className="ig-pctbar-track"><span className="ig-pctbar-dot" style={{ left: `${pct}%`, background: color }} /></span>
+      <span style={{ color, minWidth: 30, textAlign: "right" }}>{Math.round(pct)}%</span>
+    </span>
+  );
+}
+
+function PostReview({ post, media, times, list, onSelect, onClose }) {
   const [history, setHistory] = useState(null);
+  const [ai, setAi] = useState(null); // null | "loading" | { error } | result
+  const index = list.findIndex((m) => m.id === post.id);
+  const prev = index > 0 ? list[index - 1] : null;
+  const next = index >= 0 && index < list.length - 1 ? list[index + 1] : null;
+
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft" && prev) onSelect(prev);
+      if (e.key === "ArrowRight" && next) onSelect(next);
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, onSelect, prev, next]);
   useEffect(() => {
     let live = true;
-    supabase.from("ig_media_snapshots").select("captured_at,views,reach")
+    setHistory(null);
+    setAi(null);
+    supabase.from("ig_media_snapshots").select("captured_at,views,reach,likes,saved,shares")
       .eq("media_id", post.id).order("captured_at", { ascending: true })
       .then(({ data }) => { if (live) setHistory(data || []); });
     return () => { live = false; };
   }, [post.id]);
 
   const review = useMemo(() => reviewPost(post, media), [post, media]);
+  const slot = useMemo(() => (times ? slotFor(post, times) : null), [post, times]);
   const noun = KIND_NOUN[review.kind];
   const fetched = post.reach != null || post.views != null;
   const young = ageDays(post) < SETTLE_DAYS;
+  const enough = review.peers >= MIN_PEERS;
+  const reachRow = review.rows.find((r) => r.key === "reach");
+  const advice = captionAdvice(review.caption);
 
-  // One point per day: the latest snapshot of each day.
-  const growth = useMemo(() => {
+  // One point per day: the latest snapshot of each day, and what each day added.
+  const daily = useMemo(() => {
     const byDay = new Map();
     for (const s of history || []) byDay.set(s.captured_at.slice(0, 10), s);
-    const pts = [...byDay.entries()];
-    return [
-      { label: "Views", color: SERIES[0], points: pts.map(([day, s]) => ({ day, value: s.views })) },
-      { label: "Reach", color: SERIES[1], points: pts.map(([day, s]) => ({ day, value: s.reach })) },
-    ].filter((s) => s.points.some((p) => p.value != null));
+    const entries = [...byDay.entries()];
+    return entries.map(([day, s], i) => ({
+      day, ...s, gained: i ? (s.views ?? 0) - (entries[i - 1][1].views ?? 0) : null,
+    }));
   }, [history]);
-  const growthDays = growth[0]?.points.length || 0;
+  const growth = useMemo(() => ([
+    { label: "Views", color: SERIES[0], points: daily.map((d) => ({ day: d.day, value: d.views })) },
+    { label: "Reach", color: SERIES[1], points: daily.map((d) => ({ day: d.day, value: d.reach })) },
+  ].filter((s) => s.points.some((p) => p.value != null))), [daily]);
+
+  const askAi = async () => {
+    setAi("loading");
+    try {
+      const res = await fetch("/api/video-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "post",
+          imageUrl: post.thumbnail_url || post.media_url || null,
+          caption: post.caption || "",
+          kind: noun,
+          format: formatOf(post),
+          postedAt: post.posted_at,
+          slot: slot ? `${slot.day} ${slot.block}${slot.n >= 3 && slot.value ? `, a slot that usually gets ${slot.value.toFixed(2)}x typical reach` : ""}` : null,
+          measures: review.rows.map((r) => ({ label: r.label, value: r.format(r.value), typical: r.format(r.typical), betterThanPct: r.pct == null ? null : Math.round(r.pct) })),
+          rank: enough ? `#${review.rank} of ${review.rankOf} by reach` : null,
+          bestCaptions: review.best.map((m) => (m.caption || "").slice(0, 300)),
+        }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || `The AI read failed (${res.status}).`);
+      setAi(out);
+    } catch (err) {
+      setAi({ error: err.message });
+    }
+  };
 
   return (
     <div className="ig-review-backdrop" onClick={onClose}>
       <div className="ig-review" role="dialog" aria-modal="true" aria-label="Post analytics" onClick={(e) => e.stopPropagation()}>
         <button className="ig-review-close" onClick={onClose} aria-label="Close"><X size={20} /></button>
+
+        <div className="ig-review-nav">
+          <button className="btn btn-ghost" disabled={!prev} onClick={() => prev && onSelect(prev)}><ChevronLeft size={14} /> Newer</button>
+          <span className="ig-dim">{index >= 0 ? `${index + 1} of ${list.length}` : ""}</span>
+          <button className="btn btn-ghost" disabled={!next} onClick={() => next && onSelect(next)}>Older <ChevronRight size={14} /></button>
+        </div>
 
         <div className="ig-review-top">
           {post.thumbnail_url || post.media_url ? (
@@ -476,7 +575,7 @@ function PostReview({ post, media, onClose }) {
           ) : <div className="ig-review-img" />}
           <div className="ig-review-meta">
             <div className="ig-dim">
-              {noun[0].toUpperCase() + noun.slice(1)} · {post.posted_at ? new Date(post.posted_at).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+              {FORMAT_SINGULAR[formatOf(post)] || noun} · {post.posted_at ? new Date(post.posted_at).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
             </div>
             <p className="ig-review-caption">{post.caption || "(no caption)"}</p>
             {post.permalink ? (
@@ -500,6 +599,20 @@ function PostReview({ post, media, onClose }) {
               </div>
             ) : null}
 
+            {enough ? (
+              <div className="ig-review-badges">
+                <span className="ig-badge"><strong>#{review.rank}</strong> of {review.rankOf} by reach</span>
+                {reachRow?.ratio != null ? (
+                  <span className="ig-badge" style={{ color: reachRow.ratio >= 1.4 ? "var(--good)" : reachRow.ratio <= 0.7 ? "var(--alert)" : undefined }}>
+                    <strong>{reachRow.ratio.toFixed(1)}×</strong> typical reach
+                  </span>
+                ) : null}
+                {review.rows.filter((r) => r.pct != null && r.key !== "reach").sort((a, b) => b.pct - a.pct).slice(0, 1).map((r) => (
+                  <span key={r.key} className="ig-badge">Strongest: <strong>{r.label.toLowerCase()}</strong> (beats {Math.round(r.pct)}%)</span>
+                ))}
+              </div>
+            ) : null}
+
             {review.good.length || review.weak.length ? (
               <div className="ig-review-verdicts">
                 {review.good.length ? (
@@ -515,7 +628,7 @@ function PostReview({ post, media, onClose }) {
                   </section>
                 ) : null}
               </div>
-            ) : review.peers >= MIN_PEERS ? (
+            ) : enough ? (
               <div className="ig-note">Close to your typical {noun} on every measure — nothing stands out either way.</div>
             ) : (
               <div className="ig-note">
@@ -528,7 +641,7 @@ function PostReview({ post, media, onClose }) {
               {[
                 ["Views", post.views], ["Reach", post.reach], ["Likes", post.likes],
                 ["Comments", post.comments], ["Saves", post.saved], ["Shares", post.shares],
-                ["Follows", post.follows], ["Profile visits", post.profile_visits],
+                ...(review.kind === "FEED" ? [["Follows", post.follows], ["Profile visits", post.profile_visits]] : []),
               ].map(([label, v]) => (
                 <div key={label} className="ig-review-stat">
                   <div className="ig-dim">{label}</div>
@@ -543,15 +656,17 @@ function PostReview({ post, media, onClose }) {
               ) : null}
             </div>
 
-            {review.peers >= MIN_PEERS ? (
+            {enough ? (
               <section className="ig-card ig-review-card">
                 <h3>Against your typical {noun}</h3>
                 <p className="ig-dim ig-review-sub">
-                  Typical = the middle value of your other {review.peers} {noun}s that have numbers.
+                  Typical = the middle value of the {review.peers} {noun}s posted closest in time to this one
+                  {review.span ? ` (${monthYear(review.span[0])} – ${monthYear(review.span[1])})` : ""}.
+                  The last column is how many of them this one beats.
                 </p>
                 <div className="ig-table-scroll">
                   <table className="ig-table ig-review-table">
-                    <thead><tr><th>Measure</th><th className="num">This {noun}</th><th className="num">Typical</th><th className="num">Difference</th></tr></thead>
+                    <thead><tr><th>Measure</th><th className="num">This {noun}</th><th className="num">Typical</th><th className="num">Difference</th><th>Beats</th></tr></thead>
                     <tbody>
                       {review.rows.map((r) => (
                         <tr key={r.key}>
@@ -561,23 +676,59 @@ function PostReview({ post, media, onClose }) {
                           <td className="num" style={{ color: r.ratio == null ? MUTED : r.ratio >= 1.4 ? "var(--good)" : r.ratio <= 0.7 ? "var(--alert)" : MUTED }}>
                             {r.ratio == null ? "—" : `${r.ratio >= 1 ? "+" : "−"}${Math.abs(Math.round((r.ratio - 1) * 100))}%`}
                           </td>
+                          <td><PercentBar pct={r.pct} /></td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                {review.bestTimes.length ? (
-                  <p className="ig-dim" style={{ marginTop: 12 }}>
-                    Your five best-reaching {noun}s went out: {review.bestTimes.join(" · ")}.
-                  </p>
-                ) : null}
               </section>
             ) : null}
+
+            <div className="ig-review-pair">
+              <section className="ig-card ig-review-card">
+                <h3>When it went out</h3>
+                {slot ? (
+                  <>
+                    <p style={{ margin: "0 0 8px", fontSize: 13 }}>
+                      {slot.day}, {slot.block}.{" "}
+                      {slot.n >= 3 && slot.value != null
+                        ? <>Posts in this slot usually get <strong style={{ color: slot.value >= 1.15 ? "var(--good)" : slot.value <= 0.85 ? "var(--alert)" : undefined }}>{slot.value.toFixed(2)}×</strong> your typical reach ({slot.n} posts).</>
+                        : <>Too few posts in this slot to say how it usually does.</>}
+                    </p>
+                    {times?.best?.length ? (
+                      <p className="ig-dim" style={{ margin: 0 }}>
+                        Your strongest slots: {times.best.map((b) => `${DAY_NAMES[b.di]} ${TIME_BLOCKS[b.bi].label} (${b.value.toFixed(2)}×)`).join(" · ")}.
+                      </p>
+                    ) : null}
+                  </>
+                ) : <p className="ig-dim">No posting time recorded.</p>}
+              </section>
+
+              <section className="ig-card ig-review-card">
+                <h3>The caption</h3>
+                <div className="ig-caption-facts">
+                  <span>{review.caption.mine.length} characters</span>
+                  <span>{review.caption.mine.hashtags} hashtags</span>
+                  <span>{review.caption.mine.mentions} mentions</span>
+                  <span>{review.caption.mine.emoji} emoji</span>
+                  <span>{review.caption.mine.question ? "asks a question" : "no question"}</span>
+                  <span>{review.caption.mine.cta ? "has a call to action" : "no call to action"}</span>
+                </div>
+                {enough && review.caption.top.length != null ? (
+                  <p className="ig-dim" style={{ margin: "8px 0 0" }}>
+                    Your best-reaching {noun}s from this period: about {Math.round(review.caption.top.length)} characters and {Math.round(review.caption.top.hashtags)} hashtags;
+                    {" "}{Math.round(review.caption.top.question * 100)}% ask a question, {Math.round(review.caption.top.cta * 100)}% ask people to do something.
+                  </p>
+                ) : null}
+                {advice.length ? <ul className="ig-advice">{advice.map((a) => <li key={a}>{a}</li>)}</ul> : null}
+              </section>
+            </div>
 
             <section className="ig-card ig-review-card">
               <h3>Growth since it was first fetched</h3>
               {history == null ? <div className="ig-empty-chart">Loading…</div>
-                : growthDays < 2 ? (
+                : daily.length < 2 ? (
                   <div className="ig-empty-chart">
                     One reading so far. The numbers are recorded again each night, so this fills in over the coming days.
                   </div>
@@ -585,8 +736,41 @@ function PostReview({ post, media, onClose }) {
                   <>
                     <Legend series={growth} />
                     <LineChart series={growth} height={190} />
+                    <div className="ig-gains">
+                      {daily.slice(1).map((d) => (
+                        <span key={d.day}><span className="ig-dim">{shortDate(d.day)}</span> +{full(d.gained)} views</span>
+                      ))}
+                    </div>
                   </>
                 )}
+            </section>
+
+            {review.best.length ? (
+              <section className="ig-card ig-review-card">
+                <h3>Your best {noun}s from around the same time</h3>
+                <div className="ig-best-row">
+                  {review.best.map((m) => (
+                    <button key={m.id} className="ig-best" onClick={() => onSelect(m)}>
+                      {m.thumbnail_url || m.media_url ? <img src={m.thumbnail_url || m.media_url} alt="" loading="lazy" /> : <span className="ig-thumb-blank" />}
+                      <span className="ig-best-num">{full(m.reach)} reached</span>
+                      <span className="ig-dim">{monthYear(m.posted_at)}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            <section className="ig-card ig-review-card">
+              <div className="ig-card-head">
+                <h3>AI read</h3>
+                {ai !== "loading" ? (
+                  <button className="btn btn-ghost" onClick={askAi}><Sparkles size={14} /> {ai && !ai.error ? "Ask again" : "Get an AI read"}</button>
+                ) : null}
+              </div>
+              {!ai ? <p className="ig-dim" style={{ margin: 0 }}>Looks at the cover image, the caption and every number above, and says in plain words why it did how it did and what to try next time.</p> : null}
+              {ai === "loading" ? <div className="ig-empty-chart">Reading the post…</div> : null}
+              {ai?.error ? <div className="ig-note ig-note-bad"><AlertTriangle size={14} /> {ai.error}</div> : null}
+              {ai && ai !== "loading" && !ai.error ? <AiFeedback result={ai} /> : null}
             </section>
           </>
         )}
@@ -595,16 +779,20 @@ function PostReview({ post, media, onClose }) {
   );
 }
 
+const FORMAT_SINGULAR = { reel: "Reel", carousel: "Carousel", photo: "Photo", video: "Feed video", story: "Story" };
+const monthYear = (iso) => new Date(iso).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+
 /* ------------------------------- data loading ----------------------------- */
 function useInstagramData(days) {
   const [state, setState] = useState({ loading: true, media: [], account: [], demo: [], error: null });
 
   const load = useCallback(async () => {
     setState((s) => ({ ...s, loading: true }));
-    const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    // Twice the range, so the period before it is there to compare against.
+    const since = new Date(Date.now() - (2 * days + 1) * 86400000).toISOString().slice(0, 10);
     try {
       const [mediaRes, acctRes, demoRes] = await Promise.all([
-        supabase.from("ig_media_latest").select("*").order("posted_at", { ascending: false }).limit(400),
+        supabase.from("ig_media_latest").select("*").order("posted_at", { ascending: false }).range(0, 1999),
         supabase.from("ig_account_snapshots").select("*").gte("day", since).order("day", { ascending: true }),
         supabase.from("ig_demographics").select("*"),
       ]);
@@ -629,6 +817,234 @@ function useInstagramData(days) {
 
   useEffect(() => { load(); }, [load]);
   return { ...state, reload: load };
+}
+
+/* ------------------------------ posts & timing ---------------------------- */
+
+function useNarrow(query = "(max-width: 820px)") {
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = (e) => setNarrow(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return narrow;
+}
+
+// Stories vanish from Instagram's API a day after they go up, and the nightly
+// sync alone misses most of them. So whenever someone has the app open, ask
+// for a story-only sync — at most every two hours from any one device.
+export function syncStoriesSoon() {
+  try {
+    const last = Number(localStorage.getItem("ig-story-sync") || 0);
+    if (Date.now() - last < 2 * 3600000) return;
+    localStorage.setItem("ig-story-sync", String(Date.now()));
+  } catch {
+    return;
+  }
+  fetch("/api/instagram-sync?stories=1").catch(() => {});
+}
+
+const times2 = (v) => (v == null ? "—" : `${v.toFixed(2)}×`);
+
+const SORTS = [
+  { id: "new", label: "Newest", value: (m) => Date.parse(m.posted_at || 0) },
+  { id: "rel", label: "Reach vs typical", value: (m) => m._rel ?? -1 },
+  { id: "reach", label: "Most reached", value: (m) => m.reach ?? -1 },
+  { id: "saves", label: "Saves per 100 reached", value: (m) => per(m.saved, m.reach, 100) ?? -1 },
+  { id: "shares", label: "Shares per 100 reached", value: (m) => per(m.shares, m.reach, 100) ?? -1 },
+  { id: "watch", label: "Watch time", value: (m) => m.avg_watch_time_ms ?? -1 },
+];
+
+function PostsView({ posts, media, narrow, onSelect }) {
+  const [sort, setSort] = useState("new");
+  const rows = useMemo(() => {
+    const withRel = posts.map((m) => ({ ...m, _rel: relativeReach(m, media) }));
+    const by = SORTS.find((x) => x.id === sort) || SORTS[0];
+    return withRel.sort((a, b) => by.value(b) - by.value(a));
+  }, [posts, media, sort]);
+  const relColor = (r) => (r == null ? MUTED : r >= 1.4 ? "var(--good)" : r <= 0.7 ? "var(--alert)" : INK);
+  // Opening a post keeps its place in this ordering, so "next" means next here.
+  const open = (m) => onSelect(posts.find((p) => p.id === m.id) || m);
+
+  return (
+    <section className="ig-card">
+      <div className="ig-card-head">
+        <h3>Every post</h3>
+        <label className="ig-sort">
+          Sort
+          <select value={sort} onChange={(e) => setSort(e.target.value)}>
+            {SORTS.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+          </select>
+        </label>
+      </div>
+      <p className="ig-dim ig-review-sub">
+        "vs typical" is reach next to the posts of the same kind from around the same time — 2.0× means twice the usual.
+        Open a post to see everything about it.
+      </p>
+      {narrow ? (
+        <div className="ig-post-cards">
+          {rows.map((m) => (
+            <button key={m.id} className="ig-post-card" onClick={() => open(m)}>
+              {m.thumbnail_url || m.media_url ? <img src={m.thumbnail_url || m.media_url} alt="" loading="lazy" /> : <span className="ig-thumb-blank" />}
+              <span className="ig-post-card-body">
+                <span className="ig-post-card-caption">{(m.caption || "(no caption)").replace(/\s+/g, " ")}</span>
+                <span className="ig-dim">{FORMAT_LABEL[formatOf(m)]?.replace(/s$/, "")} · {m.posted_at ? shortDate(m.posted_at) : "—"} {m.posted_at ? new Date(m.posted_at).getFullYear() : ""}</span>
+                <span className="ig-post-card-stats">
+                  <span><Users size={11} /> {compact(m.reach)}</span>
+                  <span><Eye size={11} /> {compact(m.views)}</span>
+                  <span style={{ color: relColor(m._rel) }}>{times2(m._rel)}</span>
+                  {m.avg_watch_time_ms ? <span><Play size={11} /> {watchTime(m.avg_watch_time_ms)}</span> : null}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="ig-table-scroll">
+          <table className="ig-table">
+            <thead>
+              <tr>
+                <th>Post</th><th>Type</th><th>Date</th>
+                <th className="num">Views</th><th className="num">Reach</th><th className="num">vs typical</th>
+                <th className="num">Likes</th><th className="num">Comments</th>
+                <th className="num">Saves</th><th className="num">Shares</th>
+                <th className="num">Eng. rate</th><th className="num">Avg watch</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => (
+                <tr key={m.id} className="ig-row-click" onClick={() => open(m)}>
+                  <td className="ig-post-cell">
+                    {m.thumbnail_url || m.media_url ? (
+                      <img src={m.thumbnail_url || m.media_url} alt="" loading="lazy" />
+                    ) : <span className="ig-thumb-blank" />}
+                    <span className="ig-post-caption">
+                      {(m.caption || "(no caption)").replace(/\s+/g, " ").slice(0, 60)}
+                    </span>
+                  </td>
+                  <td>{FORMAT_LABEL[formatOf(m)]?.replace(/s$/, "")}</td>
+                  <td>{m.posted_at ? shortDate(m.posted_at) : "—"}</td>
+                  <td className="num">{full(m.views)}</td>
+                  <td className="num">{full(m.reach)}</td>
+                  <td className="num" style={{ color: relColor(m._rel) }}>{times2(m._rel)}</td>
+                  <td className="num">{full(m.likes)}</td>
+                  <td className="num">{full(m.comments)}</td>
+                  <td className="num">{full(m.saved)}</td>
+                  <td className="num">{full(m.shares)}</td>
+                  <td className="num">{pct(engagementRate(m))}</td>
+                  <td className="num">{watchTime(m.avg_watch_time_ms)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!posts.length ? <div className="ig-empty-chart">No posts in this range.</div> : null}
+    </section>
+  );
+}
+
+// Cell colour: how far above or below typical reach the slot runs. One hue,
+// stronger for better; below-typical slots fade toward the surface rather than
+// switching hue, so the map reads at a glance without a legend for two colours.
+function cellStyle(cell) {
+  if (cell.n < 3 || cell.value == null) return { background: "transparent", color: MUTED };
+  const t = Math.max(0, Math.min(1, (cell.value - 0.5) / 1.5)); // 0.5x .. 2x
+  return { background: `rgba(176,139,51,${(0.08 + t * 0.72).toFixed(2)})`, color: t > 0.55 ? "#171812" : INK };
+}
+
+function TimingView({ times, formats, onSelect }) {
+  const [picked, setPicked] = useState(null); // { di, bi }
+  const cell = picked ? times.grid[picked.di][picked.bi] : null;
+  const formatRows = formats.map((f) => ({ id: f.format, label: `${f.label} (${f.n})`, value: f.relReach }));
+
+  return (
+    <>
+      <section className="ig-card">
+        <h3>Best time to post</h3>
+        <p className="ig-dim ig-review-sub">
+          Each square is how posts that went out then did on reach, next to the posts from around the same time —
+          1.30× means 30% more than usual. Based on {times.posts} posts{times.since ? ` since ${new Date(times.since).getFullYear()}` : ""}, in this device's time zone.
+          Squares with fewer than 3 posts are left blank. Tap one to see its posts.
+        </p>
+        <div className="ig-heat-scroll">
+          <table className="ig-heat">
+            <thead>
+              <tr><th />{TIME_BLOCKS.map((b) => <th key={b.label}>{b.label}</th>)}</tr>
+            </thead>
+            <tbody>
+              {times.grid.map((row, di) => (
+                <tr key={DAY_NAMES[di]}>
+                  <th>{DAY_NAMES[di]}</th>
+                  {row.map((c, bi) => (
+                    <td key={bi}>
+                      <button
+                        className={`ig-heat-cell${picked && picked.di === di && picked.bi === bi ? " on" : ""}`}
+                        style={cellStyle(c)}
+                        onClick={() => setPicked(c.n ? { di, bi } : null)}
+                        title={`${c.n} posts`}
+                      >
+                        {c.n >= 3 && c.value != null ? times2(c.value) : c.n ? <span className="ig-heat-n">{c.n}</span> : ""}
+                      </button>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {times.best.length ? (
+          <p style={{ margin: "12px 0 0", fontSize: 13 }}>
+            Strongest: {times.best.map((b) => `${DAY_NAMES[b.di]} ${TIME_BLOCKS[b.bi].label} (${times2(b.value)}, ${b.n} posts)`).join(" · ")}.
+            {times.worst.length ? <span className="ig-dim"> Weakest: {times.worst.map((b) => `${DAY_NAMES[b.di]} ${TIME_BLOCKS[b.bi].label} (${times2(b.value)})`).join(" · ")}.</span> : null}
+          </p>
+        ) : <p className="ig-dim">Not enough posts with numbers yet to compare times.</p>}
+        {cell ? (
+          <div className="ig-best-row" style={{ marginTop: 12 }}>
+            {cell.posts.sort((a, b) => b.posted_at.localeCompare(a.posted_at)).slice(0, 12).map((m) => (
+              <button key={m.id} className="ig-best" onClick={() => onSelect(m)}>
+                {m.thumbnail_url || m.media_url ? <img src={m.thumbnail_url || m.media_url} alt="" loading="lazy" /> : <span className="ig-thumb-blank" />}
+                <span className="ig-best-num">{compact(m.reach)} reached</span>
+                <span className="ig-dim">{shortDate(m.posted_at)} {new Date(m.posted_at).getFullYear()}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="ig-card">
+        <h3>Reels, carousels or photos?</h3>
+        <p className="ig-dim ig-review-sub">
+          The last 40 posts of each format, compared on the same footing: reach next to the posts from around the
+          same time. A format can only win here on how it does, not on when it happened to be used.
+        </p>
+        <BarChart rows={formatRows} valueFormat={times2} color={SERIES[1]} />
+        <div className="ig-table-scroll" style={{ marginTop: 12 }}>
+          <table className="ig-table">
+            <thead>
+              <tr><th>Format</th><th className="num">Posts</th><th className="num">Reach vs typical</th><th className="num">Reach</th><th className="num">Views</th><th className="num">Saves /100</th><th className="num">Shares /100</th><th className="num">Eng. rate</th></tr>
+            </thead>
+            <tbody>
+              {formats.map((f) => (
+                <tr key={f.format}>
+                  <td>{f.label}</td>
+                  <td className="num">{f.n}{f.since ? <span className="ig-dim"> since {new Date(f.since).getFullYear()}</span> : null}</td>
+                  <td className="num">{times2(f.relReach)}</td>
+                  <td className="num">{full(f.reach)}</td>
+                  <td className="num">{full(f.views)}</td>
+                  <td className="num">{f.saves == null ? "—" : f.saves.toFixed(2)}</td>
+                  <td className="num">{f.shares == null ? "—" : f.shares.toFixed(2)}</td>
+                  <td className="num">{pct(f.engagement)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
 }
 
 /* ------------------------------ the main view ----------------------------- */
@@ -698,45 +1114,60 @@ export default function Analytics({ profile }) {
     setSyncing(false);
   };
 
+  /* Today's row only has the follower total until the next morning's sync
+     fills in its views and reach, so it would end every chart on a fake drop.
+     The window is the last `days` complete days; the one before it, of equal
+     length, is what "vs previous period" compares against. */
+  const { current, previous } = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const complete = account.filter((r) => r.day < today);
+    const start = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    return { current: complete.filter((r) => r.day >= start), previous: complete.filter((r) => r.day < start) };
+  }, [account, days]);
+
   /* Account series. Views and reach share one axis because they are the same
      unit (counts) -- a second y-scale would invent a correlation. Followers
      are a different unit entirely, so they get their own chart. */
   const accountSeries = useMemo(() => ([
-    { label: "Views", color: SERIES[0], points: account.map((r) => ({ day: r.day, value: r.views })) },
-    { label: "Reach", color: SERIES[1], points: account.map((r) => ({ day: r.day, value: r.reach })) },
-  ].filter((s) => s.points.some((p) => p.value != null))), [account]);
+    { label: "Views", color: SERIES[0], points: current.map((r) => ({ day: r.day, value: r.views })) },
+    { label: "Reach", color: SERIES[1], points: current.map((r) => ({ day: r.day, value: r.reach })) },
+  ].filter((s) => s.points.some((p) => p.value != null))), [current]);
 
   // The total is only recorded from the day of connecting, so for the first
   // weeks the useful chart is how many people followed each day.
   const followerSeries = useMemo(() => ([
-    { label: "New followers", color: SERIES[0], points: account.map((r) => ({ day: r.day, value: r.new_followers })) },
-  ].filter((s) => s.points.some((p) => p.value != null))), [account]);
+    { label: "New followers", color: SERIES[0], points: current.map((r) => ({ day: r.day, value: r.new_followers })) },
+  ].filter((s) => s.points.some((p) => p.value != null))), [current]);
 
-  // Headline numbers, each compared against the preceding window of equal length.
+  // Headline numbers. A change is only shown when both periods are mostly
+  // there: a 30-day window set against 4 recorded days is not a comparison.
   const totals = useMemo(() => {
-    const sum = (rows, k) => rows.reduce((a, r) => a + (r[k] || 0), 0);
-    const half = Math.floor(account.length / 2);
-    const prev = account.slice(0, half);
-    const curr = account.slice(half);
+    const sum = (rows, k) => rows.reduce((acc, r) => acc + (r[k] || 0), 0);
+    const covered = (rows, k) => rows.filter((r) => r[k] != null).length;
     const delta = (k) => {
-      const p = sum(prev, k);
-      const c = sum(curr, k);
-      if (!p || !prev.length || !curr.length) return null;
-      return ((c - p) / p) * 100;
+      if (covered(current, k) < days * 0.8 || covered(previous, k) < days * 0.8) return null;
+      const before = sum(previous, k);
+      return before ? ((sum(current, k) - before) / before) * 100 : null;
     };
-    const followers = [...account].reverse().find((r) => r.followers != null)?.followers ?? null;
-    const gained = account.some((r) => r.new_followers != null) ? sum(account, "new_followers") : null;
+    const withTotal = account.filter((r) => r.followers != null);
+    const followers = withTotal.length ? withTotal[withTotal.length - 1].followers : null;
+    // Net change from the recorded totals, where the window has them; Meta's
+    // daily figure only counts new follows, never unfollows.
+    const inWindow = withTotal.filter((r) => r.day >= (current[0]?.day || ""));
+    const net = inWindow.length >= 2 ? inWindow[inWindow.length - 1].followers - inWindow[0].followers : null;
     return {
       followers,
-      gained,
-      views: sum(account, "views"),
+      net,
+      netSince: inWindow[0]?.day || null,
+      gained: covered(current, "new_followers") ? sum(current, "new_followers") : null,
+      views: sum(current, "views"),
       viewsDelta: delta("views"),
-      reach: sum(account, "reach"),
+      reach: sum(current, "reach"),
       reachDelta: delta("reach"),
-      profileViews: sum(account, "profile_views"),
+      profileViews: sum(current, "profile_views"),
       profileViewsDelta: delta("profile_views"),
     };
-  }, [account]);
+  }, [account, current, previous, days]);
 
   const inRange = useMemo(() => {
     const cutoff = Date.now() - days * 86400000;
@@ -768,11 +1199,19 @@ export default function Analytics({ profile }) {
       .map((d) => ({ id: `${d.breakdown}-${d.label}`, label: d.label, value: d.value }))
   ), [demo, demoBreak]);
 
-  const engagement = (m) => {
-    if (!m.reach) return null;
-    const interactions = m.total_interactions ?? ((m.likes || 0) + (m.comments || 0) + (m.saved || 0) + (m.shares || 0));
-    return (interactions / m.reach) * 100;
-  };
+  const times = useMemo(() => postingTimes(media), [media]);
+  const formats = useMemo(() => formatComparison(media), [media]);
+  const narrow = useNarrow();
+
+  // Content Review's "Open in Analytics" leaves the post it was about here.
+  useEffect(() => {
+    if (!media.length) return;
+    let wanted = null;
+    try { wanted = sessionStorage.getItem("ig-open-post"); sessionStorage.removeItem("ig-open-post"); } catch { /* private mode */ }
+    const post = wanted && media.find((m) => m.id === wanted);
+    if (post) setSelected(post);
+  }, [media]);
+  useEffect(() => { syncStoriesSoon(); }, []);
 
   /* ------------------------------ empty states ---------------------------- */
   if (status && !status.configured) {
@@ -893,17 +1332,23 @@ export default function Analytics({ profile }) {
         </div>
         <div className="ig-seg ig-seg-right">
           <button className={tab === "charts" ? "on" : ""} onClick={() => setTab("charts")}>
-            <BarChart3 size={13} /> Charts
+            <BarChart3 size={13} /> Overview
           </button>
           <button className={tab === "table" ? "on" : ""} onClick={() => setTab("table")}>
-            <Table2 size={13} /> Table
+            <Table2 size={13} /> Posts
+          </button>
+          <button className={tab === "timing" ? "on" : ""} onClick={() => setTab("timing")}>
+            <Clock size={13} /> When & what
+          </button>
+          <button className={tab === "video" ? "on" : ""} onClick={() => setTab("video")}>
+            <Film size={13} /> Video check
           </button>
         </div>
       </div>
 
-      {loading ? <div className="ig-empty-chart">Loading…</div> : null}
+      {loading && tab !== "video" ? <div className="ig-empty-chart">Loading…</div> : null}
 
-      {!loading && !account.length && !media.length ? (
+      {!loading && !account.length && !media.length && !error && tab !== "video" ? (
         <div className="ig-connect">
           <Instagram size={26} strokeWidth={1.5} />
           <h3 className="display">No data collected yet</h3>
@@ -914,17 +1359,25 @@ export default function Analytics({ profile }) {
         </div>
       ) : null}
 
-      {!loading && (account.length > 0 || media.length > 0) ? (
+      {tab === "video" ? <VideoCheck media={media} /> : null}
+
+      {!loading && (account.length > 0 || media.length > 0) && tab !== "video" ? (
         <>
           {/* The one hero figure for this view. */}
           {totals.followers != null ? (
             <div className="ig-hero">
               <div className="ig-hero-label">Followers</div>
               <div className="ig-hero-value">{full(totals.followers)}</div>
+              {totals.net != null ? (
+                <div className="ig-hero-delta" style={{ color: totals.net > 0 ? "var(--good)" : totals.net < 0 ? "var(--alert)" : MUTED }}>
+                  {totals.net > 0 ? <ArrowUpRight size={15} /> : totals.net < 0 ? <ArrowDownRight size={15} /> : null}
+                  {totals.net === 0 ? "No change" : `${totals.net > 0 ? "+" : "−"}${full(Math.abs(totals.net))}`} since {shortDate(totals.netSince)}
+                  <span className="ig-dim" style={{ marginLeft: 6 }}>(totals are recorded from the day of connecting)</span>
+                </div>
+              ) : null}
               {totals.gained != null ? (
-                <div className="ig-hero-delta" style={{ color: "var(--good)" }}>
-                  <ArrowUpRight size={15} />
-                  {full(totals.gained)} new followers in {days} days
+                <div className="ig-dim" style={{ marginTop: 4 }}>
+                  {full(totals.gained)} new follows in the last {days} days — unfollows aren't counted in this one
                 </div>
               ) : null}
             </div>
@@ -932,14 +1385,14 @@ export default function Analytics({ profile }) {
 
           <div className="ig-tiles">
             <StatTile label="Views" value={compact(totals.views)} delta={totals.viewsDelta}
-              deltaLabel="vs previous period" icon={Eye}
-              spark={account.map((r) => r.views).filter((v) => v != null)} />
-            <StatTile label="Reach" value={compact(totals.reach)} delta={totals.reachDelta}
-              deltaLabel="vs previous period" icon={Users}
-              spark={account.map((r) => r.reach).filter((v) => v != null)} />
+              deltaLabel={totals.viewsDelta == null ? "not enough history to compare yet" : `vs the ${days} days before`} icon={Eye}
+              spark={current.map((r) => r.views).filter((v) => v != null)} />
+            <StatTile label="Daily reach, added up" value={compact(totals.reach)} delta={totals.reachDelta}
+              deltaLabel={totals.reachDelta == null ? "not enough history to compare yet" : `vs the ${days} days before`} icon={Users}
+              spark={current.map((r) => r.reach).filter((v) => v != null)} />
             <StatTile label="Profile views" value={compact(totals.profileViews)} delta={totals.profileViewsDelta}
-              deltaLabel="vs previous period" icon={ExternalLink}
-              spark={account.map((r) => r.profile_views).filter((v) => v != null)} />
+              deltaLabel={totals.profileViewsDelta == null ? "not enough history to compare yet" : `vs the ${days} days before`} icon={ExternalLink}
+              spark={current.map((r) => r.profile_views).filter((v) => v != null)} />
             <StatTile label="Posts in range" value={full(inRange.length)} deltaLabel={`last ${days} days`} icon={Play} />
           </div>
 
@@ -981,54 +1434,21 @@ export default function Analytics({ profile }) {
                 </section>
               ) : null}
             </>
+          ) : tab === "table" ? (
+            <PostsView posts={inRange} media={media} narrow={narrow} onSelect={setSelected} />
           ) : (
-            <section className="ig-card">
-              <h3>Every post</h3>
-              <p className="ig-dim ig-review-sub">Click a post to see how it did against your typical post, and what worked.</p>
-              <div className="ig-table-scroll">
-                <table className="ig-table">
-                  <thead>
-                    <tr>
-                      <th>Post</th><th>Type</th><th>Date</th>
-                      <th className="num">Views</th><th className="num">Reach</th>
-                      <th className="num">Likes</th><th className="num">Comments</th>
-                      <th className="num">Saves</th><th className="num">Shares</th>
-                      <th className="num">Eng. rate</th><th className="num">Avg watch</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {inRange.map((m) => (
-                      <tr key={m.id} className="ig-row-click" onClick={() => setSelected(m)}>
-                        <td className="ig-post-cell">
-                          {m.thumbnail_url || m.media_url ? (
-                            <img src={m.thumbnail_url || m.media_url} alt="" loading="lazy" />
-                          ) : <span className="ig-thumb-blank" />}
-                          <span className="ig-post-caption">
-                            {(m.caption || "(no caption)").replace(/\s+/g, " ").slice(0, 60)}
-                          </span>
-                        </td>
-                        <td>{m.media_product_type || m.media_type}</td>
-                        <td>{m.posted_at ? shortDate(m.posted_at) : "—"}</td>
-                        <td className="num">{full(m.views)}</td>
-                        <td className="num">{full(m.reach)}</td>
-                        <td className="num">{full(m.likes)}</td>
-                        <td className="num">{full(m.comments)}</td>
-                        <td className="num">{full(m.saved)}</td>
-                        <td className="num">{full(m.shares)}</td>
-                        <td className="num">{pct(engagement(m))}</td>
-                        <td className="num">{watchTime(m.avg_watch_time_ms)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {!inRange.length ? <div className="ig-empty-chart">No posts in this range.</div> : null}
-            </section>
+            <TimingView times={times} formats={formats} onSelect={setSelected} />
           )}
         </>
       ) : null}
 
-      {selected ? <PostReview post={selected} media={media} onClose={closeReview} /> : null}
+      {selected ? (
+        <PostReview
+          post={selected} media={media} times={times}
+          list={inRange.some((m) => m.id === selected.id) ? inRange : media}
+          onSelect={setSelected} onClose={closeReview}
+        />
+      ) : null}
     </div>
   );
 }

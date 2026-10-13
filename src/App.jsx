@@ -3,7 +3,8 @@ import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { mergeState, deepEqual } from "./syncState";
 import { useLiveBoard } from "./livePresence";
-import Analytics, { AnalyticsIcon } from "./Analytics";
+import Analytics, { AnalyticsIcon, syncStoriesSoon } from "./Analytics";
+import IgPostLink from "./IgPostLink";
 import PhotoEditor from "./PhotoEditor";
 import {
   EDIT_DEFAULTS, ALL_PRESETS, fullEdit, hasEdit, trimEdit, migrateLook, editSummary,
@@ -637,6 +638,7 @@ const NOTIFY_CATEGORIES = [
   { id: "comment", label: "Comments on my uploads" },
   { id: "approved", label: "My content is approved" },
   { id: "upload", label: "New uploads and versions to review", leadsOnly: true },
+  { id: "weekly", label: "Weekly Instagram summary (Mondays)" },
 ];
 
 // Rows saved before categories existed only carry a type and a page, which is
@@ -2941,7 +2943,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
       </div>
 
       {tab === "approved" && <ApprovedQueue data={data} saveData={saveData} isEmployer={isEmployer} canSee={canSee} />}
-      {tab === "published" && <PublishedList data={data} canSee={canSee} />}
+      {tab === "published" && <PublishedList data={data} saveData={saveData} canSee={canSee} />}
 
       {tab === "review" && <div className="content-list">
         {visibleContent.map((c) => {
@@ -6882,12 +6884,19 @@ function ApprovedQueue({ data, saveData, isEmployer, canSee }) {
 
 // Posted pieces. Their files leave Drive when they're marked posted, so what
 // stays is the record: what it was, who made it, the caption and the feedback.
-function PublishedList({ data, canSee }) {
+function PublishedList({ data, saveData, canSee }) {
   const [open, setOpen] = useState(null);
   const published = data.content.filter((c) => c.status === "published" && canSee(c)).reverse();
+  const linkedIds = new Set(data.content.map((c) => c.igMediaId).filter(Boolean));
+  const linkPost = (id, igMediaId) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, igMediaId } : c)) });
+  // Analytics lives on another page; leave it the post to open and go there.
+  const openInAnalytics = (igMediaId) => {
+    try { sessionStorage.setItem("ig-open-post", igMediaId); } catch { /* private mode */ }
+    window.dispatchEvent(new CustomEvent("open-view", { detail: "analytics" }));
+  };
   return (
     <div>
-      <div className="page-sub" style={{ marginBottom: 12 }}>Everything that has gone out. The files were cleared from Drive when each was marked posted.</div>
+      <div className="page-sub" style={{ marginBottom: 12 }}>Everything that has gone out, and how it did on Instagram. The files were cleared from Drive when each was marked posted.</div>
       <div className="content-list">
         {published.map((c) => {
           const fmt = CONTENT_FORMATS.find((f) => f.id === c.format) || CONTENT_FORMATS[0];
@@ -6909,6 +6918,9 @@ function PublishedList({ data, canSee }) {
                   </div>
                 </div>
                 <ChevronRight size={14} color="var(--muted)" style={{ transform: isOpen ? "rotate(90deg)" : "none" }} />
+              </div>
+              <div style={{ padding: "0 14px 12px" }}>
+                <IgPostLink item={c} linkedIds={linkedIds} onLink={(igId) => linkPost(c.id, igId)} onOpen={openInAnalytics} />
               </div>
               {isOpen && (
                 <div className="content-body">
@@ -7838,7 +7850,7 @@ function NotificationBell({ data, saveData, profile, setView, isLead }) {
     setOpen((o) => !o);
   };
 
-  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video, approved: CheckCircle2, reminder: CalendarDays };
+  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video, approved: CheckCircle2, reminder: CalendarDays, weekly: AnalyticsIcon };
 
   return (
     <div>
@@ -8266,6 +8278,7 @@ export default function TeamHub() {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
       // …and when the app is already open, the service worker says which page.
+      // (Pages inside the app ask the same way, through a window event.)
       navigator.serviceWorker.addEventListener("message", (event) => {
         if (event.data && event.data.type === "open-view") setView(event.data.view);
       });
@@ -8406,6 +8419,15 @@ export default function TeamHub() {
     const id = setInterval(check, 60000);
     return () => clearInterval(id);
   }, [data, loggedIn]);
+
+  // A page asking to show another one — Content Review opening a post in Analytics.
+  useEffect(() => {
+    const onOpen = (e) => setView(e.detail);
+    window.addEventListener("open-view", onOpen);
+    return () => window.removeEventListener("open-view", onOpen);
+  }, []);
+  // Stories only stay readable for a day, so catch them while anyone is here.
+  useEffect(() => { if (loggedIn) syncStoriesSoon(); }, [loggedIn]);
 
   const handleLogin = (p) => {
     setLoggedIn(p);
