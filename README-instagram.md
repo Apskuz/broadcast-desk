@@ -170,16 +170,5 @@ an existing function or to `lib/`, never as a new file in `api/`.
 Review is checked in the browser while the uploader fills in the form, and the
 findings are saved on the piece. Older pieces can be checked from Drive with one
 tap. "Transcribe the speech" runs Whisper in the browser (about 80 MB, downloaded
-once per device). The transcript is saved on the piece and goes to the AI
-review. Once a published piece is linked to its Instagram post, the check's
+once per device). The transcript is saved on the piece. Once a published piece is linked to its Instagram post, the check's
 video length turns Instagram's average watch time into a completion rate.
-
-## 6. AI review (optional)
-
-The "AI read" on a post and the AI review in Video check send the post's cover
-image, or eight still frames of a video, together with the numbers and any
-transcript, to Claude.
-Add `ANTHROPIC_API_KEY` (from console.anthropic.com) to Vercel → Settings →
-Environment Variables and redeploy. Without it, everything else still works and
-those buttons say the key is missing. A review costs a few cents. The video
-itself never leaves the device: the measuring happens in the browser.

@@ -1,17 +1,14 @@
 // Video check: drop in a video before posting it and get told what's working
 // and what isn't.
 //
-// Two layers. The first runs entirely on this device — the video is never
+// It all runs on this device and costs nothing — the video is never
 // uploaded: it is played through a canvas and its sound decoded, and from
 // that come the measurable things (length, shape, cuts, pace, the first
-// seconds, light, sharpness, sound levels, whether it loops). Those are set
-// against this account's own reels where that means something (how long
-// people actually watch). The second layer is optional: eight still frames and
-// the measurements go to Claude (api/video-review.js) for the things a
-// measurement can't judge — is the opening interesting, is the on-screen text
-// readable, does the caption pull its weight.
+// seconds, light, sharpness, sound levels, whether it loops, and what's said).
+// Those are set against this account's own reels where that means something
+// (how long people actually watch).
 import React, { useState, useRef, useMemo, useEffect } from "react";
-import { Upload, AlertTriangle, Check, Sparkles, ArrowUpRight, ArrowDownRight, Info, Film } from "lucide-react";
+import { Upload, AlertTriangle, Check, Info, Film } from "lucide-react";
 import { kindOf, median, settled } from "./igInsights";
 import { transcribe } from "./speech";
 
@@ -240,22 +237,16 @@ export async function analyzeVideo(input, onProgress = () => {}) {
       return c.toDataURL("image/jpeg", quality);
     };
 
-    // What to look at: a sample every `step` seconds for the measurements, a
-    // strip of ten stills to show, and eight sharper stills for the AI review,
-    // weighted toward the opening because that's where a reel is won or lost.
+    // What to look at: a sample every `step` seconds for the measurements,
+    // and a strip of ten stills to show.
     const step = Math.max(0.2, duration / 220);
     const wants = [];
     for (let t = 0; t < duration; t += step) wants.push({ t, kind: "sample" });
     for (let k = 0; k < 10; k++) wants.push({ t: Math.min(duration - 0.1, (duration * k) / 9), kind: "strip" });
-    const keyTimes = [0, 0.7, 1.6, 3].filter((t) => t < duration);
-    while (keyTimes.length < 7) keyTimes.push(3 + ((duration - 3) * (keyTimes.length - 3)) / 4);
-    keyTimes.push(Math.max(0, duration - 0.3));
-    for (const t of [...new Set(keyTimes.map((x) => Math.round(x * 10) / 10))].filter((x) => x >= 0 && x < duration).slice(0, 8)) wants.push({ t, kind: "key" });
     wants.sort((a, b) => a.t - b.t);
 
     const samples = [];
     const strip = [];
-    const keyframes = [];
     let prev = null;
     await walkFrames(video, duration, wants, (w) => {
       if (w.kind === "sample") {
@@ -263,8 +254,7 @@ export async function analyzeVideo(input, onProgress = () => {}) {
         const st = frameStats(sctx, sw, sh);
         samples.push({ t: w.t, mean: st.mean, contrast: st.contrast, colour: st.colour, sharp: st.sharp, diff: prev ? lumaDiff(st.luma, prev) : 0, luma: st.luma });
         prev = st.luma;
-      } else if (w.kind === "strip") strip.push({ t: w.t, src: still(200, 0.6) });
-      else keyframes.push({ t: w.t, src: still(640, 0.72) });
+      } else strip.push({ t: w.t, src: still(200, 0.6) });
     }, (f) => onProgress(0.03 + 0.8 * Math.min(1, f)));
 
     onProgress(0.86);
@@ -272,7 +262,7 @@ export async function analyzeVideo(input, onProgress = () => {}) {
     if (source.size == null || source.size <= MAX_AUDIO_BYTES) bytes = await source.bytes().catch(() => null);
     const audio = await measureAudio(bytes);
     onProgress(1);
-    const result = summarize({ source, duration, width, height, samples, strip, keyframes, audio, step });
+    const result = summarize({ source, duration, width, height, samples, strip, audio, step });
     // Kept for transcribing without reading the file a second time.
     Object.defineProperty(result, "bytes", { value: bytes, enumerable: false });
     return result;
@@ -283,7 +273,7 @@ export async function analyzeVideo(input, onProgress = () => {}) {
   }
 }
 
-function summarize({ source, duration, width, height, samples, strip, keyframes, audio, step }) {
+function summarize({ source, duration, width, height, samples, strip, audio, step }) {
   const diffs = samples.slice(1).map((s) => s.diff);
   const base = median(diffs) || 0;
   const mad = median(diffs.map((d) => Math.abs(d - base))) || 1;
@@ -330,7 +320,6 @@ function summarize({ source, duration, width, height, samples, strip, keyframes,
     loops: samples.length > 2 ? lumaDiff(samples[0].luma, samples[samples.length - 1].luma) < 10 : false,
     timeline: samples.map((s) => ({ t: s.t, diff: s.diff })),
     strip,
-    keyframes,
     audio,
   };
 }
@@ -575,7 +564,6 @@ export default function VideoCheck({ media }) {
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
-  const [ai, setAi] = useState(null);
   const [speech, setSpeech] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [dragging, setDragging] = useState(false);
@@ -591,7 +579,6 @@ export default function VideoCheck({ media }) {
     setFile(f);
     setError("");
     setResult(null);
-    setAi(null);
     setSpeech(null);
     setProgress(0);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -608,49 +595,12 @@ export default function VideoCheck({ media }) {
   const counts = findings.reduce((acc, f) => ({ ...acc, [f.level]: (acc[f.level] || 0) + 1 }), {});
   const seekTo = (t) => { if (previewRef.current) { previewRef.current.currentTime = t; previewRef.current.play().catch(() => {}); } };
 
-  const askAi = async () => {
-    setAi("loading");
-    try {
-      const a = result;
-      const res = await fetch("/api/video-review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: "video",
-          format,
-          caption,
-          frames: a.keyframes.map((k) => ({ t: Number(k.t.toFixed(1)), data: k.src.split(",")[1] })),
-          stats: {
-            duration: Number(a.duration.toFixed(1)),
-            resolution: `${a.width}x${a.height}`,
-            cuts: a.cuts.length,
-            firstCut: a.firstCut == null ? null : Number(a.firstCut.toFixed(1)),
-            longestShot: Number(a.longestShot.toFixed(1)),
-            stillStretches: a.still.map(([f, t]) => `${fmtTime(f)}-${fmtTime(t)}`),
-            brightness: Math.round(a.brightness),
-            sound: a.audio.status === "ok" ? { loudnessDb: Math.round(a.audio.loudness), silenceAtStartSec: Number(a.audio.firstSound.toFixed(1)), dropouts: a.audio.gaps.length, clipping: a.audio.clipPct > 0.05 } : a.audio.status,
-            loops: a.loops,
-          },
-          checks: findings.map((f) => `${LEVEL[f.level].label}: ${f.title}`),
-          speech: speech?.status === "ok" ? { firstWordAtSec: Number(speech.firstWordAt.toFixed(1)), wordsPerMinute: speech.wordsPerMinute, transcript: speech.chunks.map((c) => `[${fmtTime(c.from)}] ${c.text}`).join("\n").slice(0, 3000) } : (speech?.status || "not transcribed"),
-          account: context ? { reelsCompared: context.reels, avgWatchSec: context.watch, bestReelsWatchSec: context.topWatch, typicalReach: context.reach, bestCaptions: context.topCaptions } : null,
-        }),
-      });
-      const out = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(out.error || `The AI review failed (${res.status}).`);
-      setAi(out);
-    } catch (err) {
-      setAi({ error: err.message });
-    }
-  };
-
   return (
     <div className="vc-root">
       <section className="ig-card">
         <h3>Check a video before you post it</h3>
         <p className="ig-dim ig-review-sub">
-          The video stays on this device — it's measured right here in the browser. Only if you ask for the AI review
-          do eight still frames and the measurements leave it.
+          The video stays on this device — it's measured right here in the browser, and it's free.
         </p>
         <div
           className={`vc-drop${dragging ? " on" : ""}`}
@@ -731,57 +681,11 @@ export default function VideoCheck({ media }) {
             <SpeechPanel speech={speech} onDone={setSpeech} onSeek={seekTo} getBytes={async () => result.bytes || (file ? file.arrayBuffer() : null)} />
           </section>
 
-          <section className="ig-card">
-            <div className="ig-card-head">
-              <h3>AI review</h3>
-              {ai !== "loading" ? <button className="btn btn-gold" onClick={askAi}><Sparkles size={14} /> {ai && !ai.error ? "Review again" : "Review it"}</button> : null}
-            </div>
-            {!ai ? <p className="ig-dim" style={{ margin: 0 }}>Looks at eight frames (most of them from the opening seconds) together with the measurements, the transcript if there is one, and your caption, and judges what a measurement can't: whether the opening is interesting, whether text is readable and clear of Instagram's buttons, and what to change first.</p> : null}
-            {ai === "loading" ? <div className="ig-empty-chart">Watching the frames… this takes up to a minute.</div> : null}
-            {ai?.error ? <div className="ig-note ig-note-bad"><AlertTriangle size={14} /> {ai.error}</div> : null}
-            {ai && ai !== "loading" && !ai.error ? <AiFeedback result={ai} /> : null}
-          </section>
         </>
       ) : !progress && !error ? (
         <div className="ig-connect">
           <Film size={26} strokeWidth={1.5} />
           <p>Pick a video to see how it measures up — the opening, the pace, the sound, the length against how long your audience actually watches.</p>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// The shape api/video-review.js returns, for a posted post or a video check.
-export function AiFeedback({ result }) {
-  return (
-    <div className="ig-ai">
-      {result.score != null ? <div className="ig-ai-score"><span>{result.score}</span>/10</div> : null}
-      {result.summary ? <p className="ig-ai-summary">{result.summary}</p> : null}
-      {result.hook ? (
-        <div className="ig-ai-block">
-          <h4>The first seconds</h4>
-          <p>{result.hook}</p>
-        </div>
-      ) : null}
-      <div className="ig-review-verdicts">
-        {result.strengths?.length ? (
-          <section className="ig-verdict ig-verdict-good">
-            <h4><ArrowUpRight size={15} /> Working</h4>
-            <ul>{result.strengths.map((s) => <li key={s}>{s}</li>)}</ul>
-          </section>
-        ) : null}
-        {result.improvements?.length ? (
-          <section className="ig-verdict ig-verdict-weak">
-            <h4><ArrowDownRight size={15} /> To change</h4>
-            <ul>{result.improvements.map((s) => <li key={s.issue}><strong>{s.at ? `${s.at} — ` : ""}{s.issue}</strong> {s.fix}</li>)}</ul>
-          </section>
-        ) : null}
-      </div>
-      {result.caption_ideas?.length ? (
-        <div className="ig-ai-block">
-          <h4>Caption ideas</h4>
-          <ul>{result.caption_ideas.map((c) => <li key={c}>{c}</li>)}</ul>
         </div>
       ) : null}
     </div>

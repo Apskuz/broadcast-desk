@@ -249,14 +249,6 @@
 .ig-best img, .ig-best .ig-thumb-blank { width: 100%; aspect-ratio: 4 / 5; object-fit: cover; border-radius: 6px; display: block; }
 .ig-best-num { font-size: 12px; font-weight: 600; }
 
-.ig-ai { position: relative; }
-.ig-ai-score { float: right; margin: 0 0 8px 12px; font-size: 13px; color: var(--muted); }
-.ig-ai-score span { font-size: 30px; font-weight: 700; color: var(--gold); font-family: "Fraunces", serif; }
-.ig-ai-summary { font-size: 14px; line-height: 1.55; margin: 0 0 12px; }
-.ig-ai-block { margin-bottom: 12px; }
-.ig-ai-block h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 4px; }
-.ig-ai-block p, .ig-ai-block li { font-size: 13px; line-height: 1.5; margin: 0; }
-.ig-ai-block ul { margin: 0; padding-left: 18px; }
 .ig-verdict li strong { font-weight: 600; }
 
 /* --------------------------------- posts list -------------------------------- */

@@ -13,13 +13,13 @@ import { supabase } from "./supabaseClient";
 import {
   Instagram, RefreshCw, ArrowUpRight, ArrowDownRight, ExternalLink,
   AlertTriangle, Check, Eye, Users, Play, Table2, BarChart3, X,
-  ChevronLeft, ChevronRight, Sparkles, Clock, LayoutGrid, Film,
+  ChevronLeft, ChevronRight, Clock, LayoutGrid, Film,
 } from "lucide-react";
 import {
   SETTLE_DAYS, MIN_PEERS, kindOf, KIND_NOUN, formatOf, FORMAT_LABEL, ageDays, per, median, percentile,
   engagementRate, peersFor, relativeReach, captionStats, postingTimes, slotFor, formatComparison, DAY_NAMES, TIME_BLOCKS,
 } from "./igInsights";
-import VideoCheck, { AiFeedback } from "./VideoCheck";
+import VideoCheck from "./VideoCheck";
 import Benchmarks from "./Benchmarks";
 import { completion } from "./IgPostLink";
 import "./analytics.css";
@@ -486,7 +486,6 @@ function PercentBar({ pct }) {
 
 function PostReview({ post, media, times, list, onSelect, onClose, content }) {
   const [history, setHistory] = useState(null);
-  const [ai, setAi] = useState(null); // null | "loading" | { error } | result
   const index = list.findIndex((m) => m.id === post.id);
   const prev = index > 0 ? list[index - 1] : null;
   const next = index >= 0 && index < list.length - 1 ? list[index + 1] : null;
@@ -503,7 +502,6 @@ function PostReview({ post, media, times, list, onSelect, onClose, content }) {
   useEffect(() => {
     let live = true;
     setHistory(null);
-    setAi(null);
     supabase.from("ig_media_snapshots").select("captured_at,views,reach,likes,saved,shares")
       .eq("media_id", post.id).order("captured_at", { ascending: true })
       .then(({ data }) => { if (live) setHistory(data || []); });
@@ -536,36 +534,6 @@ function PostReview({ post, media, times, list, onSelect, onClose, content }) {
     { label: "Views", color: SERIES[0], points: daily.map((d) => ({ day: d.day, value: d.views })) },
     { label: "Reach", color: SERIES[1], points: daily.map((d) => ({ day: d.day, value: d.reach })) },
   ].filter((s) => s.points.some((p) => p.value != null))), [daily]);
-
-  const askAi = async () => {
-    setAi("loading");
-    try {
-      const res = await fetch("/api/video-review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: "post",
-          imageUrl: post.thumbnail_url || post.media_url || null,
-          caption: post.caption || "",
-          kind: noun,
-          format: formatOf(post),
-          postedAt: post.posted_at,
-          slot: slot ? `${slot.day} ${slot.block}${slot.n >= 3 && slot.value ? `, a slot that usually gets ${slot.value.toFixed(2)}x typical reach` : ""}` : null,
-          measures: [
-            ...review.rows.map((r) => ({ label: r.label, value: r.format(r.value), typical: r.format(r.typical), betterThanPct: r.pct == null ? null : Math.round(r.pct) })),
-            ...(watched != null ? [{ label: "Share of the video watched on average", value: `${Math.round(watched * 100)}% of ${linkedPiece.videoCheck.duration.toFixed(1)} s`, typical: null, betterThanPct: null }] : []),
-          ],
-          rank: enough ? `#${review.rank} of ${review.rankOf} by reach` : null,
-          bestCaptions: review.best.map((m) => (m.caption || "").slice(0, 300)),
-        }),
-      });
-      const out = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(out.error || `The AI read failed (${res.status}).`);
-      setAi(out);
-    } catch (err) {
-      setAi({ error: err.message });
-    }
-  };
 
   return (
     <div className="ig-review-backdrop" onClick={onClose}>
@@ -775,18 +743,6 @@ function PostReview({ post, media, times, list, onSelect, onClose, content }) {
               </section>
             ) : null}
 
-            <section className="ig-card ig-review-card">
-              <div className="ig-card-head">
-                <h3>AI read</h3>
-                {ai !== "loading" ? (
-                  <button className="btn btn-ghost" onClick={askAi}><Sparkles size={14} /> {ai && !ai.error ? "Ask again" : "Get an AI read"}</button>
-                ) : null}
-              </div>
-              {!ai ? <p className="ig-dim" style={{ margin: 0 }}>Looks at the cover image, the caption and every number above, and says in plain words why it did how it did and what to try next time.</p> : null}
-              {ai === "loading" ? <div className="ig-empty-chart">Reading the post…</div> : null}
-              {ai?.error ? <div className="ig-note ig-note-bad"><AlertTriangle size={14} /> {ai.error}</div> : null}
-              {ai && ai !== "loading" && !ai.error ? <AiFeedback result={ai} /> : null}
-            </section>
           </>
         )}
       </div>
