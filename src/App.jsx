@@ -656,7 +656,7 @@ function wantsNotice(data, name, cat) {
 
 // Where a notification takes you. Pages have been merged since some of these
 // rows were written, so old links are pointed at where that page lives now.
-const VIEW_ALIASES = { notes: "ideas", guidelines: "dashboard", myduties: "duties" };
+const VIEW_ALIASES = { notes: "ideas", guidelines: "dashboard", myduties: "duties", approved: "content" };
 function resolveView(view) {
   return VIEW_ALIASES[view] || view;
 }
@@ -2543,6 +2543,7 @@ function publishContentItem(data, saveData, id) {
 }
 
 function ContentReview({ data, saveData, profile, isEmployer }) {
+  const [tab, setTab] = useState("review");
   const [showForm, setShowForm] = useState(false);
   const [open, setOpen] = useState(null);
   const [loadedVideo, setLoadedVideo] = useState(null); // content id whose embed the user tapped play on
@@ -2734,7 +2735,10 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
 
   // Uploads default to private — visible to whoever uploaded them and to leads,
   // until the uploader (or a lead) makes it public for the whole team to see.
-  const visibleContent = data.content.filter((c) => c.status !== "published" && (isEmployer || !c.uploadedBy || c.uploadedBy === profile || c.visibility === "public"));
+  const canSee = (c) => isEmployer || !c.uploadedBy || c.uploadedBy === profile || c.visibility === "public";
+  const visibleContent = data.content.filter((c) => (c.status === "review" || c.status === "draft" || !c.status) && canSee(c));
+  const approvedCount = data.content.filter((c) => c.status === "approved" && canSee(c)).length;
+  const publishedCount = data.content.filter((c) => c.status === "published" && canSee(c)).length;
 
   return (
     <div>
@@ -2743,7 +2747,18 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
         <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add content</button>
       </div>
 
-      <div className="content-list">
+      {/* Approved and posted pieces used to live on a page of their own that
+          only leads could find; they're a tab away from where they started. */}
+      <div className="filter-row" style={{ marginBottom: 14 }}>
+        <button className={`chip ${tab === "review" ? "active" : ""}`} onClick={() => setTab("review")}>In review{visibleContent.length ? ` · ${visibleContent.length}` : ""}</button>
+        <button className={`chip ${tab === "approved" ? "active" : ""}`} onClick={() => setTab("approved")}>Approved{approvedCount ? ` · ${approvedCount}` : ""}</button>
+        <button className={`chip ${tab === "published" ? "active" : ""}`} onClick={() => setTab("published")}>Published{publishedCount ? ` · ${publishedCount}` : ""}</button>
+      </div>
+
+      {tab === "approved" && <ApprovedQueue data={data} saveData={saveData} isEmployer={isEmployer} canSee={canSee} />}
+      {tab === "published" && <PublishedList data={data} canSee={canSee} />}
+
+      {tab === "review" && <div className="content-list">
         {visibleContent.map((c) => {
           const st = CONTENT_STATUS.find((s) => s.id === c.status) || CONTENT_STATUS[0];
           const fmt = CONTENT_FORMATS.find((f) => f.id === c.format) || CONTENT_FORMATS[0];
@@ -2922,8 +2937,8 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
             </div>
           );
         })}
-        {visibleContent.length === 0 && <div className="empty">Nothing submitted yet.</div>}
-      </div>
+        {visibleContent.length === 0 && <div className="empty">Nothing waiting for review.</div>}
+      </div>}
 
       <input ref={versionFileInputRef} type="file" accept="video/*,image/*" multiple onChange={handleVersionFileSelect} style={{ display: "none" }} />
 
@@ -6562,14 +6577,15 @@ function Chat({ data, saveData, profile }) {
   );
 }
 
-/* ---------------------------------- Approved queue (admin) ---------------------------------- */
+/* ---------------------------------- Approved queue (a tab of Content Review) ---------------------------------- */
 
-function ApprovedQueue({ data, saveData, profile }) {
+// Everyone sees what's been cleared to post; leads set the lineup and mark things posted.
+function ApprovedQueue({ data, saveData, isEmployer, canSee }) {
   const [open, setOpen] = useState(null);
   const [loadedVideo, setLoadedVideo] = useState(null);
 
   const order = data.approvedOrder || [];
-  const approved = data.content.filter((c) => c.status === "approved");
+  const approved = data.content.filter((c) => c.status === "approved" && canSee(c));
   // Anything not yet in the saved order goes to the end, newest last.
   const ordered = [
     ...order.map((id) => approved.find((c) => c.id === id)).filter(Boolean),
@@ -6585,7 +6601,11 @@ function ApprovedQueue({ data, saveData, profile }) {
     saveData({ ...data, approvedOrder: ids });
   };
 
-  const markPosted = (id) => publishContentItem(data, saveData, id);
+  const markPosted = (id) => {
+    if (!window.confirm("Mark this as posted? Its files are removed from Drive to free up space — the title, caption and comments stay under Published.")) return;
+    publishContentItem(data, saveData, id);
+  };
+  const backToReview = (id) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status: "review" } : c)) });
 
   // A quick look at when these pieces are already scheduled to go out, pulled
   // from the same calendar events "Add to Calendar" creates.
@@ -6596,9 +6616,7 @@ function ApprovedQueue({ data, saveData, profile }) {
 
   return (
     <div>
-      <div className="topbar">
-        <div><div className="page-title">Approved Content</div><div className="page-sub">Everything cleared and ready to post — reorder it into the lineup you want.</div></div>
-      </div>
+      <div className="page-sub" style={{ marginBottom: 12 }}>Everything cleared and ready to post{isEmployer ? " — reorder it into the lineup you want." : ", in the order it's going out."}</div>
 
       <div className="content-list" style={{ marginBottom: 28 }}>
         {ordered.map((c, i) => {
@@ -6611,10 +6629,10 @@ function ApprovedQueue({ data, saveData, profile }) {
           return (
             <div className="content-item" key={c.id}>
               <div className="content-head" onClick={() => setOpen(isOpen ? null : c.id)}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2 }} onClick={(e) => e.stopPropagation()}>
+                {isEmployer && <div style={{ display: "flex", flexDirection: "column", gap: 2 }} onClick={(e) => e.stopPropagation()}>
                   <button className="icon-btn" disabled={i === 0} onClick={() => move(c.id, -1)} style={{ opacity: i === 0 ? 0.3 : 1 }}><ChevronLeft size={13} style={{ transform: "rotate(90deg)" }} /></button>
                   <button className="icon-btn" disabled={i === ordered.length - 1} onClick={() => move(c.id, 1)} style={{ opacity: i === ordered.length - 1 ? 0.3 : 1 }}><ChevronLeft size={13} style={{ transform: "rotate(-90deg)" }} /></button>
-                </div>
+                </div>}
                 <div className="content-thumb" style={{ color: fmt.color }}><FmtIcon size={19} /></div>
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div className="content-title">#{i + 1} — {c.title}</div>
@@ -6625,7 +6643,12 @@ function ApprovedQueue({ data, saveData, profile }) {
                     {c.uploadedBy && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.uploadedBy}</span>}
                   </div>
                 </div>
-                <button className="btn btn-gold" style={{ padding: "9px 12px" }} onClick={(e) => { e.stopPropagation(); markPosted(c.id); }}><CheckCircle2 size={13} /> Mark posted</button>
+                {isEmployer && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
+                    <button className="btn" style={{ padding: "9px 12px" }} onClick={() => backToReview(c.id)}>Back to review</button>
+                    <button className="btn btn-gold" style={{ padding: "9px 12px" }} onClick={() => markPosted(c.id)}><CheckCircle2 size={13} /> Mark posted</button>
+                  </div>
+                )}
               </div>
 
               {isOpen && (
@@ -6654,7 +6677,7 @@ function ApprovedQueue({ data, saveData, profile }) {
             </div>
           );
         })}
-        {ordered.length === 0 && <div className="empty">Nothing approved yet — clear something in Content Review first.</div>}
+        {ordered.length === 0 && <div className="empty">Nothing approved yet — approve something under In review first.</div>}
       </div>
 
       {scheduled.length > 0 && (
@@ -6668,6 +6691,56 @@ function ApprovedQueue({ data, saveData, profile }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Posted pieces. Their files leave Drive when they're marked posted, so what
+// stays is the record: what it was, who made it, the caption and the feedback.
+function PublishedList({ data, canSee }) {
+  const [open, setOpen] = useState(null);
+  const published = data.content.filter((c) => c.status === "published" && canSee(c)).reverse();
+  return (
+    <div>
+      <div className="page-sub" style={{ marginBottom: 12 }}>Everything that has gone out. The files were cleared from Drive when each was marked posted.</div>
+      <div className="content-list">
+        {published.map((c) => {
+          const fmt = CONTENT_FORMATS.find((f) => f.id === c.format) || CONTENT_FORMATS[0];
+          const FmtIcon = fmt.icon;
+          const isOpen = open === c.id;
+          const comments = c.comments || [];
+          return (
+            <div className="content-item" key={c.id}>
+              <div className="content-head" onClick={() => setOpen(isOpen ? null : c.id)}>
+                <div className="content-thumb" style={{ color: "var(--good)" }}><FmtIcon size={19} /></div>
+                <div style={{ flex: 1, minWidth: 180 }}>
+                  <div className="content-title">{c.title}</div>
+                  <div className="content-tags">
+                    <span className="pill" style={{ background: "var(--good-soft)", color: "var(--good)" }}>Published</span>
+                    <span className="pill" style={{ background: fmt.color + "22", color: fmt.color }}>{fmt.label}</span>
+                    {c.platform && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.platform}</span>}
+                    {c.uploadedBy && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}>{c.uploadedBy}</span>}
+                    {comments.length > 0 && <span className="pill" style={{ background: "var(--panel-raised)", color: "var(--muted)" }}><MessageSquare size={10} style={{ verticalAlign: "-1px", marginRight: 3 }} />{comments.length}</span>}
+                  </div>
+                </div>
+                <ChevronRight size={14} color="var(--muted)" style={{ transform: isOpen ? "rotate(90deg)" : "none" }} />
+              </div>
+              {isOpen && (
+                <div className="content-body">
+                  {c.caption ? <div style={{ fontSize: 12.5, marginBottom: 12, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{c.caption}</div> : <div className="empty" style={{ padding: "4px 0 12px" }}>No caption saved.</div>}
+                  {comments.map((m) => (
+                    <div key={m.id} style={{ padding: "7px 0", borderTop: "1px solid var(--hair)", fontSize: 12.5 }}>
+                      <span style={{ fontWeight: 600 }}>{m.author}</span> <span style={{ color: "var(--muted)", fontSize: 10.5 }}>{fmtDate(m.date)}</span>
+                      <div style={{ marginTop: 2 }}>{m.text}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {published.length === 0 && <div className="empty">Nothing posted yet.</div>}
+      </div>
     </div>
   );
 }
@@ -7774,7 +7847,6 @@ const NAV = [
   { id: "meeting", label: "Meeting", icon: Radio },
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "content", label: "Content Review", icon: Video },
-  { id: "approved", label: "Approved", icon: CheckCircle2 },
   { id: "ideas", label: "Idea Bank", icon: Lightbulb },
   { id: "analytics", label: "Analytics", icon: AnalyticsIcon },
   { id: "team", label: "Team", icon: Shield },
@@ -8216,7 +8288,6 @@ export default function TeamHub() {
     meeting: <Meeting data={data} saveData={saveData} profile={profile} />,
     chat: <Chat data={data} saveData={saveData} profile={profile} />,
     content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
-    approved: <ApprovedQueue data={data} saveData={saveData} profile={profile} />,
     ideas: <IdeaBank data={data} saveData={saveData} profile={profile} />,
     analytics: <Analytics profile={profile} />,
     team: <TeamManage data={data} saveData={saveData} />,
@@ -8262,7 +8333,7 @@ export default function TeamHub() {
           <PushEnableButton profile={profile} />
         </div>
 
-        {NAV.filter((n) => (n.id !== "team" && n.id !== "approved") || isEmployer).map((n) => {
+        {NAV.filter((n) => n.id !== "team" || isEmployer).map((n) => {
           const Icon = n.icon;
           const count = navBadgeCount(n.id);
           return (
