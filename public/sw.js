@@ -67,8 +67,11 @@ self.addEventListener("notificationclick", (event) => {
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
         if ("focus" in client) {
-          client.focus();
-          return;
+          // The app is already open somewhere: tell it which page the
+          // notification was about rather than reloading it.
+          const view = new URL(targetUrl, self.location.origin).searchParams.get("view");
+          if (view) client.postMessage({ type: "open-view", view });
+          return client.focus();
         }
       }
       if (self.clients.openWindow) return self.clients.openWindow(targetUrl);

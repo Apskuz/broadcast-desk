@@ -66,8 +66,11 @@ export default async function handler(req, res) {
     if (!board) return res.status(200).json({ sent: 0 });
 
     const todayIso = new Date().toISOString().slice(0, 10);
+    // Someone who switched calendar reminders off in their settings gets no digest either.
+    const prefs = board.notificationPrefs || {};
     const dueEvents = (board.calendarEvents || []).filter(
-      (e) => e.remind && e.date === todayIso && e.assignee && e.dailyDigestSentDate !== todayIso
+      (e) => e.remind && e.date === todayIso && e.assignee && e.dailyDigestSentDate !== todayIso &&
+        !(prefs[e.assignee] && prefs[e.assignee].reminder === false)
     );
     if (dueEvents.length === 0) return res.status(200).json({ sent: 0 });
 
@@ -76,7 +79,7 @@ export default async function handler(req, res) {
 
     for (const e of dueEvents) {
       const mySubs = (subs || []).filter((s) => s.profile_name === e.assignee);
-      const payload = JSON.stringify({ title: "Today", body: `${e.title}${e.time ? ` at ${e.time}` : ""}`, url: "/" });
+      const payload = JSON.stringify({ title: "Today", body: `${e.title}${e.time ? ` at ${e.time}` : ""}`, url: "/?view=calendar" });
       await Promise.all(
         mySubs.map(async (s) => {
           try {

@@ -16,19 +16,24 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { toProfile, title, body, fromProfile } = req.body;
+    const { toProfile, title, body, fromProfile, url, exclude } = req.body;
 
     let query = supabase.from("push_subscriptions").select("*");
     if (toProfile) query = query.eq("profile_name", toProfile);
     // Broadcasting to everyone shouldn't push a lock-screen alert to the person
     // who triggered it about their own message/announcement.
     else if (fromProfile) query = query.neq("profile_name", fromProfile);
-    const { data: subs, error } = await query;
+    let { data: subs, error } = await query;
 
     if (error) return res.status(500).json({ error: error.message });
-    if (!subs || subs.length === 0) return res.status(200).json({ sent: 0 });
+    // People who switched this kind of notification off in their settings.
+    const skip = new Set(Array.isArray(exclude) ? exclude : []);
+    subs = (subs || []).filter((s) => !skip.has(s.profile_name));
+    if (subs.length === 0) return res.status(200).json({ sent: 0 });
 
-    const payload = JSON.stringify({ title, body, url: "/" });
+    // Only ever a page inside the app, so a push can't be made to open anywhere else.
+    const target = typeof url === "string" && /^\/(\?view=[a-z]+)?$/.test(url) ? url : "/";
+    const payload = JSON.stringify({ title, body, url: target });
 
     let sent = 0;
     await Promise.all(

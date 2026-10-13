@@ -20,7 +20,7 @@ import {
   LayoutDashboard, ListChecks, CalendarDays, StickyNote, Video, Lightbulb,
   BookOpen, Plus, X, ChevronLeft, ChevronRight, ThumbsUp, MessageSquare,
   Trash2, CheckCircle2, Clock, AlertTriangle, Link2, Menu, Flame,
-  Radio, Users, Pin, ExternalLink, Send, User, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
+  Radio, Users, Pin, ExternalLink, Send, Pencil, Settings, Copy, Check, Lock, Shield, RotateCw, RotateCcw, ChevronUp, ChevronDown, Bell, Image, Layers, Upload, Play, Globe, Palette, Type as TypeIcon, Folder, FolderOpen,
   Minus, ArrowRight, Square, Circle, Bold, Italic, AlignLeft, AlignCenter, AlignRight, Smile, Crop, ClipboardPaste, Pipette, Search, Play as PlayIcon, Maximize2, Scissors, PenTool, Sliders, Download, Music
 } from "lucide-react";
 
@@ -616,7 +616,7 @@ const CONTENT_STEP_TEMPLATES = {
   ],
   graphic: [
     { text: "Sketch the layout or message", tip: "One key message per graphic — resist adding more." },
-    { text: "Design the graphic", tip: "Stick to the brand fonts and colors from Guidelines." },
+    { text: "Design the graphic", tip: "Stick to the brand fonts and colors." },
     { text: "Proofread all text on it", tip: "Get a second pair of eyes — typos on graphics are highly visible." },
     { text: "Write the caption", tip: "The caption can add context the graphic doesn't have room for." },
     { text: "Final review", tip: "Export at the right size for the platform before uploading." },
@@ -625,20 +625,82 @@ const CONTENT_STEP_TEMPLATES = {
 };
 const defaultContentSteps = (format) => (CONTENT_STEP_TEMPLATES[format] || CONTENT_STEP_TEMPLATES.video).map((s) => ({ id: uid(), text: s.text, tip: s.tip, done: false }));
 
-function makeNotification({ toProfile, type, text, link, fromProfile }) {
-  return { id: uid(), toProfile: toProfile || null, type, text, link, date: todayISO(), readBy: fromProfile ? [fromProfile] : [] };
+// What a person can switch on or off for themselves. `leadsOnly` hides a row
+// from people it can never reach (only leads are told about new uploads).
+const NOTIFY_CATEGORIES = [
+  { id: "duty", label: "A duty is assigned to me" },
+  { id: "dutyNote", label: "Someone leaves a note on my duty" },
+  { id: "reminder", label: "Calendar reminders" },
+  { id: "dm", label: "Direct messages" },
+  { id: "teamChat", label: "Team Chat messages" },
+  { id: "announcement", label: "Announcements" },
+  { id: "comment", label: "Comments on my uploads" },
+  { id: "approved", label: "My content is approved" },
+  { id: "upload", label: "New uploads and versions to review", leadsOnly: true },
+];
+
+// Rows saved before categories existed only carry a type and a page, which is
+// enough to tell them apart.
+function notifCategory(n) {
+  if (n.cat) return n.cat;
+  if (n.type === "task") return "duty";
+  if (n.type === "note") return n.link === "content" ? "comment" : "dutyNote";
+  if (n.type === "message") return n.toProfile ? "dm" : "teamChat";
+  return n.type;
+}
+
+function wantsNotice(data, name, cat) {
+  const prefs = (data.notificationPrefs || {})[name];
+  return !prefs || prefs[cat] !== false;
+}
+
+// Where a notification takes you. Pages have been merged since some of these
+// rows were written, so old links are pointed at where that page lives now.
+const VIEW_ALIASES = { notes: "ideas", guidelines: "dashboard", myduties: "duties" };
+function resolveView(view) {
+  return VIEW_ALIASES[view] || view;
+}
+// Announcements used to point at the dashboard; they live on Meeting.
+const notifView = (n) => (n.type === "announcement" ? "meeting" : resolveView(n.link));
+
+// A month of notifications is plenty to catch up on; anything older only
+// makes the board, which every screen downloads, heavier.
+const NOTIFICATION_KEEP_DAYS = 30;
+
+// The one way anything tells someone something. Each notice becomes a row in
+// the bell and a lock-screen push, unless the person it is for has switched
+// that kind off. `to: null` means the whole team, minus whoever caused it.
+// Returns the board's new notification list, for the caller's own save.
+function notify(data, notices) {
+  const cutoff = addDays(-NOTIFICATION_KEEP_DAYS);
+  const rows = (data.notifications || []).filter((n) => !n.date || n.date >= cutoff);
+  const names = (data.profiles || []).map((p) => p.name);
+  for (const { to, cat, type, text, link, from, title, body } of notices) {
+    if (to && (to === from || !wantsNotice(data, to, cat))) continue;
+    rows.push({ id: uid(), toProfile: to || null, type, cat, text, link, date: todayISO(), readBy: from ? [from] : [] });
+    const exclude = to ? [] : names.filter((name) => !wantsNotice(data, name, cat));
+    sendPush(to || null, title, body, from, { link, exclude });
+  }
+  return rows;
+}
+
+// Both handing out a new duty and handing an existing one to someone else.
+function notifyAssigned(data, task, from) {
+  const text = `${from || "Someone"} assigned you: ${task.title}`;
+  return notify(data, [{ to: task.assignee, cat: "duty", type: "task", text, link: "myduties", from, title: "New duty assigned", body: text }]);
 }
 
 // Fires a real lock-screen push notification via the /api/send-push serverless function.
 // toProfile: a profile name to target one person, or null to notify everyone subscribed.
 // fromProfile: who triggered this — excluded from a broadcast so people don't get
 // pushed a lock-screen alert about their own message/announcement.
-function sendPush(toProfile, title, body, fromProfile) {
+// link: the page tapping the notification opens. exclude: names to leave out of a broadcast.
+function sendPush(toProfile, title, body, fromProfile, { link, exclude } = {}) {
   try {
     fetch("/api/send-push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ toProfile, title, body, fromProfile }),
+      body: JSON.stringify({ toProfile, title, body, fromProfile, url: link ? `/?view=${link}` : "/", exclude: exclude || [] }),
     }).catch(() => {});
   } catch {
     // push is best-effort — never block the app if it fails
@@ -661,8 +723,8 @@ function buildExamples() {
       { id: uid(), title: "Example: Shoot day", date: addDays(3), time: "16:00", type: "other", status: "planned", notes: "Bring the extra battery packs." },
     ],
     notes: [
-      { id: uid(), text: "This is a pinned note — use these for reminders the whole team should see the moment they open the app.", author: "Example", date: todayISO(), color: "gold", pinned: true },
-      { id: uid(), text: "Notes are quick and shared — good for context, not full documents. Longer references belong in Guidelines.", author: "Example", date: todayISO(), color: "teal", pinned: false },
+      { id: uid(), text: "This is a sticky note — use these for reminders and context the whole team should see.", author: "Example", date: todayISO(), color: "gold", pinned: true },
+      { id: uid(), text: "Notes are quick and shared — good for context, not full documents.", author: "Example", date: todayISO(), color: "teal", pinned: false },
     ],
     content: [
       {
@@ -1164,298 +1226,80 @@ function SlideStrip({ slides }) {
 
 /* ---------------------------------- Dashboard ---------------------------------- */
 
-function Dashboard({ data, saveData, profile, setView, isEmployer }) {
-  const { tasks, calendarEvents, notes, content } = data;
-  const [quickAdd, setQuickAdd] = useState({});
-  const [showGoals, setShowGoals] = useState(false);
-  const [goalForm, setGoalForm] = useState({ team: 6, mine: 0 });
+// Highest priority first; inside a priority, whatever is due soonest.
+const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
+const byPriority = (a, b) =>
+  (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1) ||
+  (a.dueDate || "9999").localeCompare(b.dueDate || "9999");
 
-  const openGoals = () => {
-    setGoalForm({
-      team: (data.goals && data.goals.teamWeeklyTarget) || 0,
-      mine: profile ? ((data.goals && data.goals.individualTargets && data.goals.individualTargets[profile]) || 0) : 0,
-    });
-    setShowGoals(true);
-  };
-  const saveGoals = () => {
-    saveData({
-      ...data,
-      goals: {
-        teamWeeklyTarget: Number(goalForm.team) || 0,
-        individualTargets: { ...((data.goals && data.goals.individualTargets) || {}), ...(profile ? { [profile]: Number(goalForm.mine) || 0 } : {}) },
-      },
-    });
-    setShowGoals(false);
-  };
+function Dashboard({ data, saveData, profile, setView }) {
+  const [openTaskId, setOpenTaskId] = useState(null);
+  const next = data.tasks.filter((t) => t.assignee === profile && t.status !== "done").sort(byPriority);
+  const allAssignees = [...new Set([...(data.profiles || []).map((p) => p.name), ...data.tasks.map((t) => t.assignee).filter(Boolean)])];
 
-  const addQuickTask = (member) => {
-    const title = (quickAdd[member] || "").trim();
-    if (!title) return;
-    const task = { id: uid(), title, description: "", assignee: member, dueDate: todayISO(), status: "todo", priority: "medium" };
-    saveData({ ...data, tasks: [task, ...data.tasks] });
-    setQuickAdd({ ...quickAdd, [member]: "" });
-  };
-  const done = tasks.filter((t) => t.status === "done").length;
-  const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
-  const overdueTasks = tasks.filter((t) => t.status !== "done" && daysUntil(t.dueDate) < 0);
-  const overdue = overdueTasks.length;
-
-  const myPlate = profile
-    ? tasks
-        .filter((t) => t.assignee === profile && t.status !== "done" && daysUntil(t.dueDate) <= 0)
-        .sort((a, b) => daysUntil(a.dueDate) - daysUntil(b.dueDate))
-    : [];
   const hour = new Date().getHours();
   const greeting = hour < 5 ? "Still up," : hour < 12 ? "Good morning," : hour < 18 ? "Good afternoon," : "Good evening,";
-  const inProgress = tasks.filter((t) => t.status === "progress").length;
-  const pendingReview = tasks.filter((t) => t.status === "review").length + content.filter(c=>c.status==="review").length;
 
-  const upcoming = [...calendarEvents]
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .filter((e) => daysUntil(e.date) >= -1)
-    .slice(0, 5);
-
-  const members = [...new Set(tasks.map((t) => t.assignee).filter(Boolean))];
-  const memberStats = members.map((m) => {
-    const mine = tasks.filter((t) => t.assignee === m);
-    const mdone = mine.filter((t) => t.status === "done").length;
-    return { name: m, done: mdone, total: mine.length, pct: mine.length ? Math.round((mdone / mine.length) * 100) : 0 };
+  const markDone = (t) => saveData({
+    ...data,
+    tasks: data.tasks.map((x) => (x.id === t.id ? { ...x, status: "done", completedAt: todayISO() } : x)),
   });
-
-  const recentNotes = [...notes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)).slice(0, 3);
-  const circumference = 2 * Math.PI * 50;
-
-  const weekStart = startOfWeek(new Date());
-  const weekStartIso = isoOf(weekStart);
-  const weekEndDate = new Date(weekStart); weekEndDate.setDate(weekEndDate.getDate() + 6);
-  const weekEndIso = isoOf(weekEndDate);
-  const postedThisWeek = calendarEvents.filter((e) => e.type === "post" && e.status === "posted" && e.date >= weekStartIso && e.date <= weekEndIso);
-  const teamTarget = (data.goals && data.goals.teamWeeklyTarget) || 0;
-  const teamPosted = postedThisWeek.length;
-  const myTarget = profile ? ((data.goals && data.goals.individualTargets && data.goals.individualTargets[profile]) || 0) : 0;
-  const myPosted = profile ? postedThisWeek.filter((e) => e.assignee === profile).length : 0;
+  const removeTask = (id) => {
+    const task = data.tasks.find((t) => t.id === id);
+    if (!task) return;
+    saveData({
+      ...data,
+      tasks: data.tasks.filter((t) => t.id !== id),
+      calendarEvents: (data.calendarEvents || []).filter((e) => e.taskId !== id),
+      deletedTasks: [{ ...task, deletedBy: profile || "Unknown", deletedAt: todayISO() }, ...(data.deletedTasks || [])],
+    });
+  };
 
   return (
     <div>
-      <div className="hero" style={{ display: "block", padding: "24px 28px", marginBottom: 16 }}>
-        <div className="display" style={{ fontSize: 21, fontWeight: 600 }}>{greeting} {profile || "there"}</div>
-        <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4, marginBottom: myPlate.length ? 14 : 0 }}>
-          {!profile ? "Sign in to see your own plate for today." : myPlate.length === 0 ? "Nothing due today or overdue — you're clear." : "Here's what's on your plate today:"}
+      <div className="topbar">
+        <div>
+          <div className="page-title">{greeting} {profile || "there"}</div>
+          <div className="page-sub">
+            {next.length === 0 ? "Nothing on your list — you're clear." : `Your duties, most important first · ${next.length} open`}
+          </div>
         </div>
-        {myPlate.map((t) => {
+        <button className="btn" onClick={() => setView("duties")}><ListChecks size={15} /> All duties</button>
+      </div>
+
+      <div className="card">
+        {next.length === 0 && <div className="empty">When someone assigns you a duty, it shows up here.</div>}
+        {next.map((t, i) => {
+          const p = PRIORITY.find((x) => x.id === t.priority) || PRIORITY[1];
           const ty = TASK_TYPES.find((x) => x.id === t.type) || TASK_TYPES[TASK_TYPES.length - 1];
           const TyIcon = ty.icon;
-          const late = daysUntil(t.dueDate) < 0;
+          const d = daysUntil(t.dueDate);
+          const due = !t.dueDate ? "" : d < 0 ? "Overdue" : d === 0 ? "Today" : d === 1 ? "Tomorrow" : fmtDate(t.dueDate);
           const nextStep = (t.steps || []).find((s) => !s.done);
           return (
-            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 0", borderBottom: "1px solid var(--hair)" }}>
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 0", borderBottom: i < next.length - 1 ? "1px solid var(--hair)" : "none" }}>
+              <button className="check-btn" onClick={() => markDone(t)} title="Mark done"><CheckCircle2 size={13} /></button>
               <span style={{ width: 28, height: 28, borderRadius: 7, background: ty.color + "1f", color: ty.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><TyIcon size={14} /></span>
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => setOpenTaskId(t.id)}>
                 <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ty.verb} — {t.title}</div>
                 {nextStep ? (
                   <div style={{ fontSize: 11.5, color: "var(--gold)", marginTop: 2 }}>Next: {nextStep.text}</div>
                 ) : t.description ? (
-                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{t.description}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.description}</div>
                 ) : null}
               </div>
-              {late && <span className="pill" style={{ background: "var(--alert-soft)", color: "var(--alert)" }}>Overdue</span>}
+              <span className="pill" style={{ background: p.color + "22", color: p.color }}>{p.label}</span>
+              {due && <span className="due-tag" style={{ color: d < 0 ? "var(--alert)" : d === 0 ? "var(--gold)" : "var(--muted)", minWidth: 58, textAlign: "right" }}>{due}</span>}
             </div>
           );
         })}
       </div>
 
-      {isEmployer && overdueTasks.length > 0 && (
-        <div className="card" style={{ border: "1px solid rgba(217,86,75,0.35)", marginBottom: 16 }}>
-          <div className="section-title" style={{ color: "var(--alert)" }}><AlertTriangle size={16} color="var(--alert)" /> Needs attention · {overdueTasks.length} overdue</div>
-          {overdueTasks.map((t) => (
-            <div key={t.id} style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid var(--hair)", fontSize: 13 }}>
-              <span>{t.title}</span><span style={{ color: "var(--muted)" }}>{t.assignee || "Unassigned"}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {isEmployer ? (
-        <div className="card" style={{ marginBottom: 16, padding: 0, overflow: "hidden" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 28, flexWrap: "wrap", padding: "22px 24px" }}>
-            <div className="ring-wrap" style={{ width: 88, height: 88 }}>
-              <svg width="88" height="88" viewBox="0 0 118 118">
-                <circle cx="59" cy="59" r="50" fill="none" stroke="var(--panel-raised)" strokeWidth="10" />
-                <circle
-                  cx="59" cy="59" r="50" fill="none" stroke="var(--gold)" strokeWidth="10" strokeLinecap="round"
-                  strokeDasharray={circumference} strokeDashoffset={circumference - (pct / 100) * circumference}
-                  transform="rotate(-90 59 59)" style={{ transition: "stroke-dashoffset .5s ease" }}
-                />
-              </svg>
-              <div className="ring-num"><div className="n" style={{ fontSize: 19 }}>{pct}%</div><div className="l" style={{ fontSize: 8.5 }}>On track</div></div>
-            </div>
-            <div className="hero-stats" style={{ gap: 22 }}>
-              <div className="hstat"><div className="n" style={{ fontSize: 19 }}>{tasks.length}</div><div className="l">Active duties</div></div>
-              <div className="hstat"><div className="n" style={{ fontSize: 19, color: inProgress ? "var(--gold)" : "var(--text)" }}>{inProgress}</div><div className="l">In progress</div></div>
-              <div className="hstat"><div className="n" style={{ fontSize: 19, color: pendingReview ? "var(--teal)" : "var(--text)" }}>{pendingReview}</div><div className="l">Awaiting review</div></div>
-              <div className="hstat"><div className="n" style={{ fontSize: 19, color: overdue ? "var(--alert)" : "var(--text)" }}>{overdue}</div><div className="l">Overdue</div></div>
-            </div>
-          </div>
-
-          <div style={{ borderTop: "1px solid var(--hair)", padding: "18px 24px" }}>
-            <div style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 10 }}>Content pipeline</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }}>
-              {CONTENT_STATUS.map((s) => (
-                <div key={s.id} style={{ background: "var(--panel-raised)", borderRadius: 9, padding: "10px 8px", textAlign: "center" }}>
-                  <div style={{ fontFamily: "Fraunces, serif", fontSize: 19, fontWeight: 700, color: s.color }}>{content.filter((c) => c.status === s.id).length}</div>
-                  <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>{s.label}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ borderTop: "1px solid var(--hair)", padding: "18px 24px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <div style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>This week's goals</div>
-              <button className="btn" style={{ padding: "5px 11px", fontSize: 11.5 }} onClick={openGoals}>Edit goals</button>
-            </div>
-            <div className="member-row">
-              <div className="mtop"><span style={{ fontWeight: 600 }}>Team</span><span style={{ color: "var(--muted)" }}>{teamPosted}/{teamTarget || "—"} posts</span></div>
-              <ProgressBar pct={teamTarget ? (teamPosted / teamTarget) * 100 : 0} color={teamTarget && teamPosted >= teamTarget ? "var(--good)" : "var(--gold)"} />
-            </div>
-            {profile && (
-              <div className="member-row" style={{ marginBottom: 0 }}>
-                <div className="mtop"><span style={{ fontWeight: 600 }}>{profile}</span><span style={{ color: "var(--muted)" }}>{myPosted}/{myTarget || "—"} posts</span></div>
-                <ProgressBar pct={myTarget ? (myPosted / myTarget) * 100 : 0} color={myTarget && myPosted >= myTarget ? "var(--good)" : "var(--teal)"} />
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        profile && (
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="topbar" style={{ marginBottom: 10 }}>
-              <div className="section-title" style={{ marginBottom: 0 }}>Your goal this week</div>
-              <button className="btn" style={{ padding: "5px 11px", fontSize: 11.5 }} onClick={openGoals}>Edit</button>
-            </div>
-            <div className="member-row" style={{ marginBottom: 0 }}>
-              <div className="mtop"><span style={{ fontWeight: 600 }}>{profile}</span><span style={{ color: "var(--muted)" }}>{myPosted}/{myTarget || "—"} posts</span></div>
-              <ProgressBar pct={myTarget ? (myPosted / myTarget) * 100 : 0} color={myTarget && myPosted >= myTarget ? "var(--good)" : "var(--teal)"} />
-            </div>
-          </div>
-        )
-      )}
-
-      <div className={`grid ${isEmployer ? "two-col" : ""}`}>
-        <div className="card">
-          <div className="section-title"><CalendarDays size={16} color="var(--gold)" /> Upcoming on the calendar</div>
-          {upcoming.length === 0 && <div className="empty">Nothing scheduled yet — add something on the Calendar page.</div>}
-          {upcoming.map((e) => {
-            const d = daysUntil(e.date);
-            const label = d < 0 ? "Past" : d === 0 ? "Today" : d === 1 ? "Tomorrow" : `In ${d}d`;
-            const badgeColor = d <= 0 ? "var(--alert)" : d <= 2 ? "var(--gold)" : "var(--teal)";
-            return (
-              <div className="deadline-row" key={e.id}>
-                <span className="deadline-badge" style={{ background: badgeColor + "22", color: badgeColor }}>{label}</span>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{e.title}</div>
-                  <div style={{ fontSize: 11, color: "var(--muted)" }}>{fmtDate(e.date)}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {isEmployer && (
-        <div className="card">
-          <div className="section-title"><Users size={16} color="var(--gold)" /> Team workload</div>
-          {memberStats.length === 0 && <div className="empty">Assign a duty to see workload here.</div>}
-          {memberStats.map((m) => {
-            const openTasks = tasks.filter((t) => t.assignee === m.name && t.status !== "done");
-            return (
-              <div className="member-row" key={m.name}>
-                <div className="mtop"><span className="name">{m.name}</span><span className="frac">{m.done}/{m.total}</span></div>
-                <ProgressBar pct={m.pct} color={m.pct === 100 ? "var(--good)" : "var(--gold)"} />
-                {openTasks.slice(0, 3).map((t) => (
-                  <div className="mini-task" key={t.id}>{t.title}</div>
-                ))}
-                <div className="member-add">
-                  <input
-                    placeholder={`Add a task for ${m.name}…`}
-                    value={quickAdd[m.name] || ""}
-                    onChange={(e) => setQuickAdd({ ...quickAdd, [m.name]: e.target.value })}
-                    onKeyDown={(e) => { if (e.key === "Enter") addQuickTask(m.name); }}
-                  />
-                  <button onClick={() => addQuickTask(m.name)}><Plus size={13} /></button>
-                </div>
-              </div>
-            );
-          })}
-          <div className="member-row" style={{ marginTop: memberStats.length ? 16 : 0, paddingTop: memberStats.length ? 14 : 0, borderTop: memberStats.length ? "1px solid var(--hair)" : "none" }}>
-            <div className="mtop"><span className="name" style={{ color: "var(--muted)" }}>Add someone new</span></div>
-            <div className="member-add">
-              <input
-                placeholder="Name — task title"
-                value={quickAdd.__new || ""}
-                onChange={(e) => setQuickAdd({ ...quickAdd, __new: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    const [name, ...rest] = (quickAdd.__new || "").split("-");
-                    const title = rest.join("-").trim();
-                    if (name && title) {
-                      saveData({ ...data, tasks: [{ id: uid(), title, description: "", assignee: name.trim(), dueDate: todayISO(), status: "todo", priority: "medium" }, ...data.tasks] });
-                      setQuickAdd({ ...quickAdd, __new: "" });
-                    }
-                  }
-                }}
-              />
-              <button onClick={() => {
-                const [name, ...rest] = (quickAdd.__new || "").split("-");
-                const title = rest.join("-").trim();
-                if (name && title) {
-                  saveData({ ...data, tasks: [{ id: uid(), title, description: "", assignee: name.trim(), dueDate: todayISO(), status: "todo", priority: "medium" }, ...data.tasks] });
-                  setQuickAdd({ ...quickAdd, __new: "" });
-                }
-              }}><Plus size={13} /></button>
-            </div>
-          </div>
-        </div>
-        )}
-      </div>
-
-      {data.announcements && data.announcements.length > 0 && (
-        <div className="card" style={{ marginTop: 16, borderColor: "var(--gold-soft)" }}>
-          <div className="section-title"><Radio size={16} color="var(--gold)" /> Announcements</div>
-          {[...data.announcements].reverse().slice(0, 3).map((a) => (
-            <div key={a.id} style={{ padding: "9px 0", borderBottom: "1px solid var(--hair)", fontSize: 13 }}>
-              {a.text}
-              <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{a.author} · {fmtDate(a.date)}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="section-title"><Pin size={16} color="var(--gold)" /> Pinned & recent notes</div>
-        <div className="grid notes-grid">
-          {recentNotes.map((n) => (
-            <div key={n.id} className={`note-card ${n.color || "plain"}`}>
-              <div className="note-text">{n.text}</div>
-              <div className="note-foot"><span>{n.author}</span><span>{fmtDate(n.date)}</span></div>
-            </div>
-          ))}
-          {recentNotes.length === 0 && <div className="empty">No notes yet.</div>}
-        </div>
-      </div>
-
-      {showGoals && (
-        <Modal title="Edit weekly goals" onClose={() => setShowGoals(false)}>
-          {isEmployer && (
-            <div className="field"><label>Team weekly post target</label><input type="number" min="0" value={goalForm.team} onChange={(e) => setGoalForm({ ...goalForm, team: e.target.value })} /></div>
-          )}
-          {profile && (
-            <div className="field"><label>{profile}'s personal weekly post target</label><input type="number" min="0" value={goalForm.mine} onChange={(e) => setGoalForm({ ...goalForm, mine: e.target.value })} /></div>
-          )}
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
-            Progress counts calendar events with type "Post" and status "Posted" this week (Sunday–Saturday).
-          </div>
-          <div className="modal-actions"><button className="btn" onClick={() => setShowGoals(false)}>Cancel</button><button className="btn btn-gold" onClick={saveGoals}>Save goals</button></div>
-        </Modal>
+      {openTaskId && (
+        <TaskDetailModal
+          data={data} saveData={saveData} taskId={openTaskId} onClose={() => setOpenTaskId(null)}
+          profile={profile} allAssignees={allAssignees} onDelete={removeTask} onOpenTask={(id) => setOpenTaskId(id)}
+        />
       )}
     </div>
   );
@@ -1471,12 +1315,16 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
   const [noteText, setNoteText] = useState("");
   const [localTitle, setLocalTitle] = useState(task ? task.title : "");
   const [localDescription, setLocalDescription] = useState(task ? task.description || "" : "");
+  // Held here until the field is left, so typing a name letter by letter
+  // doesn't hand the duty to "S", then "Sa", and tell each of them.
+  const [localAssignee, setLocalAssignee] = useState(task ? task.assignee || "" : "");
   const [newProjectName, setNewProjectName] = useState("");
   const [calTime, setCalTime] = useState("09:00");
 
   useEffect(() => {
     setLocalTitle(task ? task.title : "");
     setLocalDescription(task ? task.description || "" : "");
+    setLocalAssignee(task ? task.assignee || "" : "");
   }, [taskId]);
 
   const updateTask = (patch) => {
@@ -1498,6 +1346,18 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
         type: "deadline", assignee: task.assignee || "", status: "planned",
         notes: "Added from Duties",
       }],
+    });
+  };
+  const commitAssignee = () => {
+    const assignee = localAssignee.trim();
+    if (!task || assignee === (task.assignee || "")) return;
+    const next = { ...task, assignee };
+    saveData({
+      ...data,
+      tasks: data.tasks.map((t) => (t.id === taskId ? next : t)),
+      // The calendar entry for this duty reminds its owner, so it follows the duty.
+      calendarEvents: (data.calendarEvents || []).map((e) => (e.taskId === taskId ? { ...e, assignee, reminderSent: false } : e)),
+      notifications: assignee ? notifyAssigned(data, next, profile) : (data.notifications || []),
     });
   };
   const removeFromCalendar = () => {
@@ -1522,12 +1382,11 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
   const addNote = () => {
     if (!noteText.trim()) return;
     const newNotes = [...(task.notes || []), { id: uid(), author: profile || "Team", text: noteText.trim(), date: todayISO() }];
-    const notifyAssignee = task.assignee && task.assignee !== profile;
-    const notifications = notifyAssignee
-      ? [...(data.notifications || []), makeNotification({ toProfile: task.assignee, type: "note", text: `${profile || "Someone"} left a note on: ${task.title}`, link: "myduties", fromProfile: profile })]
+    const text = `${profile || "Someone"} left a note on: ${task.title}`;
+    const notifications = task.assignee
+      ? notify(data, [{ to: task.assignee, cat: "dutyNote", type: "note", text, link: "myduties", from: profile, title: "New note on your duty", body: text }])
       : (data.notifications || []);
     saveData({ ...data, tasks: data.tasks.map((t) => (t.id === taskId ? { ...t, notes: newNotes } : t)), notifications });
-    if (notifyAssignee) sendPush(task.assignee, "New note on your duty", `${profile || "Someone"} left a note on: ${task.title}`);
     setNoteText("");
   };
 
@@ -1570,7 +1429,7 @@ function TaskDetailModal({ data, saveData, taskId, onClose, profile, allAssignee
       </div>
       <div className="field-row">
         <div className="field"><label>Assignee</label>
-          <input list="detail-assignee-list" value={task.assignee || ""} onChange={(e) => updateTask({ assignee: e.target.value })} placeholder="Name" />
+          <input list="detail-assignee-list" value={localAssignee} onChange={(e) => setLocalAssignee(e.target.value)} onBlur={commitAssignee} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} placeholder="Name" />
           <datalist id="detail-assignee-list">{allAssignees.map((a) => <option value={a} key={a} />)}</datalist>
         </div>
         <div className="field"><label>Due date</label><input type="date" value={task.dueDate} onChange={(e) => updateTask({ dueDate: e.target.value })} /></div>
@@ -1734,12 +1593,8 @@ function Duties({ data, saveData, profile }) {
   const addTask = () => {
     if (!form.title.trim()) return;
     const task = { id: uid(), status: "todo", steps: defaultContentSteps(form.format), link: "", notes: [], ...form };
-    const notifyAssignee = task.assignee && task.assignee !== profile;
-    const notifications = notifyAssignee
-      ? [...(data.notifications || []), makeNotification({ toProfile: task.assignee, type: "task", text: `${profile || "Someone"} assigned you: ${task.title}`, link: "myduties", fromProfile: profile })]
-      : (data.notifications || []);
+    const notifications = task.assignee ? notifyAssigned(data, task, profile) : (data.notifications || []);
     saveData({ ...data, tasks: [task, ...data.tasks], notifications });
-    if (notifyAssignee) sendPush(task.assignee, "New duty assigned", `${profile || "Someone"} assigned you: ${task.title}`);
     setForm({ title: "", description: "", assignee: "", dueDate: todayISO(), priority: "medium", type: "other", format: "video" });
     setShowForm(false);
   };
@@ -1771,7 +1626,7 @@ function Duties({ data, saveData, profile }) {
   return (
     <div>
       <div className="topbar">
-        <div><div className="page-title">Duties</div><div className="page-sub">Assign work and track it through to done.</div></div>
+        <div><div className="page-title">Team Duties</div><div className="page-sub">Assign work and track it through to done.</div></div>
         <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Assign a duty</button>
       </div>
 
@@ -2029,10 +1884,13 @@ function Calendar({ data, saveData, profile }) {
 
   const saveEvent = () => {
     if (!form.title.trim()) return;
+    // A reminder goes to whoever the event is for, so one with nobody on it
+    // would never reach anyone. Whoever asked for the reminder gets it.
+    const event = form.remind && !form.assignee.trim() ? { ...form, assignee: profile || "" } : form;
     if (editId) {
-      saveData({ ...data, calendarEvents: data.calendarEvents.map((e) => (e.id === editId ? { ...e, ...form, reminderSent: false } : e)) });
+      saveData({ ...data, calendarEvents: data.calendarEvents.map((e) => (e.id === editId ? { ...e, ...event, reminderSent: false } : e)) });
     } else {
-      saveData({ ...data, calendarEvents: [...data.calendarEvents, { id: uid(), ...form }] });
+      saveData({ ...data, calendarEvents: [...data.calendarEvents, { id: uid(), ...event }] });
     }
     setForm({ title: "", date: form.date, time: form.time, endTime: "", type: "post", status: "planned", notes: "", assignee: "", remind: false, reminderMinutesBefore: 30 });
     setEditId(null);
@@ -2301,64 +2159,6 @@ function Calendar({ data, saveData, profile }) {
             <button className="btn" onClick={() => setShowForm(false)}>Close</button>
             <button className="btn btn-gold" onClick={saveEvent}>{editId ? "Save changes" : "Add event"}</button>
           </div>
-        </Modal>
-      )}
-    </div>
-  );
-}
-
-/* ---------------------------------- Notes ---------------------------------- */
-
-function Notes({ data, saveData }) {
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ text: "", author: "", color: "gold" });
-
-  const addNote = () => {
-    if (!form.text.trim()) return;
-    saveData({ ...data, notes: [{ id: uid(), date: todayISO(), pinned: false, ...form }, ...data.notes] });
-    setForm({ text: "", author: form.author, color: "gold" });
-    setShowForm(false);
-  };
-  const removeNote = (id) => saveData({ ...data, notes: data.notes.filter((n) => n.id !== id) });
-  const togglePin = (id) => saveData({ ...data, notes: data.notes.map((n) => (n.id === id ? { ...n, pinned: !n.pinned } : n)) });
-
-  const sorted = [...data.notes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
-
-  return (
-    <div>
-      <div className="topbar">
-        <div><div className="page-title">Notes</div><div className="page-sub">Quick context, reminders, and things worth flagging to the team.</div></div>
-        <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add note</button>
-      </div>
-      <div className="grid notes-grid">
-        {sorted.map((n) => (
-          <div key={n.id} className={`note-card ${n.color || "plain"}`}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              {n.pinned && <span style={{ fontSize: 10, color: "var(--gold)", fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><Pin size={11} /> PINNED</span>}
-              <div style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
-                <button className="icon-btn" onClick={() => togglePin(n.id)}><Pin size={13} /></button>
-                <button className="icon-btn" onClick={() => removeNote(n.id)}><Trash2 size={13} /></button>
-              </div>
-            </div>
-            <div className="note-text">{n.text}</div>
-            <div className="note-foot"><span>{n.author || "Team"}</span><span>{fmtDate(n.date)}</span></div>
-          </div>
-        ))}
-        {sorted.length === 0 && <div className="empty">No notes yet — add the first one.</div>}
-      </div>
-
-      {showForm && (
-        <Modal title="Add a note" onClose={() => setShowForm(false)}>
-          <div className="field"><label>Note</label><textarea value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} placeholder="Write something the team should know" autoFocus /></div>
-          <div className="field-row">
-            <div className="field"><label>Your name</label><input value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} placeholder="e.g. Priya" /></div>
-            <div className="field"><label>Colour</label>
-              <select value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })}>
-                <option value="gold">Gold</option><option value="teal">Teal</option><option value="alert">Red</option><option value="plain">Plain</option>
-              </select>
-            </div>
-          </div>
-          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addNote}>Add note</button></div>
         </Modal>
       )}
     </div>
@@ -2816,12 +2616,9 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     // Only the leads need to know a new piece landed — the rest of the team
     // isn't notified about every upload, just the people who need to know.
     const leads = (data.profiles || []).filter((p) => p.isLead && p.name !== profile).map((p) => p.name);
-    const notifications = [
-      ...(data.notifications || []),
-      ...leads.map((leadName) => makeNotification({ toProfile: leadName, type: "upload", text: `${profile || "Someone"} uploaded: ${item.title}`, link: "content", fromProfile: profile })),
-    ];
+    const text = `${profile || "Someone"} uploaded: ${item.title}`;
+    const notifications = notify(data, leads.map((leadName) => ({ to: leadName, cat: "upload", type: "upload", text, link: "content", from: profile, title: "New content uploaded", body: text })));
     saveData({ ...data, content: [item, ...data.content], notifications });
-    leads.forEach((leadName) => sendPush(leadName, "New content uploaded", `${profile || "Someone"} uploaded: ${item.title}`, profile));
     setForm({ title: "", platform: "Instagram", link: "", assignee: "", format: "video", mediaKind: "", slides: [] });
     setShowForm(false);
   };
@@ -2839,13 +2636,11 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
       return;
     }
     const item = data.content.find((c) => c.id === id);
-    let notifications = data.notifications || [];
-    const congratsWorthy = status === "approved" && item && item.uploadedBy && item.uploadedBy !== profile;
-    if (congratsWorthy) {
-      notifications = [...notifications, makeNotification({ toProfile: item.uploadedBy, type: "approved", text: `Your content was approved: ${item.title}`, link: "content", fromProfile: profile })];
-    }
+    const congratsWorthy = status === "approved" && item && item.uploadedBy && item.status !== "approved";
+    const notifications = congratsWorthy
+      ? notify(data, [{ to: item.uploadedBy, cat: "approved", type: "approved", text: `Your content was approved: ${item.title}`, link: "content", from: profile, title: "Content approved! 🎉", body: `"${item.title}" is ready to post.` }])
+      : (data.notifications || []);
     saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, status } : c)), notifications });
-    if (congratsWorthy) sendPush(item.uploadedBy, "Content approved! 🎉", `"${item.title}" is ready to post.`, profile);
   };
   const uploadNewVersion = (id) => {
     setVersionUploadTarget(id);
@@ -2882,16 +2677,13 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
       }
       const versions = item.link ? [...(item.versions || []), { link: item.link, slides: item.slides || [], date: todayISO(), by: profile || "", mediaKind: item.mediaKind || "video" }] : (item.versions || []);
       const leads = (data.profiles || []).filter((p) => p.isLead && p.name !== profile).map((p) => p.name);
-      const notifications = [
-        ...(data.notifications || []),
-        ...leads.map((leadName) => makeNotification({ toProfile: leadName, type: "upload", text: `${profile || "Someone"} uploaded a new version: ${item.title}`, link: "content", fromProfile: profile })),
-      ];
+      const text = `${profile || "Someone"} uploaded a new version: ${item.title}`;
+      const notifications = notify(data, leads.map((leadName) => ({ to: leadName, cat: "upload", type: "upload", text, link: "content", from: profile, title: "New version uploaded", body: text })));
       saveData({
         ...data,
         content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, mediaKind: result.kind, slides: uploaded.length > 1 ? uploaded : [], status: "review", versions, driveArchived: false } : c)),
         notifications,
       });
-      leads.forEach((leadName) => sendPush(leadName, "New version uploaded", `${profile || "Someone"} uploaded a new version: ${item.title}`, profile));
     } catch (err) {
       setVersionUploadErrorFor({ id, message: err.message || "Upload failed." });
     }
@@ -2913,16 +2705,15 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     const comment = { id: uid(), author: profile || "Someone", text: commentText, date: todayISO() };
     // Only the person whose content this is gets told about a comment on it —
     // not the whole team, and not for comments left on other people's work.
-    const notifyOwner = item && item.uploadedBy && item.uploadedBy !== profile;
-    const notifications = notifyOwner
-      ? [...(data.notifications || []), makeNotification({ toProfile: item.uploadedBy, type: "note", text: `${profile || "Someone"} commented on: ${item.title}`, link: "content", fromProfile: profile })]
+    const text = `${profile || "Someone"} commented on: ${item ? item.title : ""}`;
+    const notifications = item && item.uploadedBy
+      ? notify(data, [{ to: item.uploadedBy, cat: "comment", type: "note", text, link: "content", from: profile, title: "New comment on your upload", body: text }])
       : (data.notifications || []);
     saveData({
       ...data,
       content: data.content.map((c) => (c.id === id ? { ...c, comments: [...c.comments, comment] } : c)),
       notifications,
     });
-    if (notifyOwner) sendPush(item.uploadedBy, "New comment on your upload", `${profile || "Someone"} commented on: ${item.title}`, profile);
     setCommentText("");
   };
   const updateCaption = (id, caption) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, caption } : c)) });
@@ -6333,9 +6124,8 @@ function Meeting({ data, saveData, profile }) {
 
   const addAnnouncement = () => {
     if (!announceText.trim()) return;
-    const notifications = [...(data.notifications || []), makeNotification({ toProfile: null, type: "announcement", text: `${profile || "Team"} posted an announcement`, link: "dashboard", fromProfile: profile })];
+    const notifications = notify(data, [{ to: null, cat: "announcement", type: "announcement", text: `${profile || "Team"} posted an announcement`, link: "meeting", from: profile, title: "New announcement", body: announceText.trim().slice(0, 100) }]);
     saveData({ ...data, announcements: [...announcements, { id: uid(), text: announceText.trim(), author: profile || "Team", date: todayISO() }], notifications });
-    sendPush(null, "New announcement", announceText.trim().slice(0, 100), profile);
     setAnnounceText("");
   };
   const removeAnnouncement = (id) => saveData({ ...data, announcements: announcements.filter((a) => a.id !== id) });
@@ -6450,7 +6240,7 @@ function Meeting({ data, saveData, profile }) {
               <button className="icon-btn" onClick={() => removeAnnouncement(a.id)}><Trash2 size={13} /></button>
             </div>
           ))}
-          {announcements.length === 0 && <div className="empty">No announcements yet — post one for the team to see on the Dashboard.</div>}
+          {announcements.length === 0 && <div className="empty">No announcements yet — post one for the whole team to see.</div>}
         </div>
       </div>
 
@@ -6626,16 +6416,10 @@ function Chat({ data, saveData, profile }) {
     const summary = body || (pending.length === 1
       ? `sent ${{ video: "a video", audio: "an audio file" }[pending[0].kind] || "a picture"}`
       : `sent ${pending.length} files`);
-    let notifications = data.notifications || [];
-    if (thread === "team") {
-      notifications = [...notifications, makeNotification({ toProfile: null, type: "message", text: `${profile} in Team Chat: ${summary.slice(0, 60)}`, link: "chat", fromProfile: profile })];
-      saveData({ ...data, messages: [...messages, msg], notifications });
-      sendPush(null, `${profile} in Team Chat`, summary.slice(0, 100), profile);
-    } else {
-      notifications = [...notifications, makeNotification({ toProfile: thread, type: "message", text: `${profile} sent you a message`, link: "chat", fromProfile: profile })];
-      saveData({ ...data, messages: [...messages, msg], notifications });
-      sendPush(thread, `Message from ${profile}`, summary.slice(0, 100));
-    }
+    const notifications = notify(data, [thread === "team"
+      ? { to: null, cat: "teamChat", type: "message", text: `${profile} in Team Chat: ${summary.slice(0, 60)}`, link: "chat", from: profile, title: `${profile} in Team Chat`, body: summary.slice(0, 100) }
+      : { to: thread, cat: "dm", type: "message", text: `${profile} sent you a message`, link: "chat", from: profile, title: `Message from ${profile}`, body: summary.slice(0, 100) }]);
+    saveData({ ...data, messages: [...messages, msg], notifications });
     setText("");
     setPending([]);
     setAttachError("");
@@ -6888,267 +6672,21 @@ function ApprovedQueue({ data, saveData, profile }) {
   );
 }
 
-/* ---------------------------------- Guidelines / resources ---------------------------------- */
+/* ---------------------------------- Duties page (mine / the team's) ---------------------------------- */
 
-const MOOD_TYPES = [
-  { id: "image", label: "Picture", icon: Image },
-  { id: "color", label: "Colour", icon: Palette },
-  { id: "font", label: "Font", icon: TypeIcon },
-  { id: "note", label: "Thought", icon: StickyNote },
-];
-
-function Guidelines({ data, saveData, profile }) {
-  const [tab, setTab] = useState("moodboard"); // "moodboard" | "docs"
-
-  // ---- docs & assets (the original simple resource list) ----
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: "", description: "", link: "", category: "Guidelines" });
-
-  const addResource = () => {
-    if (!form.title.trim()) return;
-    saveData({ ...data, resources: [{ id: uid(), ...form }, ...data.resources] });
-    setForm({ title: "", description: "", link: "", category: "Guidelines" });
-    setShowForm(false);
-  };
-  const removeResource = (id) => saveData({ ...data, resources: data.resources.filter((r) => r.id !== id) });
-
-  const categories = [...new Set(data.resources.map((r) => r.category || "Other"))];
-
-  // ---- moodboard ----
-  const moodboard = data.moodboard || [];
-  const [showMoodForm, setShowMoodForm] = useState(false);
-  const [moodType, setMoodType] = useState("image");
-  const [moodForm, setMoodForm] = useState({ label: "", hex: "#C9A24B", font: "", note: "", link: "" });
-  const [moodUploading, setMoodUploading] = useState(false);
-  const [moodUploadProgress, setMoodUploadProgress] = useState(0);
-  const [moodUploadError, setMoodUploadError] = useState("");
-  const [moodUploadRetry, setMoodUploadRetry] = useState("");
-  const moodFileInputRef = useRef(null);
-
-  // Loads a font's real face from Google Fonts so its card previews accurately —
-  // falls back silently to the browser's default if the name isn't a real family.
-  useEffect(() => {
-    const fonts = moodboard.filter((m) => m.type === "font" && m.font);
-    fonts.forEach((m) => {
-      const linkId = `gf-${m.font.replace(/[^a-z0-9]/gi, "-")}`;
-      if (document.getElementById(linkId)) return;
-      const link = document.createElement("link");
-      link.id = linkId;
-      link.rel = "stylesheet";
-      link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(m.font).replace(/%20/g, "+")}:wght@400;600;700&display=swap`;
-      document.head.appendChild(link);
-    });
-  }, [moodboard]);
-
-  const handleMoodFileSelect = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    setMoodUploading(true);
-    setMoodUploadProgress(0);
-    setMoodUploadError("");
-    setMoodUploadRetry("");
-    try {
-      const result = await uploadToDrive(file, setMoodUploadProgress, profile, (attempt, max) => setMoodUploadRetry(`Connection hiccup — retrying (${attempt}/${max})…`));
-      addMoodItem({ type: "image", fileId: driveFileId(result.link), label: moodForm.label });
-      setShowMoodForm(false);
-      setMoodForm({ label: "", hex: "#C9A24B", font: "", note: "", link: "" });
-    } catch (err) {
-      setMoodUploadError(err.message || "Upload failed.");
-    }
-    setMoodUploading(false);
-    setMoodUploadRetry("");
-    e.target.value = "";
-  };
-
-  const addMoodItem = (fields) => {
-    saveData({ ...data, moodboard: [{ id: uid(), addedBy: profile || "", date: todayISO(), ...fields }, ...moodboard] });
-  };
-  const removeMoodItem = (id) => {
-    const item = moodboard.find((m) => m.id === id);
-    if (item && item.fileId) deleteDriveFile(item.fileId);
-    saveData({ ...data, moodboard: moodboard.filter((m) => m.id !== id) });
-  };
-
-  const submitMoodForm = () => {
-    if (moodType === "color") {
-      addMoodItem({ type: "color", hex: moodForm.hex, label: moodForm.label });
-    } else if (moodType === "font") {
-      if (!moodForm.font.trim()) return;
-      addMoodItem({ type: "font", font: moodForm.font.trim(), label: moodForm.label });
-    } else if (moodType === "note") {
-      if (!moodForm.note.trim()) return;
-      addMoodItem({ type: "note", note: moodForm.note.trim(), label: moodForm.label });
-    }
-    setShowMoodForm(false);
-    setMoodForm({ label: "", hex: "#C9A24B", font: "", note: "", link: "" });
-  };
-
+// One page for both, so your own list and everyone else's are a tap apart.
+function DutiesPage({ data, saveData, profile }) {
+  const [tab, setTab] = useState("mine");
+  const mineOpen = data.tasks.filter((t) => t.assignee === profile && t.status !== "done").length;
   return (
     <div>
-      <div className="topbar">
-        <div><div className="page-title">Guidelines & Resources</div><div className="page-sub">The look, the voice, and everything the team needs to stay on-brand.</div></div>
-        {tab === "moodboard" ? (
-          <button className="btn btn-gold" onClick={() => { setMoodType("image"); setShowMoodForm(true); }}><Plus size={15} /> Add to moodboard</button>
-        ) : (
-          <button className="btn btn-gold" onClick={() => setShowForm(true)}><Plus size={15} /> Add resource</button>
-        )}
+      <div className="filter-row" style={{ marginBottom: 14 }}>
+        <button className={`chip ${tab === "mine" ? "active" : ""}`} onClick={() => setTab("mine")}>My duties{mineOpen > 0 ? ` · ${mineOpen}` : ""}</button>
+        <button className={`chip ${tab === "team" ? "active" : ""}`} onClick={() => setTab("team")}>Team duties</button>
       </div>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-        <button className="btn" style={{ background: tab === "moodboard" ? "var(--gold-soft)" : undefined, borderColor: tab === "moodboard" ? "var(--gold)" : undefined, color: tab === "moodboard" ? "var(--gold)" : undefined }} onClick={() => setTab("moodboard")}>
-          <Palette size={13} /> Moodboard
-        </button>
-        <button className="btn" style={{ background: tab === "docs" ? "var(--gold-soft)" : undefined, borderColor: tab === "docs" ? "var(--gold)" : undefined, color: tab === "docs" ? "var(--gold)" : undefined }} onClick={() => setTab("docs")}>
-          <BookOpen size={13} /> Docs & Assets
-        </button>
-      </div>
-
-      {tab === "moodboard" && (
-        <div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 12 }}>
-            {moodboard.map((m) => (
-              <div key={m.id} className="card" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-                {m.type === "image" && m.fileId && (
-                  <img src={driveThumbSrc(m.fileId, "s600")} onError={hideBrokenThumb} alt={m.label || "Moodboard image"} style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block", background: "var(--panel-raised)" }} />
-                )}
-                {m.type === "color" && (
-                  <div style={{ width: "100%", aspectRatio: "1 / 1", background: m.hex }} />
-                )}
-                {m.type === "font" && (
-                  <div style={{ padding: "18px 14px 10px", minHeight: 90, display: "flex", flexDirection: "column", justifyContent: "center" }}>
-                    <div style={{ fontFamily: `"${m.font}", sans-serif`, fontSize: 30, lineHeight: 1.1, color: "var(--text)" }}>Aa Bb Cc</div>
-                  </div>
-                )}
-                {m.type === "note" && (
-                  <div style={{ padding: "16px 14px 10px", minHeight: 90 }}>
-                    <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.5, fontStyle: "italic" }}>&ldquo;{m.note}&rdquo;</div>
-                  </div>
-                )}
-                <div style={{ padding: "9px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, borderTop: "1px solid var(--hair)" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {m.label || (m.type === "color" ? m.hex : m.type === "font" ? m.font : m.type === "note" ? "Thought" : "Picture")}
-                    </div>
-                    {m.type === "color" && <div style={{ fontSize: 10, color: "var(--muted)" }} className="mono">{m.hex}</div>}
-                  </div>
-                  <button className="icon-btn" onClick={() => removeMoodItem(m.id)}><Trash2 size={12} /></button>
-                </div>
-              </div>
-            ))}
-          </div>
-          {moodboard.length === 0 && <div className="empty">Nothing on the moodboard yet — add a photo, a brand colour, a font, or a quick thought.</div>}
-        </div>
-      )}
-
-      {tab === "docs" && (
-        <div>
-          {categories.map((cat) => (
-            <div key={cat} style={{ marginBottom: 26 }}>
-              <div className="section-title"><BookOpen size={16} color="var(--gold)" /> {cat}</div>
-              <div className="grid res-grid">
-                {data.resources.filter((r) => (r.category || "Other") === cat).map((r) => (
-                  <div className="card res-card" key={r.id}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <div style={{ fontWeight: 600, fontSize: 13.5 }}>{r.title}</div>
-                      <button className="icon-btn" onClick={() => removeResource(r.id)}><Trash2 size={13} /></button>
-                    </div>
-                    {r.description && <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>{r.description}</div>}
-                    {r.link && <a href={r.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: "var(--gold)", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Link2 size={12} /> Open resource</a>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-          {data.resources.length === 0 && <div className="empty">No resources yet — add the first guideline or asset.</div>}
-        </div>
-      )}
-
-      {showForm && (
-        <Modal title="Add a resource" onClose={() => setShowForm(false)}>
-          <div className="field"><label>Title</label><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Caption Style Guide" autoFocus /></div>
-          <div className="field"><label>Description</label><textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What is this and when should the team use it?" /></div>
-          <div className="field-row">
-            <div className="field"><label>Link (optional)</label><input value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} placeholder="https://…" /></div>
-            <div className="field"><label>Category</label><input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Guidelines, Assets…" /></div>
-          </div>
-          <div className="modal-actions"><button className="btn" onClick={() => setShowForm(false)}>Cancel</button><button className="btn btn-gold" onClick={addResource}>Add resource</button></div>
-        </Modal>
-      )}
-
-      {showMoodForm && (
-        <Modal title="Add to moodboard" onClose={() => setShowMoodForm(false)}>
-          <div className="field">
-            <label>Type</label>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {MOOD_TYPES.map((t) => {
-                const TIcon = t.icon;
-                return (
-                  <button key={t.id} className="btn" style={{ flex: 1, minWidth: 80, justifyContent: "center", background: moodType === t.id ? "var(--gold-soft)" : undefined, borderColor: moodType === t.id ? "var(--gold)" : undefined, color: moodType === t.id ? "var(--gold)" : undefined }} onClick={() => setMoodType(t.id)}>
-                    <TIcon size={13} /> {t.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {moodType === "image" && (
-            <div className="field">
-              <label>Picture</label>
-              <input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="Caption (optional)" style={{ marginBottom: 8 }} />
-              <button
-                type="button"
-                className="btn"
-                style={{ width: "100%", justifyContent: "center", cursor: moodUploading ? "default" : "pointer", opacity: moodUploading ? 0.7 : 1 }}
-                onClick={() => moodFileInputRef.current && moodFileInputRef.current.click()}
-                disabled={moodUploading}
-              >
-                <Upload size={14} /> {moodUploading ? (moodUploadRetry || `Uploading… ${moodUploadProgress}%`) : "Choose a photo"}
-              </button>
-              <input ref={moodFileInputRef} type="file" accept="image/*" onChange={handleMoodFileSelect} disabled={moodUploading} style={{ display: "none" }} />
-              {moodUploading && (
-                <div className="progress-track" style={{ marginTop: 8 }}>
-                  <div className="progress-fill" style={{ width: `${moodUploadProgress}%`, background: "var(--gold)" }} />
-                </div>
-              )}
-              {moodUploadError && <div style={{ fontSize: 11.5, color: "var(--alert)", marginTop: 6 }}>{moodUploadError}</div>}
-            </div>
-          )}
-
-          {moodType === "color" && (
-            <>
-              <div className="field-row">
-                <div className="field">
-                  <label>Colour</label>
-                  <input type="color" value={moodForm.hex} onChange={(e) => setMoodForm({ ...moodForm, hex: e.target.value })} style={{ height: 40, padding: 4 }} />
-                </div>
-                <div className="field">
-                  <label>Hex</label>
-                  <input value={moodForm.hex} onChange={(e) => setMoodForm({ ...moodForm, hex: e.target.value })} placeholder="#C9A24B" />
-                </div>
-              </div>
-              <div className="field"><label>Label (optional)</label><input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="e.g. Brand gold" /></div>
-              <div className="modal-actions"><button className="btn" onClick={() => setShowMoodForm(false)}>Cancel</button><button className="btn btn-gold" onClick={submitMoodForm}>Add to moodboard</button></div>
-            </>
-          )}
-
-          {moodType === "font" && (
-            <>
-              <div className="field"><label>Font name</label><input value={moodForm.font} onChange={(e) => setMoodForm({ ...moodForm, font: e.target.value })} placeholder="e.g. Fraunces, Poppins, Inter…" autoFocus /></div>
-              <div className="field"><label>Label (optional)</label><input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="e.g. Headline font" /></div>
-              {moodForm.font.trim() && <div style={{ fontFamily: `"${moodForm.font.trim()}", sans-serif`, fontSize: 26, marginBottom: 14 }}>Aa Bb Cc</div>}
-              <div className="modal-actions"><button className="btn" onClick={() => setShowMoodForm(false)}>Cancel</button><button className="btn btn-gold" onClick={submitMoodForm}>Add to moodboard</button></div>
-            </>
-          )}
-
-          {moodType === "note" && (
-            <>
-              <div className="field"><label>Thought</label><textarea value={moodForm.note} onChange={(e) => setMoodForm({ ...moodForm, note: e.target.value })} placeholder="A direction, a reference, a feeling to chase…" autoFocus /></div>
-              <div className="field"><label>Label (optional)</label><input value={moodForm.label} onChange={(e) => setMoodForm({ ...moodForm, label: e.target.value })} placeholder="e.g. Tone of voice" /></div>
-              <div className="modal-actions"><button className="btn" onClick={() => setShowMoodForm(false)}>Cancel</button><button className="btn btn-gold" onClick={submitMoodForm}>Add to moodboard</button></div>
-            </>
-          )}
-        </Modal>
-      )}
+      {tab === "mine"
+        ? <MyDuties data={data} saveData={saveData} profile={profile} />
+        : <Duties data={data} saveData={saveData} profile={profile} />}
     </div>
   );
 }
@@ -8004,12 +7542,16 @@ function TeamManage({ data, saveData }) {
 
 /* ---------------------------------- Notification bell ---------------------------------- */
 
-function NotificationBell({ data, saveData, profile, setView }) {
+function NotificationBell({ data, saveData, profile, setView, isLead }) {
   const [open, setOpen] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [pos, setPos] = useState(null);
   const btnRef = useRef(null);
   const all = data.notifications || [];
-  const mine = all.filter((n) => n.toProfile === profile || n.toProfile === null).sort((a, b) => b.id.localeCompare(a.id));
+  // Kinds switched off in settings stay out of the bell as well as off the lock screen.
+  const mine = all
+    .filter((n) => (n.toProfile === profile || n.toProfile === null) && wantsNotice(data, profile, notifCategory(n)))
+    .sort((a, b) => b.id.localeCompare(a.id));
   const unread = mine.filter((n) => !(n.readBy || []).includes(profile));
 
   const markRead = (id) => {
@@ -8020,7 +7562,7 @@ function NotificationBell({ data, saveData, profile, setView }) {
   };
   const openNotif = (n) => {
     markRead(n.id);
-    if (n.link) setView(n.link);
+    if (n.link) setView(notifView(n));
     setOpen(false);
   };
 
@@ -8038,7 +7580,7 @@ function NotificationBell({ data, saveData, profile, setView }) {
     setOpen((o) => !o);
   };
 
-  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video, approved: CheckCircle2 };
+  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video, approved: CheckCircle2, reminder: CalendarDays };
 
   return (
     <div>
@@ -8055,7 +7597,10 @@ function NotificationBell({ data, saveData, profile, setView }) {
           <div style={{ position: "fixed", top: pos.top, left: pos.left, width: pos.width, maxHeight: "min(360px, 70vh)", overflowY: "auto", background: "var(--panel-raised)", border: "1px solid var(--hair)", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)", zIndex: 100, padding: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 6px 8px" }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Notifications</span>
-              {unread.length > 0 && <button onClick={markAllRead} style={{ fontSize: 10.5, color: "var(--gold)", background: "none", border: "none" }}>Mark all read</button>}
+              <div style={{ display: "flex", gap: 12 }}>
+                {unread.length > 0 && <button onClick={markAllRead} style={{ fontSize: 10.5, color: "var(--gold)", background: "none", border: "none" }}>Mark all read</button>}
+                <button onClick={() => { setOpen(false); setShowSettings(true); }} style={{ fontSize: 10.5, color: "var(--muted)", background: "none", border: "none", display: "flex", alignItems: "center", gap: 4 }}><Settings size={11} /> Settings</button>
+              </div>
             </div>
             {unread.length === 0 && <div className="empty" style={{ padding: "16px 6px" }}>Nothing new.</div>}
             {unread.slice(0, 25).map((n) => {
@@ -8075,7 +7620,64 @@ function NotificationBell({ data, saveData, profile, setView }) {
         </>,
         document.body
       )}
+      {/* The sidebar slides in with a transform, which would trap a fixed modal inside it too. */}
+      {showSettings && createPortal(
+        <NotificationSettings data={data} saveData={saveData} profile={profile} isLead={isLead} onClose={() => setShowSettings(false)} />,
+        document.body
+      )}
     </div>
+  );
+}
+
+function NotificationSettings({ data, saveData, profile, isLead, onClose }) {
+  const [test, setTest] = useState("");
+  const prefs = (data.notificationPrefs || {})[profile] || {};
+  const setPref = (cat, on) => saveData({
+    ...data,
+    notificationPrefs: { ...(data.notificationPrefs || {}), [profile]: { ...prefs, [cat]: on } },
+  });
+  const rows = NOTIFY_CATEGORIES.filter((c) => !c.leadsOnly || isLead);
+
+  // Goes the whole way — server, Apple or Google, this device — so a "nothing
+  // arrives" can be told apart from "this phone was never subscribed".
+  const sendTest = async () => {
+    setTest("Sending…");
+    try {
+      const res = await fetch("/api/send-push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toProfile: profile, title: "Test notification", body: "Notifications reach this device.", url: "/" }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) setTest(`The server couldn't send it: ${out.error || res.status}`);
+      else if (!out.sent) setTest("No device is signed up for you yet. Tap “Enable notifications” on each phone or computer you use.");
+      else setTest(`Sent to ${out.sent} device${out.sent === 1 ? "" : "s"}. If nothing shows up, check this device's notification settings for the app.`);
+    } catch {
+      setTest("Couldn't reach the server.");
+    }
+  };
+
+  return (
+    <Modal title="Notification settings" onClose={onClose}>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+        Choose what you hear about. Anything switched off stays out of the bell and off your lock screen. Only you see these settings.
+      </div>
+      {rows.map((c) => {
+        const on = prefs[c.id] !== false;
+        return (
+          <label key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 0", borderBottom: "1px solid var(--hair)", fontSize: 13, cursor: "pointer" }}>
+            <span>{c.label}</span>
+            <input type="checkbox" checked={on} onChange={(e) => setPref(c.id, e.target.checked)} style={{ width: 18, height: 18, accentColor: "var(--gold)", flexShrink: 0 }} />
+          </label>
+        );
+      })}
+      <div style={{ marginTop: 16 }}>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 8 }}>This device</div>
+        <PushEnableButton profile={profile} />
+        <button className="btn" style={{ width: "100%", justifyContent: "center" }} onClick={sendTest}>Send me a test notification</button>
+        {test && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>{test}</div>}
+      </div>
+    </Modal>
   );
 }
 
@@ -8167,19 +7769,30 @@ function PushEnableButton({ profile }) {
 
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "myduties", label: "My Duties", icon: User },
-  { id: "duties", label: "Team Duties", icon: ListChecks },
+  { id: "duties", label: "Duties", icon: ListChecks },
   { id: "calendar", label: "Calendar", icon: CalendarDays },
   { id: "meeting", label: "Meeting", icon: Radio },
   { id: "chat", label: "Chat", icon: MessageSquare },
-  { id: "notes", label: "Notes", icon: StickyNote },
   { id: "content", label: "Content Review", icon: Video },
   { id: "approved", label: "Approved", icon: CheckCircle2 },
   { id: "ideas", label: "Idea Bank", icon: Lightbulb },
-  { id: "guidelines", label: "Guidelines", icon: BookOpen },
   { id: "analytics", label: "Analytics", icon: AnalyticsIcon },
   { id: "team", label: "Team", icon: Shield },
 ];
+const VIEW_IDS = NAV.map((n) => n.id);
+
+// A tapped push notification opens the app on the page it was about. Read
+// once as the app loads, then taken out of the address bar so a reload
+// doesn't keep jumping back there.
+const LAUNCH_VIEW = (() => {
+  try {
+    const asked = new URLSearchParams(window.location.search).get("view");
+    if (asked) window.history.replaceState(null, "", window.location.pathname);
+    return asked && VIEW_IDS.includes(resolveView(asked)) ? resolveView(asked) : "dashboard";
+  } catch {
+    return "dashboard";
+  }
+})();
 
 /* ------------------------- shared board plumbing ------------------------- */
 
@@ -8214,10 +7827,39 @@ const BOARD_LISTS = [
   "ideaDrawings", "boardItems", "boardComments",
 ];
 
+// The Notes page is part of the Idea Bank now: every note becomes a sticky
+// note in a "Notes" folder there. Ids come from the note's own, so every
+// screen doing this as it loads makes the same folder and the same stickies,
+// and the merge lines them up rather than doubling them.
+const NOTES_FOLDER_ID = "notes-folder";
+const NOTE_COLOR_TO_STICKY = { gold: IDEA_COLORS[0], teal: IDEA_COLORS[4], alert: IDEA_COLORS[2], plain: IDEA_COLORS[3] };
+function moveNotesToIdeaBank(board) {
+  if (board.notes.length === 0) return board;
+  const count = board.ideaFolders.length;
+  const ideaFolders = board.ideaFolders.some((f) => f.id === NOTES_FOLDER_ID)
+    ? board.ideaFolders
+    : [...board.ideaFolders, { id: NOTES_FOLDER_ID, name: "Notes", x: 40 + (count % 5) * 140, y: 40 + Math.floor(count / 5) * 130, color: IDEA_COLORS[0] }];
+  const have = new Set(board.boardItems.map((b) => b.id));
+  const pinnedFirst = [...board.notes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+  const stickies = pinnedFirst
+    .map((n, i) => ({
+      id: `note-${n.id}`, folderId: NOTES_FOLDER_ID, type: "text",
+      x: 40 + (i % 6) * 220, y: 40 + Math.floor(i / 6) * 210, w: 180,
+      text: `${n.text || ""}
+— ${n.author || "Team"}`,
+      color: "#22232b", bg: NOTE_COLOR_TO_STICKY[n.color] || IDEA_COLORS[0],
+      font: "hand", fontSize: 16, align: "left",
+    }))
+    .filter((b) => !have.has(b.id));
+  return { ...board, ideaFolders, boardItems: [...board.boardItems, ...stickies], notes: [] };
+}
+
 function normalizeBoard(raw) {
   const board = { ...(raw || {}) };
   for (const key of BOARD_LISTS) if (!Array.isArray(board[key])) board[key] = [];
   board.ideas = board.ideas.map(withVoteList);
+  Object.assign(board, moveNotesToIdeaBank(board));
+  if (!board.notificationPrefs || typeof board.notificationPrefs !== "object" || Array.isArray(board.notificationPrefs)) board.notificationPrefs = {};
   if (!Array.isArray(board.boardPalette)) board.boardPalette = [];
   if (!Array.isArray(board.savedTemplates)) board.savedTemplates = [];
   if (!Array.isArray(board.boardLinks)) board.boardLinks = [];
@@ -8237,7 +7879,8 @@ function normalizeBoard(raw) {
 
 export default function TeamHub() {
   const [data, setData] = useState(null);
-  const [view, setView] = useState("dashboard");
+  const [view, setViewRaw] = useState(LAUNCH_VIEW);
+  const setView = (v) => setViewRaw(VIEW_IDS.includes(resolveView(v)) ? resolveView(v) : "dashboard");
   const [navOpen, setNavOpen] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const [loggedIn, setLoggedIn] = useState(null); // { id, name, color, pin }
@@ -8365,6 +8008,10 @@ export default function TeamHub() {
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
+      // …and when the app is already open, the service worker says which page.
+      navigator.serviceWorker.addEventListener("message", (event) => {
+        if (event.data && event.data.type === "open-view") setView(event.data.view);
+      });
     }
 
     const onRemote = (payload) => {
@@ -8474,6 +8121,7 @@ export default function TeamHub() {
       const me = loggedIn.name;
       const now = new Date();
       const fired = [];
+      const notices = [];
       for (const e of data.calendarEvents || []) {
         if (!e.remind || e.reminderSent || e.assignee !== me || !e.date) continue;
         const [h, m] = (e.time || "09:00").split(":").map(Number);
@@ -8481,7 +8129,8 @@ export default function TeamHub() {
         eventDt.setHours(h || 0, m || 0, 0, 0);
         const remindAt = new Date(eventDt.getTime() - (e.reminderMinutesBefore || 30) * 60000);
         if (now >= remindAt && now <= eventDt) {
-          sendPush(me, "Reminder", `${e.title} at ${e.time}`);
+          const text = `${e.title} at ${e.time || "09:00"}`;
+          notices.push({ to: me, cat: "reminder", type: "reminder", text: `Reminder: ${text}`, link: "calendar", title: "Reminder", body: text });
           fired.push(e.id);
         }
       }
@@ -8492,6 +8141,7 @@ export default function TeamHub() {
         saveData({
           ...data,
           calendarEvents: data.calendarEvents.map((e) => (fired.includes(e.id) ? { ...e, reminderSent: true } : e)),
+          notifications: notify(data, notices),
         });
       }
     };
@@ -8535,18 +8185,19 @@ export default function TeamHub() {
   // Unread counts shown on nav items (e.g. "Chat", "My Duties") — reuses the same
   // notification rows the bell uses, filtered to the ones that link to that page.
   const myUnreadNotifications = (data.notifications || []).filter(
-    (n) => (n.toProfile === profile || n.toProfile === null) && !(n.readBy || []).includes(profile)
+    (n) => (n.toProfile === profile || n.toProfile === null) && !(n.readBy || []).includes(profile) &&
+      wantsNotice(data, profile, notifCategory(n))
   );
   // Chat counts the messages themselves rather than the notification rows, so the
   // sidebar number keeps pace with the per-thread numbers inside Chat: it only
   // drops once a thread has actually been read, not the moment Chat is opened.
   const chatUnread = unreadChat(data, profile);
   const navBadgeCount = (navId) =>
-    navId === "chat" ? chatUnread.total : myUnreadNotifications.filter((n) => n.link === navId).length;
+    navId === "chat" ? chatUnread.total : myUnreadNotifications.filter((n) => notifView(n) === navId).length;
   const openNavItem = (navId) => {
     setView(navId);
     setNavOpen(false);
-    const idsToMark = myUnreadNotifications.filter((n) => n.link === navId).map((n) => n.id);
+    const idsToMark = myUnreadNotifications.filter((n) => notifView(n) === navId).map((n) => n.id);
     if (idsToMark.length > 0) {
       const idSet = new Set(idsToMark);
       saveData({
@@ -8559,17 +8210,14 @@ export default function TeamHub() {
   };
 
   const Comp = {
-    dashboard: <Dashboard data={data} saveData={saveData} profile={profile} setView={setView} isEmployer={isEmployer} />,
-    myduties: <MyDuties data={data} saveData={saveData} profile={profile} />,
-    duties: <Duties data={data} saveData={saveData} profile={profile} />,
+    dashboard: <Dashboard data={data} saveData={saveData} profile={profile} setView={setView} />,
+    duties: <DutiesPage data={data} saveData={saveData} profile={profile} />,
     calendar: <Calendar data={data} saveData={saveData} profile={profile} />,
     meeting: <Meeting data={data} saveData={saveData} profile={profile} />,
     chat: <Chat data={data} saveData={saveData} profile={profile} />,
-    notes: <Notes data={data} saveData={saveData} />,
     content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
     approved: <ApprovedQueue data={data} saveData={saveData} profile={profile} />,
     ideas: <IdeaBank data={data} saveData={saveData} profile={profile} />,
-    guidelines: <Guidelines data={data} saveData={saveData} profile={profile} />,
     analytics: <Analytics profile={profile} />,
     team: <TeamManage data={data} saveData={saveData} />,
   }[view];
@@ -8610,7 +8258,7 @@ export default function TeamHub() {
         </div>
 
         <div style={{ marginBottom: 8 }}>
-          <NotificationBell data={data} saveData={saveData} profile={profile} setView={setView} />
+          <NotificationBell data={data} saveData={saveData} profile={profile} setView={setView} isLead={isEmployer} />
           <PushEnableButton profile={profile} />
         </div>
 
