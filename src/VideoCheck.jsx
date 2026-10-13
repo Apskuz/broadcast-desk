@@ -13,6 +13,7 @@
 import React, { useState, useRef, useMemo, useEffect } from "react";
 import { Upload, AlertTriangle, Check, Sparkles, ArrowUpRight, ArrowDownRight, Info, Film } from "lucide-react";
 import { kindOf, median, settled } from "./igInsights";
+import { transcribe } from "./speech";
 
 /* ------------------------------- measuring -------------------------------- */
 
@@ -67,13 +68,56 @@ function lumaDiff(a, b) {
   return d / a.length;
 }
 
-async function measureAudio(file) {
-  if (file.size > 300 * 1024 * 1024) return { status: "skipped" };
+const MAX_AUDIO_BYTES = 300 * 1024 * 1024;
+
+/* A video to check: one just picked on this device, or one already in Drive,
+   streamed through our server. Either way the checker needs a URL to play
+   and, for the sound, the file's bytes. */
+export function fileSource(file) {
+  return { name: file.name, size: file.size, url: () => URL.createObjectURL(file), owned: true, bytes: () => file.arrayBuffer() };
+}
+export function driveSource(fileId, name) {
+  const url = `/api/drive-stream?fileId=${encodeURIComponent(fileId)}`;
+  return {
+    name: name || "video",
+    size: null,
+    url: () => url,
+    owned: false,
+    // The stream answers in pieces of a few MB (one response can't be bigger),
+    // so the whole file is read piece by piece.
+    bytes: async () => {
+      const parts = [];
+      let start = 0;
+      let total = null;
+      while (total == null || start < total) {
+        const res = await fetch(url, { headers: { Range: `bytes=${start}-${start + 4 * 1024 * 1024 - 1}` } });
+        if (!res.ok) throw new Error(`Couldn't read the video from Drive (${res.status}).`);
+        const range = /\/(\d+)$/.exec(res.headers.get("content-range") || "");
+        total = range ? Number(range[1]) : Number(res.headers.get("content-length") || 0);
+        if (total > MAX_AUDIO_BYTES) return null;
+        const chunk = await res.arrayBuffer();
+        if (!chunk.byteLength) break;
+        parts.push(chunk);
+        start += chunk.byteLength;
+        if (!range) break; // the server sent it whole
+      }
+      const out = new Uint8Array(start);
+      let at = 0;
+      for (const part of parts) { out.set(new Uint8Array(part), at); at += part.byteLength; }
+      return out.buffer;
+    },
+  };
+}
+
+async function measureAudio(bytes) {
+  if (!bytes) return { status: "skipped" };
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return { status: "unsupported" };
   const ctx = new AC();
   try {
-    const buf = await ctx.decodeAudioData(await file.arrayBuffer());
+    // decodeAudioData takes ownership of the buffer; hand it a copy so the
+    // same bytes can still be transcribed afterwards.
+    const buf = await ctx.decodeAudioData(bytes.slice(0));
     const ch = buf.numberOfChannels;
     const rate = buf.sampleRate;
     const win = Math.floor(rate * 0.05);
@@ -160,8 +204,9 @@ async function walkFrames(video, duration, wants, take, onProgress) {
   }
 }
 
-export async function analyzeVideo(file, onProgress) {
-  const url = URL.createObjectURL(file);
+export async function analyzeVideo(input, onProgress = () => {}) {
+  const source = input instanceof Blob ? fileSource(input) : input;
+  const url = source.url();
   const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;
@@ -223,17 +268,22 @@ export async function analyzeVideo(file, onProgress) {
     }, (f) => onProgress(0.03 + 0.8 * Math.min(1, f)));
 
     onProgress(0.86);
-    const audio = await measureAudio(file);
+    let bytes = null;
+    if (source.size == null || source.size <= MAX_AUDIO_BYTES) bytes = await source.bytes().catch(() => null);
+    const audio = await measureAudio(bytes);
     onProgress(1);
-    return summarize({ file, duration, width, height, samples, strip, keyframes, audio, step });
+    const result = summarize({ source, duration, width, height, samples, strip, keyframes, audio, step });
+    // Kept for transcribing without reading the file a second time.
+    Object.defineProperty(result, "bytes", { value: bytes, enumerable: false });
+    return result;
   } finally {
     video.removeAttribute("src");
     video.load();
-    URL.revokeObjectURL(url);
+    if (source.owned) URL.revokeObjectURL(url);
   }
 }
 
-function summarize({ file, duration, width, height, samples, strip, keyframes, audio, step }) {
+function summarize({ source, duration, width, height, samples, strip, keyframes, audio, step }) {
   const diffs = samples.slice(1).map((s) => s.diff);
   const base = median(diffs) || 0;
   const mad = median(diffs.map((d) => Math.abs(d - base))) || 1;
@@ -260,8 +310,8 @@ function summarize({ file, duration, width, height, samples, strip, keyframes, a
   const blurry = samples.filter((s) => s.sharp < sharpMedian * 0.35).length / (samples.length || 1);
 
   return {
-    name: file.name,
-    sizeMb: file.size / 1048576,
+    name: source.name,
+    sizeMb: source.size == null ? null : source.size / 1048576,
     duration, width, height,
     aspect: width / height,
     step,
@@ -294,7 +344,7 @@ const ASPECTS = {
 };
 
 // What this account's own reels say about attention, for the length advice.
-function accountContext(media) {
+export function accountContext(media) {
   const reels = media.filter((m) => kindOf(m) === "REELS" && settled(m))
     .sort((a, b) => b.posted_at.localeCompare(a.posted_at)).slice(0, 30);
   if (reels.length < 5) return null;
@@ -376,6 +426,104 @@ export function judge(a, format, context, caption) {
   return out;
 }
 
+// What the words say: when speech starts, how fast it goes, and the reminder
+// that most people will read it rather than hear it.
+export function speechFindings(sp) {
+  const out = [];
+  if (!sp) return out;
+  const add = (level, title, detail, at) => out.push({ level, area: "Speech", title, detail, at });
+  if (sp.status === "nospeech") { add("info", "No speech heard", "If there's meant to be talking, it's too quiet or buried under music."); return out; }
+  if (sp.status !== "ok") return out;
+  if (sp.firstWordAt > 1.5) add("warn", `The first word comes at ${fmtTime(sp.firstWordAt)}`, "Open with the line that makes people stay — don't warm up first.", sp.firstWordAt);
+  else add("good", "Talking starts right away", `The first words: “${sp.opening}”`, sp.firstWordAt);
+  if (sp.wordsPerMinute > 200) add("warn", `Fast: about ${sp.wordsPerMinute} words a minute`, "Hard to follow, and hard to read as subtitles. Cut words rather than speed up.");
+  else if (sp.wordsPerMinute < 100 && sp.words > 15) add("warn", `Slow: about ${sp.wordsPerMinute} words a minute`, "Tighten the pauses — a reel can carry a brisker pace than a conversation.");
+  else add("good", `Comfortable pace (${sp.wordsPerMinute} words a minute)`, "Easy to follow, and readable as subtitles.");
+  add("info", "Burn in subtitles", "Much of the feed watches with the sound off; subtitles carry the talking to them. The transcript is a starting point.");
+  return out;
+}
+
+const SPEECH_LANGS = [["auto", "Any language"], ["fi", "Finnish"], ["en", "English"]];
+
+// Transcribe button, progress and result. getBytes returns the video file's
+// bytes (or null if they can't be read).
+export function SpeechPanel({ speech, getBytes, onDone, onSeek }) {
+  const [lang, setLang] = useState("auto");
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const run = async () => {
+    setError("");
+    setBusy({ stage: "audio" });
+    try {
+      const bytes = await getBytes();
+      if (!bytes) throw new Error("The file is too large to read the sound in the browser.");
+      onDone(await transcribe(bytes, { language: lang, onProgress: setBusy }));
+    } catch (err) {
+      setError(err.message || "Couldn't transcribe this one.");
+    }
+    setBusy(null);
+  };
+  const pctDone = busy && busy.stage === "download" && busy.total ? Math.round((busy.loaded / busy.total) * 100) : null;
+  const status = !busy ? null
+    : busy.stage === "download" ? `Fetching the speech model, once on this device… ${pctDone}%`
+    : busy.stage === "listening" ? "Listening… about as long as the video, often less."
+    : "Reading the sound…";
+  return (
+    <div className="vc-speech">
+      {speech?.status === "ok" ? (
+        <>
+          <div className="vc-speech-facts">
+            <span>First word at <b>{fmtTime(speech.firstWordAt)}</b></span>
+            <span><b>{speech.wordsPerMinute}</b> words a minute</span>
+            <span><b>{speech.words}</b> words</span>
+          </div>
+          <div className="vc-transcript">
+            {(showAll ? speech.chunks : speech.chunks.slice(0, 6)).map((c, i) => (
+              <p key={i}>
+                <button className="vc-at" onClick={() => onSeek?.(c.from)} disabled={!onSeek}>{fmtTime(c.from)}</button> {c.text}
+              </p>
+            ))}
+            {speech.chunks.length > 6 ? <button className="btn btn-ghost" onClick={() => setShowAll(!showAll)}>{showAll ? "Show less" : `Show all ${speech.chunks.length} lines`}</button> : null}
+          </div>
+        </>
+      ) : speech?.status === "nospeech" ? <p className="ig-dim" style={{ margin: "0 0 8px" }}>No speech heard in this one.</p>
+        : speech?.status === "noaudio" ? <p className="ig-dim" style={{ margin: "0 0 8px" }}>This video has no sound track to transcribe.</p> : null}
+      {busy ? (
+        <div className="vc-progress"><span style={{ width: pctDone != null ? `${pctDone}%` : "100%" }} /><em>{status}</em></div>
+      ) : (
+        <div className="vc-speech-run">
+          <select value={lang} onChange={(e) => setLang(e.target.value)}>
+            {SPEECH_LANGS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+          <button className="btn" onClick={run}>{speech ? "Transcribe again" : "Transcribe the speech"}</button>
+          {!speech ? <span className="ig-dim">Runs on this device. The first time fetches an ~80 MB speech model.</span> : null}
+        </div>
+      )}
+      {error ? <div className="ig-note ig-note-bad"><AlertTriangle size={14} /> {error}</div> : null}
+    </div>
+  );
+}
+
+// Content Review: everything worth keeping from a check, small enough to store
+// on the piece itself (no pictures).
+export async function checkForUpload(source, { media, caption, format = "reel", onProgress } = {}) {
+  const a = await analyzeVideo(source, onProgress);
+  const findings = judge(a, format, accountContext(media || []), caption);
+  return {
+    stored: {
+      at: new Date().toISOString().slice(0, 10),
+      duration: Number(a.duration.toFixed(2)),
+      width: a.width,
+      height: a.height,
+      cuts: a.cuts.length,
+      loudness: a.audio.status === "ok" ? Math.round(a.audio.loudness) : null,
+      findings: findings.map(({ level, area, title, detail, at }) => ({ level, area, title, detail, at: at ?? null })),
+    },
+    bytes: a.bytes,
+  };
+}
+
 /* --------------------------------- the view -------------------------------- */
 
 const LEVEL = {
@@ -428,6 +576,7 @@ export default function VideoCheck({ media }) {
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [ai, setAi] = useState(null);
+  const [speech, setSpeech] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [dragging, setDragging] = useState(false);
   const previewRef = useRef(null);
@@ -443,6 +592,7 @@ export default function VideoCheck({ media }) {
     setError("");
     setResult(null);
     setAi(null);
+    setSpeech(null);
     setProgress(0);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(f));
@@ -454,7 +604,7 @@ export default function VideoCheck({ media }) {
     setProgress(null);
   };
 
-  const findings = useMemo(() => (result ? judge(result, format, context, caption) : []), [result, format, context, caption]);
+  const findings = useMemo(() => (result ? [...judge(result, format, context, caption), ...speechFindings(speech)] : []), [result, format, context, caption, speech]);
   const counts = findings.reduce((acc, f) => ({ ...acc, [f.level]: (acc[f.level] || 0) + 1 }), {});
   const seekTo = (t) => { if (previewRef.current) { previewRef.current.currentTime = t; previewRef.current.play().catch(() => {}); } };
 
@@ -482,6 +632,7 @@ export default function VideoCheck({ media }) {
             loops: a.loops,
           },
           checks: findings.map((f) => `${LEVEL[f.level].label}: ${f.title}`),
+          speech: speech?.status === "ok" ? { firstWordAtSec: Number(speech.firstWordAt.toFixed(1)), wordsPerMinute: speech.wordsPerMinute, transcript: speech.chunks.map((c) => `[${fmtTime(c.from)}] ${c.text}`).join("\n").slice(0, 3000) } : (speech?.status || "not transcribed"),
           account: context ? { reelsCompared: context.reels, avgWatchSec: context.watch, bestReelsWatchSec: context.topWatch, typicalReach: context.reach, bestCaptions: context.topCaptions } : null,
         }),
       });
@@ -576,11 +727,16 @@ export default function VideoCheck({ media }) {
           </section>
 
           <section className="ig-card">
+            <h3>What's said</h3>
+            <SpeechPanel speech={speech} onDone={setSpeech} onSeek={seekTo} getBytes={async () => result.bytes || (file ? file.arrayBuffer() : null)} />
+          </section>
+
+          <section className="ig-card">
             <div className="ig-card-head">
               <h3>AI review</h3>
               {ai !== "loading" ? <button className="btn btn-gold" onClick={askAi}><Sparkles size={14} /> {ai && !ai.error ? "Review again" : "Review it"}</button> : null}
             </div>
-            {!ai ? <p className="ig-dim" style={{ margin: 0 }}>Looks at eight frames (most of them from the opening seconds) together with the measurements and your caption, and judges what a measurement can't: whether the opening is interesting, whether text is readable and clear of Instagram's buttons, and what to change first.</p> : null}
+            {!ai ? <p className="ig-dim" style={{ margin: 0 }}>Looks at eight frames (most of them from the opening seconds) together with the measurements, the transcript if there is one, and your caption, and judges what a measurement can't: whether the opening is interesting, whether text is readable and clear of Instagram's buttons, and what to change first.</p> : null}
             {ai === "loading" ? <div className="ig-empty-chart">Watching the frames… this takes up to a minute.</div> : null}
             {ai?.error ? <div className="ig-note ig-note-bad"><AlertTriangle size={14} /> {ai.error}</div> : null}
             {ai && ai !== "loading" && !ai.error ? <AiFeedback result={ai} /> : null}
@@ -628,6 +784,91 @@ export function AiFeedback({ result }) {
           <ul>{result.caption_ideas.map((c) => <li key={c}>{c}</li>)}</ul>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/* ---------------------------- on a Content Review card ---------------------------- */
+
+const LEVEL_ORDER = ["bad", "warn", "info", "good"];
+
+// The check a video got when it was uploaded, on its review card: a one-line
+// tally that opens into the findings and the transcript. Older uploads, or a
+// new version, can be checked from Drive with one tap.
+export function UploadCheck({ item, fileId, getMedia, onSave }) {
+  const check = item.videoCheck || null;
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
+  const bytesRef = useRef(null);
+
+  const run = async () => {
+    setBusy(0);
+    setError("");
+    try {
+      const media = await getMedia();
+      const { stored, bytes } = await checkForUpload(driveSource(fileId, item.title), { media, caption: item.caption, onProgress: setBusy });
+      bytesRef.current = bytes;
+      onSave({ ...stored, speech: check?.speech || null });
+      setOpen(true);
+    } catch (err) {
+      setError(err.message || "Couldn't check this video.");
+    }
+    setBusy(null);
+  };
+  // Kept small: the transcript lives on the board everyone downloads.
+  const saveSpeech = (sp) => onSave({ ...check, speech: sp.status === "ok" ? { ...sp, chunks: sp.chunks.slice(0, 40), text: sp.text.slice(0, 2000) } : sp });
+
+  const findings = check ? [...check.findings, ...speechFindings(check.speech)].sort((x, y) => LEVEL_ORDER.indexOf(x.level) - LEVEL_ORDER.indexOf(y.level)) : [];
+  const counts = findings.reduce((acc, f) => ({ ...acc, [f.level]: (acc[f.level] || 0) + 1 }), {});
+
+  if (busy != null) {
+    return <div className="vc-progress" style={{ marginBottom: 12 }}><span style={{ width: `${Math.round(busy * 100)}%` }} /><em>Checking the video… {Math.round(busy * 100)}%</em></div>;
+  }
+  if (!check) {
+    return (
+      <div className="vcu">
+        <button className="btn" onClick={run}><Film size={13} /> Check this video</button>
+        <span className="ig-dim"> Opening, pace, sound and length against how long your reels are watched.</span>
+        {error ? <div className="ig-note ig-note-bad" style={{ marginTop: 8 }}><AlertTriangle size={14} /> {error}</div> : null}
+      </div>
+    );
+  }
+  return (
+    <div className="vcu">
+      <button className="vcu-head" onClick={() => setOpen(!open)}>
+        <Film size={14} />
+        <span>Video check</span>
+        <span className="vc-tally" style={{ margin: 0 }}>
+          {["bad", "warn", "good"].map((l) => (counts[l] ? <span key={l} style={{ color: LEVEL[l].color }}>{counts[l]} {LEVEL[l].label.toLowerCase()}</span> : null))}
+        </span>
+        <span className="ig-dim" style={{ marginLeft: "auto" }}>{check.duration.toFixed(1)} s · {check.width}×{check.height}{open ? " · hide" : " · show"}</span>
+      </button>
+      {open ? (
+        <>
+          <ul className="vc-findings">
+            {findings.map((f) => {
+              const L = LEVEL[f.level];
+              const Icon = L.icon;
+              return (
+                <li key={f.area + f.title}>
+                  <Icon size={15} color={L.color} />
+                  <div>
+                    <div className="vc-finding-title"><span className="vc-area">{f.area}</span>{f.title}{f.at != null ? <span className="vc-at">{fmtTime(f.at)}</span> : null}</div>
+                    <div className="ig-dim">{f.detail}</div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="vcu-speech">
+            <div className="vc-finding-title"><span className="vc-area">Speech</span>What's said</div>
+            <SpeechPanel speech={check.speech} onDone={saveSpeech} getBytes={async () => bytesRef.current || driveSource(fileId).bytes()} />
+          </div>
+          <button className="btn btn-ghost" onClick={run} style={{ marginTop: 6 }}>Check again</button>
+        </>
+      ) : null}
+      {error ? <div className="ig-note ig-note-bad" style={{ marginTop: 8 }}><AlertTriangle size={14} /> {error}</div> : null}
     </div>
   );
 }

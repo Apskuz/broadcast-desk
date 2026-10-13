@@ -4,7 +4,8 @@ import { supabase } from "./supabaseClient";
 import { mergeState, deepEqual } from "./syncState";
 import { useLiveBoard } from "./livePresence";
 import Analytics, { AnalyticsIcon, syncStoriesSoon } from "./Analytics";
-import IgPostLink from "./IgPostLink";
+import IgPostLink, { loadMedia } from "./IgPostLink";
+import { UploadCheck, checkForUpload, fileSource } from "./VideoCheck";
 import PhotoEditor from "./PhotoEditor";
 import {
   EDIT_DEFAULTS, ALL_PRESETS, fullEdit, hasEdit, trimEdit, migrateLook, editSummary,
@@ -638,6 +639,7 @@ const NOTIFY_CATEGORIES = [
   { id: "comment", label: "Comments on my uploads" },
   { id: "approved", label: "My content is approved" },
   { id: "upload", label: "New uploads and versions to review", leadsOnly: true },
+  { id: "takingOff", label: "One of our posts is taking off on Instagram" },
   { id: "weekly", label: "Weekly Instagram summary (Mondays)" },
 ];
 
@@ -2753,6 +2755,27 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
   const [versionUploadErrorFor, setVersionUploadErrorFor] = useState(null); // { id, message }
   const versionFileInputRef = useRef(null);
 
+  // Every uploaded video gets the Video check run on it in the background,
+  // from the file still on this device, while the uploader fills in the rest.
+  // It can finish before or after the piece is saved, so it's kept by the
+  // video's Drive link and written onto whichever piece ends up holding it.
+  const latestRef = useRef(null);
+  latestRef.current = { data, saveData };
+  const checksRef = useRef({}); // link -> stored check | "running"
+  const startUploadCheck = (file, link) => {
+    checksRef.current[link] = "running";
+    loadMedia()
+      .then((media) => checkForUpload(fileSource(file), { media }))
+      .then(({ stored }) => {
+        checksRef.current[link] = stored;
+        const { data: d, saveData: save } = latestRef.current;
+        if (d.content.some((c) => c.link === link && !c.videoCheck)) {
+          save({ ...d, content: d.content.map((c) => (c.link === link && !c.videoCheck ? { ...c, videoCheck: stored } : c)) });
+        }
+      })
+      .catch(() => { delete checksRef.current[link]; });
+  };
+
   // Pick one file for a single post, or several at once for a carousel — they
   // stay together as one piece, in the order they were picked.
   const handleFileSelect = async (e) => {
@@ -2779,6 +2802,7 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
     });
     if (uploaded.length) {
       const first = uploaded[0];
+      if (uploaded.length === 1 && first.kind === "video") startUploadCheck(files[0], first.link);
       setForm((f) => ({
         ...f,
         link: first.link,
@@ -2800,7 +2824,11 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
 
   const addItem = () => {
     if (!form.title.trim()) return;
-    const item = { id: uid(), status: "review", comments: [], caption: "", uploadedBy: profile || "", visibility: "private", ...form };
+    const pendingCheck = checksRef.current[form.link];
+    const item = {
+      id: uid(), status: "review", comments: [], caption: "", uploadedBy: profile || "", visibility: "private", ...form,
+      ...(pendingCheck && pendingCheck !== "running" ? { videoCheck: pendingCheck } : {}),
+    };
     // Only the leads need to know a new piece landed — the rest of the team
     // isn't notified about every upload, just the people who need to know.
     const leads = (data.profiles || []).filter((p) => p.isLead && p.name !== profile).map((p) => p.name);
@@ -2869,9 +2897,11 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
       const notifications = notify(data, leads.map((leadName) => ({ to: leadName, cat: "upload", type: "upload", text, link: "content", from: profile, title: "New version uploaded", body: text })));
       saveData({
         ...data,
-        content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, mediaKind: result.kind, slides: uploaded.length > 1 ? uploaded : [], status: "review", versions, driveArchived: false } : c)),
+        // A new version gets its own check; the old one described the old cut.
+        content: data.content.map((c) => (c.id === id ? { ...c, link: result.link, mediaKind: result.kind, slides: uploaded.length > 1 ? uploaded : [], status: "review", versions, driveArchived: false, videoCheck: null } : c)),
         notifications,
       });
+      if (uploaded.length === 1 && result.kind === "video") startUploadCheck(files[0], result.link);
     } catch (err) {
       setVersionUploadErrorFor({ id, message: err.message || "Upload failed." });
     }
@@ -3065,6 +3095,17 @@ function ContentReview({ data, saveData, profile, isEmployer }) {
                         </button>
                       )}
                     </div>
+                  )}
+                  {driveId && !isCarousel && !isPhoto && c.status !== "published" && (
+                    <UploadCheck
+                      item={c}
+                      fileId={driveId}
+                      getMedia={loadMedia}
+                      onSave={(videoCheck) => {
+                        const { data: d, saveData: save } = latestRef.current;
+                        save({ ...d, content: d.content.map((x) => (x.id === c.id ? { ...x, videoCheck } : x)) });
+                      }}
+                    />
                   )}
                   {!yt && !driveId && c.driveArchived && (
                     <div className="empty" style={{ padding: "10px 0", marginBottom: 8 }}>
@@ -6841,6 +6882,12 @@ function ApprovedQueue({ data, saveData, isEmployer, canSee }) {
               {isOpen && (
                 <div className="content-body">
                   {c.caption && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>{c.caption}</div>}
+                  {driveId && !isCarousel && !isPhotoItem(c) && (
+                    <UploadCheck
+                      item={c} fileId={driveId} getMedia={loadMedia}
+                      onSave={(videoCheck) => saveData({ ...data, content: data.content.map((x) => (x.id === c.id ? { ...x, videoCheck } : x)) })}
+                    />
+                  )}
                   {isCarousel ? (
                     <SlideStrip slides={c.slides} />
                   ) : driveId && isPhotoItem(c) ? (
@@ -6888,6 +6935,7 @@ function PublishedList({ data, saveData, canSee }) {
   const [open, setOpen] = useState(null);
   const published = data.content.filter((c) => c.status === "published" && canSee(c)).reverse();
   const linkedIds = new Set(data.content.map((c) => c.igMediaId).filter(Boolean));
+  const linkedLengths = Object.fromEntries(data.content.filter((c) => c.igMediaId && c.videoCheck?.duration).map((c) => [c.igMediaId, c.videoCheck.duration]));
   const linkPost = (id, igMediaId) => saveData({ ...data, content: data.content.map((c) => (c.id === id ? { ...c, igMediaId } : c)) });
   // Analytics lives on another page; leave it the post to open and go there.
   const openInAnalytics = (igMediaId) => {
@@ -6920,7 +6968,7 @@ function PublishedList({ data, saveData, canSee }) {
                 <ChevronRight size={14} color="var(--muted)" style={{ transform: isOpen ? "rotate(90deg)" : "none" }} />
               </div>
               <div style={{ padding: "0 14px 12px" }}>
-                <IgPostLink item={c} linkedIds={linkedIds} onLink={(igId) => linkPost(c.id, igId)} onOpen={openInAnalytics} />
+                <IgPostLink item={c} linkedIds={linkedIds} linkedLengths={linkedLengths} onLink={(igId) => linkPost(c.id, igId)} onOpen={openInAnalytics} />
               </div>
               {isOpen && (
                 <div className="content-body">
@@ -7850,7 +7898,7 @@ function NotificationBell({ data, saveData, profile, setView, isLead }) {
     setOpen((o) => !o);
   };
 
-  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video, approved: CheckCircle2, reminder: CalendarDays, weekly: AnalyticsIcon };
+  const ICONS = { task: ListChecks, note: MessageSquare, announcement: Radio, message: Send, upload: Video, approved: CheckCircle2, reminder: CalendarDays, weekly: AnalyticsIcon, takingOff: Flame };
 
   return (
     <div>
@@ -8496,7 +8544,7 @@ export default function TeamHub() {
     chat: <Chat data={data} saveData={saveData} profile={profile} />,
     content: <ContentReview data={data} saveData={saveData} profile={profile} isEmployer={isEmployer} />,
     ideas: <IdeaBank data={data} saveData={saveData} profile={profile} />,
-    analytics: <Analytics profile={profile} />,
+    analytics: <Analytics profile={profile} data={data} saveData={saveData} />,
     team: <TeamManage data={data} saveData={saveData} />,
   }[view];
 

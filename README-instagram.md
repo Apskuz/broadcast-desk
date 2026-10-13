@@ -151,10 +151,34 @@ switched "Weekly Instagram summary" off in their notification settings.
 still up, and the app asks for a story-only sync (`/api/instagram-sync?stories=1`)
 at most every two hours from each device while someone has it open.
 
+**"Taking off" alerts.** Whenever stories sync (every couple of hours while the
+app is open) and nightly, posts from the last 48 hours get fresh numbers. A post
+that has already reached twice what this account's posts of the same kind
+usually end up with (and at least 300 accounts) is announced once, by push and
+in the bell. People can switch it off in notification settings.
+
+**Benchmarks.** Analytics → Benchmarks compares the account with up to eight
+others through Meta's Business Discovery. That only works for Business or
+Creator accounts and only exposes public numbers (followers, likes, comments),
+so both sides are compared on those. The nightly sync records their follower
+counts on the board (`igBenchmarkHistory`) so growth shows after a few days.
+It's served from `/api/instagram-status?benchmarks=…`, because Vercel's Hobby
+plan allows 12 functions and this project uses all 12. Add new server code to
+an existing function or to `lib/`, never as a new file in `api/`.
+
+**Video check on uploads, and speech.** Every single-video upload to Content
+Review is checked in the browser while the uploader fills in the form, and the
+findings are saved on the piece. Older pieces can be checked from Drive with one
+tap. "Transcribe the speech" runs Whisper in the browser (about 80 MB, downloaded
+once per device). The transcript is saved on the piece and goes to the AI
+review. Once a published piece is linked to its Instagram post, the check's
+video length turns Instagram's average watch time into a completion rate.
+
 ## 6. AI review (optional)
 
 The "AI read" on a post and the AI review in Video check send the post's cover
-image, or eight still frames of a video, together with the numbers, to Claude.
+image, or eight still frames of a video, together with the numbers and any
+transcript, to Claude.
 Add `ANTHROPIC_API_KEY` (from console.anthropic.com) to Vercel → Settings →
 Environment Variables and redeploy. Without it, everything else still works and
 those buttons say the key is missing. A review costs a few cents. The video

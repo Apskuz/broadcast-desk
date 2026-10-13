@@ -20,6 +20,8 @@ import {
   engagementRate, peersFor, relativeReach, captionStats, postingTimes, slotFor, formatComparison, DAY_NAMES, TIME_BLOCKS,
 } from "./igInsights";
 import VideoCheck, { AiFeedback } from "./VideoCheck";
+import Benchmarks from "./Benchmarks";
+import { completion } from "./IgPostLink";
 import "./analytics.css";
 
 /* --------------------------------- palette --------------------------------
@@ -482,7 +484,7 @@ function PercentBar({ pct }) {
   );
 }
 
-function PostReview({ post, media, times, list, onSelect, onClose }) {
+function PostReview({ post, media, times, list, onSelect, onClose, content }) {
   const [history, setHistory] = useState(null);
   const [ai, setAi] = useState(null); // null | "loading" | { error } | result
   const index = list.findIndex((m) => m.id === post.id);
@@ -516,6 +518,10 @@ function PostReview({ post, media, times, list, onSelect, onClose }) {
   const enough = review.peers >= MIN_PEERS;
   const reachRow = review.rows.find((r) => r.key === "reach");
   const advice = captionAdvice(review.caption);
+  // The upload this post came from knows the video's length, which Instagram
+  // doesn't report — so only linked, checked uploads have a completion rate.
+  const linkedPiece = (content || []).find((c) => c.igMediaId === post.id && c.videoCheck?.duration);
+  const watched = completion(post, linkedPiece?.videoCheck?.duration);
 
   // One point per day: the latest snapshot of each day, and what each day added.
   const daily = useMemo(() => {
@@ -545,7 +551,10 @@ function PostReview({ post, media, times, list, onSelect, onClose }) {
           format: formatOf(post),
           postedAt: post.posted_at,
           slot: slot ? `${slot.day} ${slot.block}${slot.n >= 3 && slot.value ? `, a slot that usually gets ${slot.value.toFixed(2)}x typical reach` : ""}` : null,
-          measures: review.rows.map((r) => ({ label: r.label, value: r.format(r.value), typical: r.format(r.typical), betterThanPct: r.pct == null ? null : Math.round(r.pct) })),
+          measures: [
+            ...review.rows.map((r) => ({ label: r.label, value: r.format(r.value), typical: r.format(r.typical), betterThanPct: r.pct == null ? null : Math.round(r.pct) })),
+            ...(watched != null ? [{ label: "Share of the video watched on average", value: `${Math.round(watched * 100)}% of ${linkedPiece.videoCheck.duration.toFixed(1)} s`, typical: null, betterThanPct: null }] : []),
+          ],
           rank: enough ? `#${review.rank} of ${review.rankOf} by reach` : null,
           bestCaptions: review.best.map((m) => (m.caption || "").slice(0, 300)),
         }),
@@ -652,6 +661,12 @@ function PostReview({ post, media, times, list, onSelect, onClose }) {
                 <div className="ig-review-stat">
                   <div className="ig-dim">Avg watch</div>
                   <div className="ig-review-stat-value">{watchTime(post.avg_watch_time_ms)}</div>
+                </div>
+              ) : null}
+              {watched != null ? (
+                <div className="ig-review-stat" title={`${watchTime(post.avg_watch_time_ms)} of a ${linkedPiece.videoCheck.duration.toFixed(1)} s video`}>
+                  <div className="ig-dim">Watched through</div>
+                  <div className="ig-review-stat-value">{Math.round(watched * 100)}%</div>
                 </div>
               ) : null}
             </div>
@@ -1054,7 +1069,7 @@ const RANGES = [
   { label: "90 days", days: 90 },
 ];
 
-export default function Analytics({ profile }) {
+export default function Analytics({ profile, data, saveData }) {
   const [days, setDays] = useState(30);
   const [status, setStatus] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -1200,6 +1215,7 @@ export default function Analytics({ profile }) {
   ), [demo, demoBreak]);
 
   const times = useMemo(() => postingTimes(media), [media]);
+  const standalone = tab === "video" || tab === "bench";
   const formats = useMemo(() => formatComparison(media), [media]);
   const narrow = useNarrow();
 
@@ -1343,12 +1359,15 @@ export default function Analytics({ profile }) {
           <button className={tab === "video" ? "on" : ""} onClick={() => setTab("video")}>
             <Film size={13} /> Video check
           </button>
+          <button className={tab === "bench" ? "on" : ""} onClick={() => setTab("bench")}>
+            <Users size={13} /> Benchmarks
+          </button>
         </div>
       </div>
 
-      {loading && tab !== "video" ? <div className="ig-empty-chart">Loading…</div> : null}
+      {loading && !standalone ? <div className="ig-empty-chart">Loading…</div> : null}
 
-      {!loading && !account.length && !media.length && !error && tab !== "video" ? (
+      {!loading && !account.length && !media.length && !error && !standalone ? (
         <div className="ig-connect">
           <Instagram size={26} strokeWidth={1.5} />
           <h3 className="display">No data collected yet</h3>
@@ -1360,8 +1379,9 @@ export default function Analytics({ profile }) {
       ) : null}
 
       {tab === "video" ? <VideoCheck media={media} /> : null}
+      {tab === "bench" ? <Benchmarks data={data} saveData={saveData} /> : null}
 
-      {!loading && (account.length > 0 || media.length > 0) && tab !== "video" ? (
+      {!loading && (account.length > 0 || media.length > 0) && !standalone ? (
         <>
           {/* The one hero figure for this view. */}
           {totals.followers != null ? (
@@ -1444,7 +1464,7 @@ export default function Analytics({ profile }) {
 
       {selected ? (
         <PostReview
-          post={selected} media={media} times={times}
+          post={selected} media={media} times={times} content={data?.content}
           list={inRange.some((m) => m.id === selected.id) ? inRange : media}
           onSelect={setSelected} onClose={closeReview}
         />

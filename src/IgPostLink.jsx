@@ -5,12 +5,20 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ExternalLink, Link2, X, BarChart3 } from "lucide-react";
 import { supabase } from "./supabaseClient";
-import { relativeReach, matchScore, ageDays, kindOf } from "./igInsights";
+import { relativeReach, matchScore, ageDays, kindOf, median } from "./igInsights";
+
+// How far through the video people get, on average: Instagram's average watch
+// time over the video's length. Instagram itself never reports this — it
+// doesn't know the length — but the upload's video check does.
+export function completion(post, seconds) {
+  if (!post || !seconds || !post.avg_watch_time_ms) return null;
+  return Math.min(1.5, post.avg_watch_time_ms / 1000 / seconds);
+}
 
 // One load for every card on the page, refreshed at most every five minutes.
 let cache = null;
 let cachedAt = 0;
-function loadMedia() {
+export function loadMedia() {
   if (!cache || Date.now() - cachedAt > 300000) {
     cachedAt = Date.now();
     cache = supabase.from("ig_media_latest").select("*").order("posted_at", { ascending: false }).range(0, 1999)
@@ -33,12 +41,21 @@ function useIgMedia() {
 const n = (v) => (v == null ? "—" : Math.round(v).toLocaleString());
 const thumb = (m) => m.thumbnail_url || m.media_url;
 
-export default function IgPostLink({ item, linkedIds, onLink, onOpen }) {
+export default function IgPostLink({ item, linkedIds, linkedLengths = {}, onLink, onOpen }) {
   const media = useIgMedia();
   const [picking, setPicking] = useState(false);
 
   const post = media && item.igMediaId ? media.find((m) => m.id === item.igMediaId) : null;
   const rel = useMemo(() => (post && media ? relativeReach(post, media) : null), [post, media]);
+  const done = completion(post, item.videoCheck?.duration);
+  // The team's usual, across every linked piece whose length is known.
+  const typicalDone = useMemo(() => {
+    if (!media) return null;
+    const all = Object.entries(linkedLengths)
+      .filter(([id]) => id !== item.igMediaId)
+      .map(([id, secs]) => completion(media.find((m) => m.id === id), secs));
+    return all.filter((v) => v != null).length >= 3 ? median(all) : null;
+  }, [media, linkedLengths, item.igMediaId]);
   const candidates = useMemo(() => {
     if (!media || item.igMediaId) return [];
     return media
@@ -75,6 +92,19 @@ export default function IgPostLink({ item, linkedIds, onLink, onOpen }) {
             <span><b>{n(post.shares)}</b> shares</span>
             {post.avg_watch_time_ms ? <span><b>{(post.avg_watch_time_ms / 1000).toFixed(1)} s</b> avg watch</span> : null}
           </div>
+        ) : null}
+        {done != null ? (
+          <div className="igl-done">
+            <div className="igl-done-bar"><span style={{ width: `${Math.min(100, done * 100)}%` }} /></div>
+            <span>
+              Watched <b>{Math.round(done * 100)}%</b> of the way through on average
+              ({(post.avg_watch_time_ms / 1000).toFixed(1)} s of {item.videoCheck.duration.toFixed(1)} s)
+              {done > 1 ? " — people rewatch it" : ""}
+              {typicalDone != null ? <span className="igl-dim"> · your usual {Math.round(typicalDone * 100)}%</span> : null}
+            </span>
+          </div>
+        ) : kindOf(post) === "REELS" && post.avg_watch_time_ms && !item.videoCheck ? (
+          <div className="igl-dim" style={{ marginBottom: 8 }}>How far people watch shows here for videos checked when they were uploaded.</div>
         ) : null}
         <div className="igl-actions">
           <button className="btn" onClick={() => onOpen(post.id)}><BarChart3 size={13} /> Full analytics</button>

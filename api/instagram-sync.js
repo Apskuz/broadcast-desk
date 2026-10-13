@@ -14,7 +14,10 @@
 //     metric fails the WHOLE call, so each call falls back to a smaller metric
 //     set rather than losing the day's data entirely.
 import { createClient } from "@supabase/supabase-js";
+import webpush from "web-push";
 import { GRAPH_VERSION } from "./instagram-connect.js";
+import { patchBoard, rowId, mutedFor } from "../lib/board.js";
+import { discover } from "../lib/benchmarks.js";
 
 export const config = { maxDuration: 60 };
 
@@ -275,6 +278,121 @@ async function syncStories(supabase, account, token, report) {
   report.storyInsights = rows.length;
 }
 
+// "Taking off": a post from the last two days that has already reached twice
+// what this account's posts of the same kind usually end up with. Checked on
+// every story run (every couple of hours while the app is open) and nightly,
+// so the team hears while there's still time to push it — share it to the
+// story, reply to the comments. Each post is announced once.
+const median = (values) => {
+  const v = values.filter((x) => typeof x === "number").sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+};
+
+async function checkTakingOff(supabase, account, token, report) {
+  const since = new Date(Date.now() - 48 * 3600000).toISOString();
+  const { data: recent } = await supabase.from("ig_media")
+    .select("id, media_product_type, caption, posted_at, permalink")
+    .eq("ig_user_id", account.ig_user_id).gte("posted_at", since);
+  const posts = (recent || []).filter((m) => m.media_product_type !== "STORY");
+  if (!posts.length) return;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const settledBefore = new Date(Date.now() - 3 * 86400000).toISOString();
+  const alerts = [];
+  for (const m of posts) {
+    const kind = m.media_product_type || "FEED";
+    const ins = await fetchInsights(m.id, kind, token);
+    if (!ins || ins.reach == null) continue;
+    // Fresh numbers while we're here; the same one-row-per-day key as tonight's.
+    await supabase.from("ig_media_snapshots").upsert({
+      media_id: m.id, captured_at: `${today}T12:00:00.000Z`,
+      views: ins.views ?? null, reach: ins.reach ?? null, likes: ins.likes ?? null, comments: ins.comments ?? null,
+      saved: ins.saved ?? null, shares: ins.shares ?? null, total_interactions: ins.total_interactions ?? null,
+      follows: ins.follows ?? null, profile_visits: ins.profile_visits ?? null,
+      avg_watch_time_ms: ins.ig_reels_avg_watch_time ?? null, total_watch_time_ms: ins.ig_reels_video_view_total_time ?? null,
+    }, { onConflict: "media_id,captured_at" });
+
+    let peers = supabase.from("ig_media_latest").select("reach")
+      .eq("ig_user_id", account.ig_user_id).lt("posted_at", settledBefore).not("reach", "is", null)
+      .order("posted_at", { ascending: false }).limit(30);
+    peers = kind === "REELS" ? peers.eq("media_product_type", "REELS") : peers.neq("media_product_type", "REELS").neq("media_product_type", "STORY");
+    const { data: peerRows } = await peers;
+    const typical = median((peerRows || []).map((r) => r.reach));
+    if (!typical || (peerRows || []).length < 5) continue;
+    const ratio = ins.reach / typical;
+    // A floor so a quiet week's 2x of a tiny number doesn't ring the bell.
+    if (ratio >= 2 && ins.reach >= 300) alerts.push({ m, ratio, reach: ins.reach, hours: Math.max(1, Math.round((Date.now() - Date.parse(m.posted_at)) / 3600000)), noun: kind === "REELS" ? "reel" : "post" });
+  }
+  report.takingOffChecked = posts.length;
+  if (!alerts.length) return;
+
+  let fresh = [];
+  await patchBoard(supabase, (board) => {
+    const sent = new Set(board.igTakingOffSent || []);
+    fresh = alerts.filter((a) => !sent.has(a.m.id));
+    if (!fresh.length) return null;
+    const rows = fresh.map((a) => ({
+      id: rowId(), toProfile: null, type: "takingOff", cat: "takingOff",
+      text: `Taking off: "${(a.m.caption || "untitled").replace(/\s+/g, " ").slice(0, 50)}" has ${a.ratio.toFixed(1)}× your usual ${a.noun} reach after ${a.hours} h`,
+      link: "analytics", date: new Date().toISOString().slice(0, 10), readBy: [],
+    }));
+    return {
+      ...board,
+      igTakingOffSent: [...sent, ...fresh.map((a) => a.m.id)].slice(-200),
+      notifications: [...(board.notifications || []), ...rows],
+    };
+  });
+  if (!fresh.length) return;
+  report.takingOff = fresh.length;
+
+  if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) return;
+  webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:admin@example.com", process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+  const { data: board } = await supabase.from("hub_state").select("data").eq("id", "main").maybeSingle();
+  const muted = mutedFor((board && board.data) || {}, "takingOff");
+  const { data: subs } = await supabase.from("push_subscriptions").select("*");
+  for (const a of fresh) {
+    const payload = JSON.stringify({
+      title: `Taking off: ${a.ratio.toFixed(1)}× your usual reach`,
+      body: `"${(a.m.caption || "Your latest " + a.noun).replace(/\s+/g, " ").slice(0, 70)}" — share it to your story while it's moving.`,
+      url: "/?view=analytics",
+    });
+    await Promise.all((subs || []).filter((x) => !muted.has(x.profile_name)).map(async (x) => {
+      try {
+        await webpush.sendNotification({ endpoint: x.endpoint, keys: { p256dh: x.p256dh, auth: x.auth } }, payload);
+      } catch (err) {
+        if (err.statusCode === 404 || err.statusCode === 410) await supabase.from("push_subscriptions").delete().eq("endpoint", x.endpoint);
+      }
+    }));
+  }
+}
+
+// Benchmark accounts' follower counts, once a night, so the Benchmarks tab
+// can show how fast they grow and not just where they are.
+async function recordBenchmarks(supabase, account, report) {
+  const { data: row } = await supabase.from("hub_state").select("data").eq("id", "main").maybeSingle();
+  const names = ((row && row.data && row.data.igBenchmarks) || []).slice(0, 8);
+  if (!names.length) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const counts = {};
+  for (const username of names) {
+    try {
+      const d = await discover(account, username, { posts: 0 });
+      if (typeof d.followers === "number") counts[username.toLowerCase()] = d.followers;
+    } catch { /* renamed or went private; the tab says so when it asks */ }
+  }
+  await patchBoard(supabase, (board) => {
+    const history = { ...(board.igBenchmarkHistory || {}) };
+    for (const [u, followers] of Object.entries(counts)) {
+      const list = (history[u] || []).filter((p) => p[0] !== today);
+      history[u] = [...list, [today, followers]].slice(-400);
+    }
+    return { ...board, igBenchmarkHistory: history };
+  });
+  report.benchmarks = Object.keys(counts).length;
+}
+
 // Account-level daily numbers. Meta keeps 90 days but serves only 30 per call,
 // so the first run walks back in chunks and later runs just top up.
 async function syncAccount(supabase, account, token, report) {
@@ -475,6 +593,7 @@ export default async function handler(req, res) {
     for (const account of accounts || []) {
       const report = { account: account.username || account.ig_user_id, storiesSeen: 0, storyInsights: 0, errors: [] };
       try { await syncStories(supabase, account, account.access_token, report); } catch (err) { report.errors.push(err.message); }
+      try { await checkTakingOff(supabase, account, account.access_token, report); } catch (err) { report.errors.push(`taking off: ${err.message}`); }
       reports.push(report);
     }
     return res.status(200).json({ ok: true, reports });
@@ -504,6 +623,8 @@ export default async function handler(req, res) {
       await syncAccount(supabase, account, token, report);
       await syncDemographics(supabase, account, token, report);
       try { await syncStories(supabase, account, token, report); } catch (err) { report.errors.push(`stories: ${err.message}`); }
+      try { await checkTakingOff(supabase, account, token, report); } catch (err) { report.errors.push(`taking off: ${err.message}`); }
+      try { await recordBenchmarks(supabase, { ...account, access_token: token }, report); } catch (err) { report.errors.push(`benchmarks: ${err.message}`); }
     } catch (err) {
       report.errors.push(err.message);
     }

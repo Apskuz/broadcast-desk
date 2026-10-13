@@ -91,6 +91,9 @@ function videoContent(body) {
       `This is a ${body.format === "feed" ? "feed video" : body.format === "story" ? "story" : "reel"} that hasn't been posted yet.`,
       `Measurements: ${JSON.stringify(body.stats || {})}`,
       body.checks?.length ? `Automatic checks already shown to the team:\n- ${body.checks.slice(0, 30).join("\n- ")}` : "",
+      body.speech && typeof body.speech === "object"
+        ? `What's said (transcribed on the device, so expect a few misheard words): first word at ${body.speech.firstWordAtSec}s, ${body.speech.wordsPerMinute} words a minute.\n${String(body.speech.transcript || "").slice(0, 3000)}`
+        : `Speech: ${body.speech || "not transcribed"}.`,
       body.account ? `The account's own reels: ${JSON.stringify(body.account)}` : "There isn't enough account history to compare against.",
       `Planned caption: ${body.caption ? JSON.stringify(String(body.caption).slice(0, 2200)) : "(none yet)"}`,
       "Review it. Add what the automatic checks can't see rather than repeating them.",
