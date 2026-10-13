@@ -1117,7 +1117,12 @@ body{ font-family:'Inter',sans-serif; color:var(--text); background:var(--ink); 
   .sidebar{ position:fixed; left:0; top:0; height:100vh; transform:translateX(-100%); transition:transform .2s; }
   .sidebar.open{ transform:translateX(0); }
   .menu-toggle{ display:flex; }
-  .main{ padding:22px 18px 50px; }
+  /* Room above the page for the fixed menu button, which sat on the title. */
+  .main{ padding:66px 18px 50px; }
+  /* Date, start and end in one row left each about 90px — too narrow for a
+     phone's date picker. Let them wrap onto a second line instead. */
+  .field-row{ flex-wrap:wrap; }
+  .field-row .field{ min-width:130px; }
 
   /* A seventh of a phone screen is about 35px, which fits three characters —
      wrapping inside that just breaks words in half. So the month grid keeps a
@@ -1843,6 +1848,119 @@ function isoOf(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// The hours a timeline shows: the usual working day, stretched to take in
+// anything booked earlier or later — an 06:30 shoot used to fall off the top.
+function timelineHours(events) {
+  let first = WEEK_HOURS[0];
+  let last = WEEK_HOURS[WEEK_HOURS.length - 1];
+  for (const e of events) {
+    const { startMin, endMin } = eventMinutes(e);
+    first = Math.min(first, Math.floor(startMin / 60));
+    last = Math.max(last, Math.min(23, Math.ceil(endMin / 60) - 1));
+  }
+  return Array.from({ length: last - first + 1 }, (_, i) => first + i);
+}
+
+const byTime = (a, b) => (a.time || "").localeCompare(b.time || "");
+
+// Left/right swipes step through weeks or months, the way a phone calendar
+// does. Vertical scrolling is left alone: only a mostly-sideways flick counts.
+function useSwipe(onLeft, onRight) {
+  const start = useRef(null);
+  return {
+    onTouchStart: (e) => { const t = e.touches[0]; start.current = { x: t.clientX, y: t.clientY }; },
+    onTouchEnd: (e) => {
+      if (!start.current) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - start.current.x;
+      const dy = t.clientY - start.current.y;
+      start.current = null;
+      if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      if (dx < 0) onLeft(); else onRight();
+    },
+  };
+}
+
+// Up to three coloured dots under a date — one per event, in the colour of
+// whoever it's for — so a busy day shows at a glance without any text.
+function DayDots({ events, profiles }) {
+  if (!events || events.length === 0) return <div style={{ height: 6 }} />;
+  return (
+    <div style={{ display: "flex", gap: 3, justifyContent: "center", height: 6 }}>
+      {events.slice(0, 3).map((e) => (
+        <span key={e.id} style={{ width: 5, height: 5, borderRadius: "50%", background: personColor(e.assignee, profiles), opacity: calStatus(e).done || calStatus(e).dismissed ? 0.4 : 1 }} />
+      ))}
+      {events.length > 3 && <span style={{ fontSize: 8, lineHeight: "6px", color: "var(--muted)" }}>+</span>}
+    </div>
+  );
+}
+
+// Notes the app writes itself when it puts something on the calendar. They
+// say where an event came from, which isn't worth a line on a phone.
+const AUTO_EVENT_NOTES = ["Added from Duties", "Scheduled from Content Review"];
+
+// One event as a card wide enough to read: the whole title, the time, who
+// it's for and the note — what the week grid squeezed into 40px.
+function AgendaEvent({ e, profiles, onOpen, onToggle }) {
+  const st = calStatus(e);
+  return (
+    <div
+      onClick={() => onOpen(e)}
+      style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "12px 12px", background: "var(--panel-raised)", borderRadius: 10, borderLeft: `4px solid ${personColor(e.assignee, profiles)}`, cursor: "pointer", marginBottom: 8, ...doneStyle(st) }}
+    >
+      <div style={{ width: 46, flexShrink: 0, fontSize: 12.5, fontWeight: 700, lineHeight: 1.35 }}>
+        {e.time || "—"}
+        {e.endTime && <div style={{ fontSize: 11, fontWeight: 500, color: "var(--muted)" }}>{e.endTime}</div>}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.35, overflowWrap: "anywhere" }}>{e.title}</div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {e.assignee && <span>{e.assignee}</span>}
+          <span style={{ color: st.color }}>{st.label}</span>
+          {e.remind && <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><Bell size={10} /> {e.reminderMinutesBefore || 30} min</span>}
+        </div>
+        {e.notes && !AUTO_EVENT_NOTES.includes(e.notes) && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.4, overflowWrap: "anywhere" }}>{e.notes}</div>}
+      </div>
+      <span style={{ fontSize: 15, color: st.color, paddingTop: 1 }}><EventMark status={st} size={15} onToggle={() => onToggle(e)} /></span>
+    </div>
+  );
+}
+
+// The selected day as a list, followed by what's coming after it, so the
+// phone view answers both "what's today" and "what's next".
+function PhoneAgenda({ dayIso, eventsByDate, profiles, onOpen, onToggle, onAdd }) {
+  const dayEvents = [...(eventsByDate[dayIso] || [])].sort(byTime);
+  const dayLabel = new Date(dayIso + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  const later = Object.keys(eventsByDate)
+    .filter((iso) => iso > dayIso)
+    .sort()
+    .flatMap((iso) => [...eventsByDate[iso]].sort(byTime))
+    .slice(0, 6);
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{dayIso === todayISO() ? `Today · ${dayLabel}` : dayLabel}</div>
+        <button className="btn-ghost btn" style={{ padding: "5px 8px", fontSize: 12 }} onClick={() => onAdd(dayIso)}><Plus size={13} /> Add</button>
+      </div>
+      {dayEvents.length === 0 && <div className="empty" style={{ padding: "14px 0" }}>Nothing on this day.</div>}
+      {dayEvents.map((e) => <AgendaEvent key={e.id} e={e} profiles={profiles} onOpen={onOpen} onToggle={onToggle} />)}
+
+      {later.length > 0 && (
+        <>
+          <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, margin: "18px 0 8px" }}>Coming up</div>
+          {later.map((e) => (
+            <div key={e.id} onClick={() => onOpen(e)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 2px", borderBottom: "1px solid var(--hair)", cursor: "pointer", fontSize: 12.5, ...doneStyle(calStatus(e)) }}>
+              <span style={{ width: 4, alignSelf: "stretch", borderRadius: 2, background: personColor(e.assignee, profiles), flexShrink: 0 }} />
+              <span style={{ width: 74, flexShrink: 0, color: "var(--muted)" }}>{new Date(e.date + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.time ? `${e.time} · ` : ""}{e.title}</span>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 function Calendar({ data, saveData, profile }) {
   // Tapping the mark flips just that event between done and planned. Going
   // back lands on "Planned" rather than whatever it was before — the previous
@@ -1923,11 +2041,18 @@ function Calendar({ data, saveData, profile }) {
   const weekLabel = `${weekDays[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${weekDays[6].toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
 
   const stepWeek = (dir) => { const d = new Date(cursor); d.setDate(d.getDate() + dir * 7); setCursor(d); };
+  const stepDay = (dir) => { const d = new Date(cursor); d.setDate(d.getDate() + dir); setCursor(d); };
+  const stepMonth = (dir) => setCursor(new Date(year, month + dir, 1));
+  const step = (dir) => (mode === "day" ? stepDay(dir) : mode === "month" ? stepMonth(dir) : stepWeek(dir));
+  const swipe = useSwipe(() => step(1), () => step(-1));
+  const weekHours = timelineHours(weekDays.flatMap((d) => eventsByDate[isoOf(d)] || []));
+  const selectedIso = isoOf(cursor);
+  const toggleEvent = (e) => toggleDone(e);
 
   return (
     <div>
       <div className="topbar">
-        <div><div className="page-title">Calendar</div><div className="page-sub">Posting dates, deadlines, and meetings — by day and time.</div></div>
+        <div><div className="page-title">Calendar</div>{!isNarrow && <div className="page-sub">Posting dates, deadlines, and meetings — by day and time.</div>}</div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div className="view-toggle">
             <button className={mode === "day" ? "active" : ""} onClick={() => setMode("day")}>Day</button>
@@ -1937,15 +2062,74 @@ function Calendar({ data, saveData, profile }) {
           {profile && (
             <button className={`chip ${justMine ? "active" : ""}`} onClick={() => setJustMine(!justMine)}>Just mine</button>
           )}
-          <button className="btn" onClick={() => saveData({ ...data, calendarEvents: [...data.calendarEvents, ...buildExamples().calendarEvents] })}>See example events</button>
-          <button className="btn btn-gold" onClick={() => openAdd(todayISO())}><Plus size={15} /> Add event</button>
+          {!isNarrow && <button className="btn" onClick={() => saveData({ ...data, calendarEvents: [...data.calendarEvents, ...buildExamples().calendarEvents] })}>See example events</button>}
+          {isNarrow ? (
+            <button className="btn btn-gold" style={{ padding: "8px 10px" }} onClick={() => openAdd(selectedIso)} aria-label="Add event"><Plus size={16} /></button>
+          ) : (
+            <button className="btn btn-gold" onClick={() => openAdd(todayISO())}><Plus size={15} /> Add event</button>
+          )}
         </div>
       </div>
 
-      {mode === "day" ? (
-        <div className="card">
+      {isNarrow && mode !== "day" ? (
+        <div>
+          <div className="card" style={{ padding: 14, touchAction: "pan-y" }} {...swipe}>
+            <div className="cal-head" style={{ marginBottom: 12 }}>
+              <div className="cal-month display" style={{ minWidth: 0, textAlign: "left", fontSize: 15 }}>
+                {mode === "month" ? monthLabel : cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
+              </div>
+              <div className="cal-nav" style={{ gap: 4 }}>
+                <button className="btn-ghost btn" style={{ padding: 8 }} onClick={() => step(-1)} aria-label="Previous"><ChevronLeft size={17} /></button>
+                <button className="btn-ghost btn" style={{ padding: "6px 10px", fontSize: 12 }} onClick={() => setCursor(new Date())}>Today</button>
+                <button className="btn-ghost btn" style={{ padding: 8 }} onClick={() => step(1)} aria-label="Next"><ChevronRight size={17} /></button>
+              </div>
+            </div>
+            {mode === "month" ? (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2 }}>
+                {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i} className="cal-dow" style={{ paddingBottom: 6 }}>{d}</div>)}
+                {cells.map((cell, i) => {
+                  if (!cell.iso) return <div key={i} />;
+                  const picked = cell.iso === selectedIso;
+                  const today = cell.iso === todayISO();
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => setCursor(new Date(cell.iso + "T00:00:00"))}
+                      style={{ background: picked ? "var(--gold)" : "transparent", color: picked ? "#171812" : today ? "var(--gold)" : "var(--text)", border: today && !picked ? "1px solid var(--gold)" : "1px solid transparent", borderRadius: 9, padding: "7px 0 5px", fontSize: 13.5, fontWeight: picked || today ? 700 : 500, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}
+                    >
+                      {cell.day}
+                      <DayDots events={eventsByDate[cell.iso]} profiles={data.profiles} />
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
+                {weekDays.map((d) => {
+                  const iso = isoOf(d);
+                  const picked = iso === selectedIso;
+                  const today = iso === todayISO();
+                  return (
+                    <button
+                      key={iso}
+                      onClick={() => setCursor(d)}
+                      style={{ background: picked ? "var(--gold)" : "var(--panel-raised)", color: picked ? "#171812" : "var(--text)", border: today && !picked ? "1px solid var(--gold)" : "1px solid transparent", borderRadius: 10, padding: "8px 0 7px", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}
+                    >
+                      <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", opacity: picked ? 0.8 : 0.6 }}>{d.toLocaleDateString(undefined, { weekday: "narrow" })}</span>
+                      <span style={{ fontSize: 16, fontWeight: 700, color: today && !picked ? "var(--gold)" : undefined }}>{d.getDate()}</span>
+                      <DayDots events={eventsByDate[iso]} profiles={data.profiles} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <PhoneAgenda dayIso={selectedIso} eventsByDate={eventsByDate} profiles={data.profiles} onOpen={openEdit} onToggle={toggleEvent} onAdd={(iso) => openAdd(iso)} />
+        </div>
+      ) : mode === "day" ? (
+        <div className="card" {...(isNarrow ? swipe : {})} style={isNarrow ? { padding: 14, touchAction: "pan-y" } : undefined}>
           <div className="cal-head">
-            <div className="cal-month display">{cursor.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</div>
+            <div className="cal-month display" style={isNarrow ? { minWidth: 0, textAlign: "left", fontSize: 15 } : undefined}>{cursor.toLocaleDateString(undefined, isNarrow ? { weekday: "short", month: "short", day: "numeric" } : { weekday: "long", month: "long", day: "numeric" })}</div>
             <div className="cal-nav">
               <button className="btn-ghost btn" onClick={() => { const d = new Date(cursor); d.setDate(d.getDate() - 1); setCursor(d); }}><ChevronLeft size={16} /></button>
               <button className="btn-ghost btn" onClick={() => setCursor(new Date())}>Today</button>
@@ -1956,17 +2140,18 @@ function Calendar({ data, saveData, profile }) {
             const dayIso = isoOf(cursor);
             const dayEvents = eventsByDate[dayIso] || [];
             const laidOut = layoutDayEvents(dayEvents);
-            const totalHeight = WEEK_HOURS.length * hourHeight;
-            const gridStartMin = WEEK_HOURS[0] * 60;
+            const hours = timelineHours(dayEvents);
+            const totalHeight = hours.length * hourHeight;
+            const gridStartMin = hours[0] * 60;
             return (
               <div style={{ display: "flex" }}>
                 <div style={{ width: 52, flexShrink: 0 }}>
-                  {WEEK_HOURS.map((h) => (
+                  {hours.map((h) => (
                     <div key={h} style={{ height: hourHeight, fontSize: 10.5, color: "var(--muted)", textAlign: "right", paddingRight: 8, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
                   ))}
                 </div>
                 <div style={{ position: "relative", flex: 1, height: totalHeight, borderLeft: "1px solid var(--hair)" }}>
-                  {WEEK_HOURS.map((h, hi) => (
+                  {hours.map((h, hi) => (
                     <div
                       key={h}
                       onClick={() => openAdd(dayIso, `${String(h).padStart(2, "0")}:00`)}
@@ -2057,18 +2242,18 @@ function Calendar({ data, saveData, profile }) {
               );
             })}
             <div className="week-time-col">
-              {WEEK_HOURS.map((h) => (
+              {weekHours.map((h) => (
                 <div key={h} style={{ height: hourHeight, fontSize: 9.5, color: "var(--muted)", textAlign: "right", paddingRight: 6, borderTop: "1px solid var(--hair)" }}>{String(h).padStart(2, "0")}:00</div>
               ))}
             </div>
             {weekDays.map((d) => {
               const iso = isoOf(d);
               const laidOut = layoutDayEvents(eventsByDate[iso] || []);
-              const totalHeight = WEEK_HOURS.length * hourHeight;
-              const gridStartMin = WEEK_HOURS[0] * 60;
+              const totalHeight = weekHours.length * hourHeight;
+              const gridStartMin = weekHours[0] * 60;
               return (
                 <div key={iso} style={{ position: "relative", height: totalHeight, borderLeft: "1px solid var(--hair)" }}>
-                  {WEEK_HOURS.map((h, hi) => (
+                  {weekHours.map((h, hi) => (
                     <div
                       key={h}
                       onClick={() => openAdd(iso, `${String(h).padStart(2, "0")}:00`)}
